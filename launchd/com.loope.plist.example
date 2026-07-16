@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd supervision for the loope daemon. Copy to
+  ~/Library/LaunchAgents/com.loope.plist, replace every /ABSOLUTE/PATH and
+  YOU placeholder, then:
+      launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.loope.plist
+  Stop with:
+      launchctl bootout gui/$UID/com.loope
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.loope</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/ABSOLUTE/PATH/TO/loope</string>
+		<string>-serve</string>
+		<string>-config</string>
+		<string>/ABSOLUTE/PATH/TO/loope.json</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/YOU/Library/Logs/loope/loope.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOU/Library/Logs/loope/loope.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- launchd does not inherit your shell PATH: git, gh, and claude
+		     must resolve from here. Adjust for your install locations. -->
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>HOME</key>
+		<string>/Users/YOU</string>
+	</dict>
+</dict>
+</plist>

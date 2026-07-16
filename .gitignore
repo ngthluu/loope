@@ -1,0 +1,12 @@
+# compiled binary (matches the module/dir name)
+/loope
+
+# local config (may contain repo paths / slugs)
+/loope.json
+
+# goreleaser build output
+/dist/
+
+.DS_Store
+
+.worktrees/

@@ -1,0 +1,20 @@
+{
+  "repoPath": "/Users/you/src/your-repo",
+  "repoSlug": "your-org/your-repo",
+  "eligibleLabel": "ai-agent",
+  "pollIntervalSec": 60,
+  "ticketsPerCycle": 3,
+  "workDir": "~/.loope/worktrees",
+  "personaPath": "~/.loope/persona.md",
+  "claudeConfigDir": "~/.claude-personal",
+  "maxQARounds": 20,
+  "confidenceThreshold": 70,
+  "stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info"},
+  "githubRetry": {"maxAttempts": 0, "baseDelaySec": 2, "maxDelaySec": 60},
+  "models": {
+    "architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100},
+    "answerer":  {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 5},
+    "triage":    {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 1, "maxTurns": 5},
+    "execute":   {"model": "opus", "effort": "high", "maxBudgetUSD": 40, "maxTurns": 400}
+  }
+}
