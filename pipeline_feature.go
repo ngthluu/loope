@@ -256,81 +256,38 @@ func readPersona(path string) string {
 }
 
 func brainstormPrompt(issue string, threshold int) string {
-	confidence := ""
-	if threshold > 0 {
-		confidence = fmt.Sprintf(`
-
-Before anything else, assess how confidently this issue can be implemented as
-written and print %s <0-100> as the FIRST line of your reply. If that score is
-below %d, the issue is too under-specified or ambiguous to implement
-responsibly: do NOT design or write a spec. Instead, list what is missing and
-the specific questions the author must answer, then stop.`, confidenceSentinel, threshold)
-	}
-	return fmt.Sprintf(`/superpowers:brainstorming %s%s
-
-HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions as plain text (AskUserQuestion is disabled).
-Follow the brainstorming flow to a committed spec: clarifying questions, design,
-then write and commit the spec document into this branch. Do NOT invoke the
-writing-plans skill — a separate session writes the implementation plan.
-When the spec file is written and committed, print %s <path> on its own line,
-where <path> is the spec file path relative to the repository root.
-
-If during brainstorming you determine the feature is already fully implemented
-in this codebase, do not invent work: print %s <one-sentence reason> on its own
-line instead of continuing.`, issue, confidence, specReadySentinel, alreadyDoneSentinel)
+	d := promptData()
+	d["Issue"] = issue
+	d["Threshold"] = threshold
+	return mustRender("brainstorm.md.tmpl", d)
 }
 
 func answererPrompt(issue, persona, architectMsg string) string {
-	return fmt.Sprintf(`You are the product owner's proxy in an automated development pipeline.
-
-The GitHub issue being implemented:
-%s
-
-Product owner preferences (persona):
-%s
-
-The architect agent said:
-%s
-
-Instructions: if the architect asked questions, answer them decisively.
-If it presented a design or spec for approval, approve it or give concise feedback.
-Reply with your answer only.`, issue, persona, architectMsg)
+	d := promptData()
+	d["Issue"] = issue
+	d["Persona"] = persona
+	d["ArchitectMsg"] = architectMsg
+	return mustRender("answerer.md.tmpl", d)
 }
 
 const doneConfirmSentinel = "DONE_CONFIRMED"
 
 func doneConfirmPrompt(issue, persona, reason string) string {
-	return fmt.Sprintf(`You are the product owner's proxy in an automated development pipeline.
-
-The GitHub issue being implemented:
-%s
-
-Product owner preferences (persona):
-%s
-
-The architect claims this issue is ALREADY fully implemented, for this reason:
-%s
-
-Instructions: judge whether that claim is consistent with the issue and the
-product owner's intent. If you agree the work is already done, reply with
-exactly %s and nothing else. If you disagree or have doubts, do NOT print that
-token — instead reply with one concise sentence telling the architect what is
-still missing or must be designed.`, issue, persona, reason, doneConfirmSentinel)
+	d := promptData()
+	d["Issue"] = issue
+	d["Persona"] = persona
+	d["Reason"] = reason
+	return mustRender("done-confirm.md.tmpl", d)
 }
 
 func planPrompt(specPath string) string {
-	return fmt.Sprintf(`/superpowers:writing-plans Read the approved spec at %s and
-write a detailed implementation plan for it. Commit the plan into this branch.
-HEADLESS MODE: do not ask questions; the spec is approved and complete — make
-reasonable calls and note any assumptions in the plan.
-When the implementation plan file is written and committed, print %s on its own
-line.`, specPath, readySentinel)
+	d := promptData()
+	d["SpecPath"] = specPath
+	return mustRender("plan.md.tmpl", d)
 }
 
 func executePrompt(planPath string) string {
-	return fmt.Sprintf(`/superpowers:executing-plans Execute the plan at %s.
-Use the execution style the plan recommends (subagent-driven or inline).
-Follow TDD per the plan. Commit as you complete tasks.
-HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.`, planPath)
+	d := promptData()
+	d["PlanPath"] = planPath
+	return mustRender("execute.md.tmpl", d)
 }

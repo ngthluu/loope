@@ -1,0 +1,27 @@
+{{define "pickup"}}🤖 Picked up ({{.Kind}} flow). Branch: `{{.Branch}}`{{end}}
+
+{{define "already-done"}}🤖 Already implemented — closing. {{.Reason}}{{end}}
+
+{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Please clarify and remove the `{{.Label}}` label to re-queue:
+
+{{.Feedback}}{{end}}
+
+{{define "park"}}🤖 Parked for rework — run `loop -rework {{.Number}} -config <cfg>`.{{if .Guidance}}
+{{.Guidance}}{{end}}{{if .Error}}
+Error: {{.Error}}{{end}}{{end}}
+
+{{define "pr-comment"}}🤖 PR: {{.URL}}{{end}}
+
+{{define "pr-title"}}{{.Title}} (#{{.Number}}){{end}}
+
+{{define "pr-body"}}Closes #{{.Number}}
+
+Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in this branch under docs/.{{end}}
+
+{{define "guidance-usage-limit"}}Cause: Claude usage/rate limit — the loop auto-resumes it (with backoff) once the limit resets.{{end}}
+
+{{define "guidance-budget"}}Cause: hit the turn/budget ceiling mid-run — the loop auto-resumes where it stopped (raise the execute maxTurns/maxBudgetUSD if this recurs).{{end}}
+
+{{define "guidance-interrupted"}}Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session.{{end}}
+
+{{define "guidance-network"}}Cause: network outage — the loop auto-resumes when connectivity returns.{{end}}
