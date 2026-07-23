@@ -6,11 +6,11 @@ import (
 	"net/http"
 )
 
-// webFS carries the dashboard's static assets into the binary, so a release
-// stays a single file and the assets cannot be missing at runtime. web/static
-// is served over HTTP; the templates join this tree in the next commit.
+// webFS carries the dashboard's templates and static assets into the binary, so
+// a release stays a single file and the assets cannot be missing at runtime.
+// Templates are parsed from it at startup; web/static is served over HTTP.
 //
-//go:embed web/static
+//go:embed web/templates web/static
 var webFS embed.FS
 
 // staticSub is the web/static subtree rooted at its own directory, so an HTTP

@@ -1,0 +1,26 @@
+{{define "rail"}}
+ <div id="railmeta" hidden data-tickets="{{.Stats.Tickets}}" data-running="{{.Stats.Running}}" data-spend="{{dollars .Stats.Spend}}"></div>
+ <div class="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-panel px-4 py-2.5">
+  <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">queue · {{.Stats.Tickets}}</span>
+  <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">cost</span>
+ </div>
+ {{if .GHError}}<div class="border-b border-warn/25 bg-warn/[0.07] px-4 py-2 font-mono text-[11px] leading-snug text-warn/90">GitHub unreachable — showing local logs only.</div>{{end}}
+ {{range .Tickets}}
+  {{$sel := and $.Selected (eq .Number $.Selected.Number)}}
+  {{$k := stateKind .StateLabel}}
+  <a href="/?issue={{.Number}}" data-k="t{{.Number}}" class="group relative block border-b border-line/60 pl-4 pr-3.5 py-3 {{if $sel}}bg-panel2{{else}}hover:bg-panel2/50{{end}}">
+   <span class="absolute inset-y-0 left-0 w-[3px] {{stripeClass .StateLabel}}"></span>
+   <div class="flex items-start justify-between gap-3">
+    <div class="min-w-0">
+     <div class="flex items-center gap-2">
+      <span class="font-mono text-[11px] font-semibold {{if $sel}}text-live{{else}}text-muted{{end}}">#{{.Number}}</span>
+      {{if $k}}<span class="inline-flex items-center gap-1 rounded-sm border px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide {{if eq $k "done"}}border-ok/25 bg-ok/[0.13] text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>{{end}}{{$k}}</span>{{end}}
+     </div>
+     <div class="mt-1.5 line-clamp-2 min-h-[34px] text-[13px] font-medium leading-[17px] text-text/90">{{if .Title}}{{.Title}}{{else}}#{{.Number}} · awaiting GitHub title{{end}}</div>
+     <div class="mt-1.5 font-mono text-[10px] uppercase tracking-wide text-faint">{{if .Kind}}{{.Kind}} · {{end}}{{len .Steps}} step{{if ne (len .Steps) 1}}s{{end}}</div>
+    </div>
+    <span class="shrink-0 font-mono text-[13px] tabular-nums {{if eq $k "done"}}font-semibold text-ok{{else if $sel}}font-semibold text-text{{else}}text-muted{{end}}">{{money .TotalCost}}</span>
+   </div>
+  </a>
+ {{else}}<div class="px-4 py-8 text-center font-mono text-[11px] leading-relaxed text-faint">No tickets in flight.<br>The loop hasn't picked up any labeled issues yet.</div>{{end}}
+{{end}}

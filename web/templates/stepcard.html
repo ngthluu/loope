@@ -1,0 +1,41 @@
+{{define "stepcard"}}<div class="fadein overflow-hidden rounded-md {{cardClass .Status}}">
+ <div class="flex items-center gap-3 px-4 py-2.5">
+  <span class="w-7 shrink-0 font-mono text-[11px] tabular-nums text-faint">{{printf "%03d" .Seq}}</span>
+  <span class="truncate text-[13px] font-medium text-text">{{.Label}}</span>
+  {{statusChip .Status}}
+  <div class="ml-auto flex items-center gap-4">
+   {{if hasUsage .}}<span class="hidden font-mono text-[11px] text-faint lg:inline" title="context in · output out · turns">&darr;{{tokens (ctxTokens .)}} &uarr;{{tokens .OutputTokens}} · {{.NumTurns}}t</span>{{end}}
+   {{if .SessionID}}<span class="hidden font-mono text-[11px] {{if eq .Status "error"}}text-err/60{{else}}text-faint{{end}} md:inline">{{short 8 .SessionID}}</span>{{end}}
+   <span class="w-14 text-right font-mono text-[13px] tabular-nums {{if eq .Status "error"}}text-err{{else}}text-muted{{end}}">{{money .Cost}}</span>
+  </div>
+ </div>
+ {{if or .Prompt .Output (eq .Status "running") (hasUsage .) .Transcript}}
+ <div class="border-t {{divClass .Status}} px-4">
+  {{if .Transcript}}<details data-disc="{{.Seq}}-transcript" class="group"{{if eq .Status "running"}} open{{end}}>
+   <summary class="flex cursor-pointer items-center gap-2 py-1.5 text-muted hover:text-text"><svg class="chev h-3 w-3 shrink-0 text-faint transition-transform" viewBox="0 0 12 12" fill="none"><path d="M4.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="font-mono text-[10px] uppercase tracking-wider">transcript</span></summary>
+   <div class="txfeed scroll mb-2.5 max-h-72 space-y-1 overflow-auto rounded border border-line bg-ink px-3.5 py-3 font-mono text-[12px] leading-relaxed" data-seq="{{.Seq}}">
+    {{range .Transcript}}{{txLine .}}{{end}}
+   </div>
+  </details>{{end}}
+  {{if .Prompt}}<details data-disc="{{.Seq}}-prompt" class="group"{{if eq .Status "running"}} open{{end}}>
+   <summary class="flex cursor-pointer items-center gap-2 py-1.5 text-muted hover:text-text"><svg class="chev h-3 w-3 shrink-0 text-faint transition-transform" viewBox="0 0 12 12" fill="none"><path d="M4.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="font-mono text-[10px] uppercase tracking-wider">prompt</span></summary>
+   <pre class="scroll mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-line bg-ink px-3.5 py-3 font-mono text-[12px] leading-relaxed text-muted">{{.Prompt}}</pre>
+  </details>{{end}}
+  {{if .Output}}<details data-disc="{{.Seq}}-output" class="group {{if .Prompt}}border-t border-line/50{{end}}"{{if eq .Status "error"}} open{{end}}>
+   <summary class="flex cursor-pointer items-center gap-2 py-1.5 text-muted hover:text-text"><svg class="chev h-3 w-3 shrink-0 text-faint transition-transform" viewBox="0 0 12 12" fill="none"><path d="M4.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="font-mono text-[10px] uppercase tracking-wider">output</span></summary>
+   <pre class="scroll mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border {{if eq .Status "error"}}border-err/25 text-err/80{{else}}border-line text-muted{{end}} bg-ink px-3.5 py-3 font-mono text-[12px] leading-relaxed">{{.Output}}</pre>
+  </details>{{end}}
+  {{if hasUsage .}}<details data-disc="{{.Seq}}-usage" class="group {{if or .Prompt .Output}}border-t border-line/50{{end}}">
+   <summary class="flex cursor-pointer items-center gap-2 py-1.5 text-muted hover:text-text"><svg class="chev h-3 w-3 shrink-0 text-faint transition-transform" viewBox="0 0 12 12" fill="none"><path d="M4.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="font-mono text-[10px] uppercase tracking-wider">usage</span></summary>
+   <dl class="mb-2.5 grid grid-cols-2 gap-x-6 gap-y-1 rounded border border-line bg-ink px-3.5 py-3 font-mono text-[11px] text-muted sm:grid-cols-3">
+    <div class="flex justify-between gap-3"><dt>input</dt><dd class="tabular-nums text-text">{{tokens .InputTokens}}</dd></div>
+    <div class="flex justify-between gap-3"><dt>cache-create</dt><dd class="tabular-nums text-text">{{tokens .CacheCreationTokens}}</dd></div>
+    <div class="flex justify-between gap-3"><dt>cache-read</dt><dd class="tabular-nums text-text">{{tokens .CacheReadTokens}}</dd></div>
+    <div class="flex justify-between gap-3"><dt>output</dt><dd class="tabular-nums text-text">{{tokens .OutputTokens}}</dd></div>
+    <div class="flex justify-between gap-3"><dt>turns</dt><dd class="tabular-nums text-text">{{.NumTurns}}</dd></div>
+    <div class="flex justify-between gap-3"><dt>duration</dt><dd class="tabular-nums text-text">{{duration .DurationMS}}</dd></div>
+   </dl>
+  </details>{{end}}
+  {{if eq .Status "running"}}<div class="flex items-center gap-2 {{if or .Prompt .Output (hasUsage .)}}border-t border-live/20{{end}} py-2.5 font-mono text-[11px] text-faint"><span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>waiting for Claude to finish this step…</div>{{end}}
+ </div>{{end}}
+</div>{{end}}

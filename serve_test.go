@@ -325,7 +325,7 @@ func TestDetailShowsGitHubLinksAndSession(t *testing.T) {
 	v := view{Tickets: []Ticket{{Number: 7, Title: "T", SessionID: "abc-123-def", PRURL: "https://github.com/o/r/pull/9", Steps: []Step{{Seq: 1, Label: "execute", Status: StatusRunning}}}}}
 	v.Selected = &v.Tickets[0]
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "detail", v); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "detail", v); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -483,7 +483,7 @@ func TestStepcardRendersTranscript(t *testing.T) {
 		{Kind: "tool_result", IsError: false},
 	}}
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "stepcard", step); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "stepcard", step); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
