@@ -31,7 +31,9 @@ type Orchestrator struct {
 	inFlight      sync.WaitGroup   // one Add per acquired slot; drained on shutdown
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
-	now           func() time.Time // test seam; nil means time.Now
+	cancels       map[int]context.CancelFunc // per-issue cancel for the in-flight ProcessOnce pipeline
+	stopping      map[int]bool               // issues whose current run was deliberately stopped
+	now           func() time.Time           // test seam; nil means time.Now
 }
 
 type backoffState struct {
@@ -48,6 +50,56 @@ const (
 // restart interrupted mid-pipeline. classifyCause treats it as resumable so the
 // preserved worktree/session is auto-resumed (with backoff) rather than re-run.
 const interruptedCause = "interrupted mid-run by a daemon restart"
+
+// errNotRunning is returned by Stop when no pipeline is in flight for the issue
+// (never started, already finished, or a double Stop) — a no-op, surfaced to the
+// dashboard as an inline message rather than an error.
+var errNotRunning = errors.New("issue is not running")
+
+// errAlreadyRunning is returned by Continue when the issue's pipeline is already
+// in flight, so there is nothing to re-queue.
+var errAlreadyRunning = errors.New("issue is already running")
+
+// setCancel registers the in-flight pipeline's cancel func for issue n so Stop
+// can cancel that one ticket's claude subprocess. Guarded by mu.
+func (o *Orchestrator) setCancel(n int, cancel context.CancelFunc) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.cancels == nil {
+		o.cancels = map[int]context.CancelFunc{}
+	}
+	o.cancels[n] = cancel
+}
+
+// clearCancel forgets issue n's cancel func once its pipeline goroutine returns.
+// Guarded by mu. The context's own resources are released by the goroutine's
+// defer cancel(); this only removes the map entry Stop looks up.
+func (o *Orchestrator) clearCancel(n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.cancels, n)
+}
+
+// isStopping reports whether a Stop was requested for issue n's current run.
+// Guarded by mu.
+func (o *Orchestrator) isStopping(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.stopping[n]
+}
+
+// consumeStopping reports whether a Stop was requested for issue n and clears the
+// flag if so, so the pipeline goroutine transitions to ai-stopped exactly once.
+// Guarded by mu.
+func (o *Orchestrator) consumeStopping(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stopping[n] {
+		delete(o.stopping, n)
+		return true
+	}
+	return false
+}
 
 func (o *Orchestrator) clock() time.Time {
 	if o.now != nil {

@@ -1013,3 +1013,36 @@ func TestHandleIssueRecordsTitle(t *testing.T) {
 		t.Fatal("recorded title is empty")
 	}
 }
+
+func TestCancellationHelpers(t *testing.T) {
+	o := &Orchestrator{}
+	called := false
+	o.setCancel(7, func() { called = true })
+
+	// isStopping is false until a stop is flagged.
+	if o.isStopping(7) {
+		t.Fatal("isStopping(7) = true before any stop")
+	}
+	// consumeStopping is false when nothing is flagged.
+	if o.consumeStopping(7) {
+		t.Fatal("consumeStopping(7) = true with no flag set")
+	}
+
+	o.stopping = map[int]bool{7: true}
+	if !o.isStopping(7) {
+		t.Fatal("isStopping(7) = false after flag set")
+	}
+	if !o.consumeStopping(7) {
+		t.Fatal("consumeStopping(7) = false after flag set")
+	}
+	// consume cleared it.
+	if o.isStopping(7) {
+		t.Fatal("consumeStopping did not clear the flag")
+	}
+
+	o.clearCancel(7)
+	if _, ok := o.cancels[7]; ok {
+		t.Fatal("clearCancel did not remove the cancel func")
+	}
+	_ = called
+}
