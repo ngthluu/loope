@@ -925,6 +925,46 @@ func TestSweepOrphansPreservesResumableWIP(t *testing.T) {
 	}
 }
 
+// abandonStops moves the orchestrator's clock past the grace period, so markers
+// written by the test read as abandoned rather than as a stop some other process
+// is still in the middle of completing.
+func abandonStops(o *Orchestrator) {
+	at := time.Now().Add(stopSettleGrace + time.Minute)
+	o.now = func() time.Time { return at }
+}
+
+// ship deliberately leaves ai-wip in place when the PR is created but the Done
+// swap fails, "so the issue isn't re-run just to retry a label swap" — but it
+// removes the worktree first. To a sweep that only looks for resumable state,
+// that is indistinguishable from a crashed run with nothing left: it would
+// delete the branch the PR was opened from and re-queue the ticket, re-running
+// the entire pipeline against an issue that already has an open PR, whose push
+// would then be rejected. The recorded PR is what tells the two apart.
+func TestSweepOrphansLeavesATicketThatAlreadyShippedAlone(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
+			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
+		}
+		return base(c)
+	}
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	recordState(logDir, "ai-wip")
+	recordPR(logDir, "https://github.com/org/repo/pull/99")
+
+	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("git", "branch -D")) != 0 {
+		t.Fatal("the branch the open PR was made from must not be deleted")
+	}
+	if len(env.callsMatching("gh", "--remove-label ai-wip")) != 0 {
+		t.Fatal("re-queueing a shipped ticket re-runs the whole pipeline against an open PR")
+	}
+}
+
 // A stop request that nobody could finish — GitHub was down when it was made,
 // or when the run it landed on released its claim — used to have no reader at
 // all: the orphan sweep lists only ai-wip, the eligible listing skips anything
@@ -934,6 +974,7 @@ func TestSweepOrphansPreservesResumableWIP(t *testing.T) {
 func TestSweepStopsFinishesAStopNothingIsRunning(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-wip")
 	recordStopRequest(o.issueLogDir(7))
+	abandonStops(o)
 
 	if err := o.SweepStops(context.Background()); err != nil {
 		t.Fatal(err)
@@ -953,6 +994,7 @@ func TestSweepStopsFinishesAStopNothingIsRunning(t *testing.T) {
 func TestSweepStopsRetiresAStopThatLostToAFinishedRun(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-done")
 	recordStopRequest(o.issueLogDir(7))
+	abandonStops(o)
 
 	if err := o.SweepStops(context.Background()); err != nil {
 		t.Fatal(err)
@@ -971,6 +1013,7 @@ func TestSweepStopsLeavesALiveRunsStopAlone(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-wip")
 	logDir := o.issueLogDir(7)
 	recordStopRequest(logDir)
+	abandonStops(o)
 	o.registry.register(7, logDir, func() {})
 	defer o.registry.release(7, logDir)
 
@@ -982,6 +1025,48 @@ func TestSweepStopsLeavesALiveRunsStopAlone(t *testing.T) {
 	}
 	if !stopRequested(logDir) {
 		t.Fatal("the marker is how the running session learns of the stop and must survive")
+	}
+}
+
+// A stop is a marker plus a transition, done a moment apart by a process this
+// sweep cannot see into. Stepping into that moment settles the stop twice — two
+// comments and a spurious "settling failed" — or, worse, relabels a ticket
+// stopped underneath a continue that has just lifted the hold and is about to
+// spend a Claude session on it. A fresh marker is somebody's business.
+func TestSweepStopsLeavesAFreshMarkerToWhoeverWroteIt(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "")) != 0 {
+		t.Fatalf("a stop written moments ago is still being completed by its author, got %v", env.callsMatching("gh", ""))
+	}
+	if !stopRequested(o.issueLogDir(7)) {
+		t.Fatal("the marker must survive for its author to consume")
+	}
+}
+
+// The slot ledger is the third owner to ask about. A continue holds its slot
+// from before the label transition that starts it, and for that first stretch it
+// has no run claim yet — the claim is taken inside resume. A sweep that only
+// consulted the claim could relabel the ticket stopped in between, after which
+// the resume ran a full session on a ticket carrying ai-stopped.
+func TestSweepStopsLeavesATicketWithASlotAlone(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	recordStopRequest(o.issueLogDir(7))
+	abandonStops(o)
+	if !o.acquireOperator(7) {
+		t.Fatal("acquiring the slot should succeed")
+	}
+	defer o.release(7)
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("a ticket with a slot held is mid-transition; the sweep must not relabel it")
 	}
 }
 

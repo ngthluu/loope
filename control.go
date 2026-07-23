@@ -281,8 +281,12 @@ func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel strin
 		}
 		fromLabel = state
 	}
-	_ = o.gh.Comment(cctx, n, fmt.Sprintf(
-		"🤖 Stopped by request. Progress is preserved — continue with `loope -continue %d` or the dashboard.", n))
+	// The label goes on FIRST and the comment reports it afterwards, rather than
+	// announcing a transition that may not happen. A stop whose labeling fails
+	// stays pending on purpose, and something retries it every cycle (SweepStops);
+	// commenting first meant a permanently failing swap — a repo missing the
+	// ai-stopped label, say — posted the same comment on the issue every poll
+	// interval, forever.
 	if fromLabel == "" {
 		if err := o.gh.AddLabel(cctx, n, o.cfg.StateLabels.Stopped); err != nil {
 			return fmt.Errorf("issue #%d: marking stopped failed: %w", n, err)
@@ -290,8 +294,22 @@ func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel strin
 	} else if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Stopped); err != nil {
 		return fmt.Errorf("issue #%d: marking stopped failed: %w", n, err)
 	}
+	_ = o.gh.Comment(cctx, n, fmt.Sprintf(
+		"🤖 Stopped by request. %s", continueHint(o.cfg.WorkDir, n)))
 	o.settleStopped(n)
 	return nil
+}
+
+// continueHint describes what a continue will actually do with this ticket. The
+// worktree is the difference between resuming the session that was interrupted
+// and starting over, and promising preserved progress that a backed-out or
+// already-shipped run has deleted is how an operator ends up hunting for work
+// that is not there.
+func continueHint(workDir string, n int) string {
+	if _, err := os.Stat(worktreePath(workDir, n)); err != nil {
+		return fmt.Sprintf("There was no work in progress left to preserve — `loope -continue %d` (or the dashboard) re-queues it from scratch.", n)
+	}
+	return fmt.Sprintf("Progress is preserved — continue with `loope -continue %d` or the dashboard.", n)
 }
 
 // settleStopped records the bookkeeping of a stop that has LANDED — reached only

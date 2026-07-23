@@ -42,6 +42,7 @@ type Orchestrator struct {
 	draining      bool             // shutting down: hand out no further slots
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
+	warnedOnce    map[int]bool // conditions the sweeps re-encounter every cycle
 	now           func() time.Time // test seam; nil means time.Now
 }
 
@@ -54,6 +55,12 @@ const (
 	resumeBackoffMin = 5 * time.Minute
 	resumeBackoffMax = 60 * time.Minute
 )
+
+// stopSettleGrace is how long a stop request must have sat untouched before
+// SweepStops treats it as abandoned. Every stop is a marker plus a transition
+// performed a moment apart, by a process the sweep cannot see into; this is the
+// margin that keeps the sweep out of that moment.
+const stopSettleGrace = 2 * time.Minute
 
 // interruptedCause is the park cause SweepOrphans records for a run nothing owns
 // any more — a daemon restart mid-pipeline, or any other way a run stopped
@@ -370,18 +377,9 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 	}
 	cctx := context.WithoutCancel(ctx)
 	guidance, resumable := classifyCause(cause.Error())
-	// A repeated resumable failure while already parked re-parks silently: the
-	// guidance is on the issue from the first park, and the auto-resume scan
-	// retrying on backoff would otherwise post a comment per attempt. A
-	// non-resumable cause is new information for the operator, so it comments.
-	if !(fromLabel == o.cfg.StateLabels.Rework && resumable) {
-		comment := fmt.Sprintf("🤖 Parked for rework — run `loop -rework %d -config <cfg>`.", n)
-		if guidance != "" {
-			comment += "\n" + guidance
-		}
-		comment += fmt.Sprintf("\nError: %s", tail(cause.Error(), 800))
-		_ = o.gh.Comment(cctx, n, comment)
-	}
+	// The label moves BEFORE the comment reports it: the orphan sweep retries a
+	// ticket stranded by a failed swap every cycle, and commenting first meant
+	// each of those retries posted another copy of the same comment.
 	if fromLabel != o.cfg.StateLabels.Rework {
 		if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Rework); err != nil {
 			// The park did not land: the issue still carries fromLabel. Recording
@@ -396,6 +394,18 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Rework)
 	recordParkCause(o.issueLogDir(n), cause.Error())
+	// A repeated resumable failure while already parked re-parks silently: the
+	// guidance is on the issue from the first park, and the auto-resume scan
+	// retrying on backoff would otherwise post a comment per attempt. A
+	// non-resumable cause is new information for the operator, so it comments.
+	if !(fromLabel == o.cfg.StateLabels.Rework && resumable) {
+		comment := fmt.Sprintf("🤖 Parked for rework — run `loop -rework %d -config <cfg>`.", n)
+		if guidance != "" {
+			comment += "\n" + guidance
+		}
+		comment += fmt.Sprintf("\nError: %s", tail(cause.Error(), 800))
+		_ = o.gh.Comment(cctx, n, comment)
+	}
 	return cause
 }
 
@@ -512,6 +522,22 @@ func (o *Orchestrator) shouldResume(n int) bool {
 	return true
 }
 
+// logOnce logs about issue n at most once per process. The sweeps run every
+// cycle, so a condition they cannot resolve — a ticket only a human can finish —
+// would otherwise repeat its line in the log every poll interval forever.
+func (o *Orchestrator) logOnce(n int, msg string) {
+	o.mu.Lock()
+	if o.warnedOnce == nil {
+		o.warnedOnce = map[int]bool{}
+	}
+	seen := o.warnedOnce[n]
+	o.warnedOnce[n] = true
+	o.mu.Unlock()
+	if !seen {
+		log.Print(msg)
+	}
+}
+
 // noteResumeFailure starts or doubles issue n's backoff window.
 func (o *Orchestrator) noteResumeFailure(n int) {
 	o.mu.Lock()
@@ -580,9 +606,24 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		// than parking it for auto-resume.
 		if stopRequested(logDir) {
 			log.Printf("issue #%d: stale %s from a crashed run that was stopped — recovering as %s", n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped)
+			// One issue nobody can recover must not hide the rest. A sweep that
+			// returned here left every issue after it in the listing unswept — and
+			// since this sweep is what recovers a ticket stranded by a failed
+			// transition, an issue that fails permanently (a missing label on the
+			// repo, say) would strand every other one behind it, cycle after cycle.
 			if err := o.finishStopped(ctx, n, o.cfg.StateLabels.WIP); err != nil {
-				return err
+				log.Printf("issue #%d: recovering the stop failed (retried next cycle): %v", n, err)
 			}
+			continue
+		}
+		// A recorded PR means this ticket already shipped: the pipeline produced
+		// commits, the branch is pushed and a PR is open, and only the final label
+		// swap did not land (see ship). Reclaiming it would delete that branch and
+		// re-run the whole pipeline from zero against an issue that already has an
+		// open PR — expensive, and the second push would be rejected anyway. Leave
+		// it for a human, and say so once rather than every cycle.
+		if url := readPR(logDir); url != "" {
+			o.logOnce(n, fmt.Sprintf("issue #%d: %s with a PR already open (%s) — the ship did not finish labeling it; not re-queueing, finish it by hand", n, o.cfg.StateLabels.WIP, url))
 			continue
 		}
 		// Reuse before reclaim: a surviving worktree plus a recorded session is
@@ -599,7 +640,8 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		_ = o.wt.Remove(ctx, worktreePath(o.cfg.WorkDir, n))
 		_ = o.wt.DeleteBranch(ctx, branchName(n))
 		if err := o.gh.RemoveLabel(ctx, n, o.cfg.StateLabels.WIP); err != nil {
-			return err
+			log.Printf("issue #%d: re-queueing failed (retried next cycle): %v", n, err)
+			continue
 		}
 		clearState(logDir)
 		clearParkCause(logDir)
@@ -639,6 +681,14 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // retire the request because the run finished first. A failure here is logged and
 // left pending for the next cycle, which is the same answer as before, only now
 // with a next cycle.
+//
+// It only touches markers that have sat still for stopSettleGrace. Every stop is
+// a marker plus a transition, done by someone else, a moment apart — and this
+// sweep stepping into that moment is how a stop gets settled twice (two comments,
+// one spurious "settling failed") or, worse, how a continue that has just lifted
+// a hold gets the ticket relabelled stopped underneath it while its Claude
+// session runs on. Waiting a cycle costs nothing: nobody is waiting on a request
+// that has already been abandoned.
 func (o *Orchestrator) SweepStops(ctx context.Context) error {
 	logsDir := filepath.Join(o.cfg.WorkDir, "logs")
 	entries, err := os.ReadDir(logsDir)
@@ -657,12 +707,15 @@ func (o *Orchestrator) SweepStops(ctx context.Context) error {
 			continue
 		}
 		logDir := filepath.Join(logsDir, e.Name())
-		if !stopRequested(logDir) {
+		if age, pending := stopRequestAge(logDir, o.clock()); !pending || age < stopSettleGrace {
 			continue
 		}
 		// A live run owns its own stop: it consumes the marker as it unwinds, and
-		// stepping in would relabel a ticket out from under a session.
-		if o.registry.running(n) || otherProcessRunning(logDir) {
+		// stepping in would relabel a ticket out from under a session. The slot
+		// ledger is the third owner to ask about: a continue holds a slot from
+		// before its label transition until its run ends, and for the first part of
+		// that it has no claim yet — the claim is taken inside resume.
+		if o.registry.running(n) || otherProcessRunning(logDir) || o.inFlightFor(n) {
 			continue
 		}
 		log.Printf("issue #%d: a stop request is still pending with nothing running it — finishing it now", n)

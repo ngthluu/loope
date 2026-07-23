@@ -95,6 +95,17 @@ func (o *Orchestrator) release(n int) {
 	o.inFlight.Done()
 }
 
+// inFlightFor reports whether issue n holds a slot right now. It answers a
+// question the run claim cannot: a continue holds its slot from before the label
+// transition that starts it, while the claim is only taken once the resume
+// itself begins.
+func (o *Orchestrator) inFlightFor(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, busy := o.active[n]
+	return busy
+}
+
 // freeSlots reports how many pipelines may still be started, floored at zero.
 func (o *Orchestrator) freeSlots() int {
 	o.mu.Lock()

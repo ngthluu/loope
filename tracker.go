@@ -196,6 +196,9 @@ func recordState(logDir, label string) {
 	_ = os.WriteFile(filepath.Join(logDir, stateFile), []byte(label), 0o644)
 }
 
+// prFile holds the URL of the PR a shipped run opened.
+const prFile = "pr"
+
 // recordPR writes the issue's PR URL to <logDir>/pr so the dashboard can link to
 // it without a gh call. Best-effort, matching the other log-writers.
 func recordPR(logDir, url string) {
@@ -205,7 +208,18 @@ func recordPR(logDir, url string) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(logDir, "pr"), []byte(url), 0o644)
+	_ = os.WriteFile(filepath.Join(logDir, prFile), []byte(url), 0o644)
+}
+
+// readPR returns the URL of the PR this issue's run opened, or "" when none was
+// recorded. It is how the orphan sweep tells a ticket that produced nothing from
+// one that shipped and only failed to finish labeling itself.
+func readPR(logDir string) string {
+	b, err := os.ReadFile(filepath.Join(logDir, prFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // clearState removes the local state marker, returning the issue to whatever
@@ -281,6 +295,22 @@ func stopRequested(logDir string) bool {
 	}
 	_, err := os.Stat(filepath.Join(logDir, stopFile))
 	return err == nil
+}
+
+// stopRequestAge reports how long the request has been pending, for a caller
+// that must not step into a stop another process is still completing. Age comes
+// from the file's mtime rather than its contents: the timestamp inside is for
+// humans, and a clock that disagrees with the filesystem's is one more thing to
+// be wrong about.
+func stopRequestAge(logDir string, now time.Time) (time.Duration, bool) {
+	if logDir == "" {
+		return 0, false
+	}
+	fi, err := os.Stat(filepath.Join(logDir, stopFile))
+	if err != nil {
+		return 0, false
+	}
+	return now.Sub(fi.ModTime()), true
 }
 
 // clearStopRequest removes the stop marker, which exactly two things may do:

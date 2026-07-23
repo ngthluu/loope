@@ -617,6 +617,69 @@ func TestAParkThatCouldNotRelabelRecordsNothingLocally(t *testing.T) {
 	}
 }
 
+// A transition is announced only once it has happened. Both of these are
+// retried every cycle by a sweep now, so a permanently failing label swap — a
+// repo missing the ai-stopped label, say — used to post the same comment on the
+// issue every poll interval, forever.
+func TestAFailedTransitionAnnouncesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failing string
+		run     func(*Orchestrator) error
+	}{
+		{"stop", "--add-label ai-stopped", func(o *Orchestrator) error {
+			return o.finishStopped(context.Background(), 7, "ai-wip")
+		}},
+		{"park", "--add-label ai-rework", func(o *Orchestrator) error {
+			return o.park(context.Background(), 7, "ai-wip", errors.New("boom"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, o := stopEnv(t, "ai-agent", "ai-wip")
+			base := env.f.handler
+			env.f.handler = func(c rcall) (string, string, error) {
+				if c.name == "gh" && strings.Contains(strings.Join(c.args, " "), tc.failing) {
+					return "", "gh: label not found", errors.New("exit 1")
+				}
+				return base(c)
+			}
+
+			_ = tc.run(o)
+
+			if got := env.callsMatching("gh", "issue comment"); len(got) != 0 {
+				t.Fatalf("the transition did not happen, so nothing may be announced; got %v", got)
+			}
+		})
+	}
+}
+
+// The stop comment tells the operator what continue will do, so it must not
+// promise preserved progress a backed-out or already-shipped run has deleted.
+func TestTheStopCommentDescribesWhatIsActuallyLeft(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+
+	if err := o.finishStopped(context.Background(), 7, "ai-wip"); err != nil {
+		t.Fatal(err)
+	}
+	comments := env.callsMatching("gh", "issue comment")
+	if len(comments) == 0 {
+		t.Fatal("a stop that landed must be announced")
+	}
+	if strings.Contains(comments[0], "Progress is preserved") {
+		t.Fatalf("there is no worktree, so there is no progress to preserve: %q", comments[0])
+	}
+
+	env2, o2 := stopEnv(t, "ai-agent", "ai-wip")
+	seedResumable(t, o2, 7, "sess-42")
+	if err := o2.finishStopped(context.Background(), 7, "ai-wip"); err != nil {
+		t.Fatal(err)
+	}
+	kept := env2.callsMatching("gh", "issue comment")
+	if len(kept) == 0 || !strings.Contains(kept[0], "Progress is preserved") {
+		t.Fatalf("a preserved worktree must be reported as preserved, got %v", kept)
+	}
+}
+
 func TestContinueRefusesNonStoppedIssue(t *testing.T) {
 	_, o := stopEnv(t, "ai-agent", "ai-rework")
 	err := o.Continue(context.Background(), 7)
