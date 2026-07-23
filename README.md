@@ -18,6 +18,18 @@ worktree, and — if the work produced commits — pushes the branch and opens a
 A live web dashboard shows every issue it has touched. See
 [How it works](docs/how-it-works.md) for the full lifecycle.
 
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="loope's live telemetry dashboard: the ticket queue with per-issue cost on the left, and a selected issue's pipeline of Claude steps showing tokens, cost, and session id on the right">
+  <br>
+  <sub><em>The live dashboard — every tracked issue, its pipeline steps, and per-step cost, tokens, and Claude session id.</em></sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/issues.png" alt="A GitHub issues list where each issue is labeled ai-agent and closed ai-done, each driven to a linked pull request by loope">
+  <br>
+  <sub><em>Label an issue <code>ai-agent</code> and loope drives it to a PR — closing it <code>ai-done</code>, or parking it <code>ai-needs-info</code> when it needs clarification.</em></sub>
+</p>
+
 ## Install
 
 ```sh
