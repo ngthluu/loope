@@ -112,6 +112,30 @@ func TestPreflightSkipsDependentChecks(t *testing.T) {
 	}
 }
 
+// TestPreflightNoConfigSkipsRepoChecks covers `loope -doctor` run without a
+// --config: environment checks (binaries, auth, superpowers) still run, but the
+// repo-specific checks that need config values are skipped rather than crashing.
+func TestPreflightNoConfigSkipsRepoChecks(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	results := Preflight(context.Background(), f, nil)
+
+	for _, name := range []string{"git", "gh", "gh auth", "claude", "superpowers", "curl"} {
+		c := resultByName(t, results, name)
+		if c.Status != statusOK {
+			t.Fatalf("%s: status = %d, want statusOK without config (detail %q)", name, c.Status, c.Detail)
+		}
+	}
+	for _, name := range []string{"repoPath", "repo access", "labels"} {
+		c := resultByName(t, results, name)
+		if c.Status != statusSkip {
+			t.Fatalf("%s: status = %d, want statusSkip without config", name, c.Status)
+		}
+	}
+	if n := ReportPreflightFailedCount(results); n != 0 {
+		t.Fatalf("no-config preflight must not report required failures, got %d", n)
+	}
+}
+
 func TestPreflightSuperpowersMissingPlugin(t *testing.T) {
 	f := &fakeRunner{handler: okHandler(map[string]rresp{
 		"claude plugin list": {stdout: "some-other-plugin@vendor  enabled"},
