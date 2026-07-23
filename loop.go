@@ -177,22 +177,34 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 			continue
 		}
 		go func(p pick) {
-			// release is deferred FIRST so it runs LAST: a panicking pipeline
-			// parks the issue in the recover handler below and still returns
-			// its slot.
-			defer o.release(p.issue.Number)
+			n := p.issue.Number
+			// release is deferred FIRST so it runs LAST: a panicking pipeline parks
+			// the issue in the recover handler below and still returns its slot.
+			defer o.release(n)
+			// Derive a per-ticket child ctx and register its cancel so Stop can kill
+			// this one pipeline's claude subprocess without touching its siblings.
+			cctx, cancel := context.WithCancel(ctx)
+			defer cancel() // release the context's resources when the goroutine ends
+			o.setCancel(n, cancel)
+			defer o.clearCancel(n)
 			// A panic in one pipeline must not kill the daemon or the sibling
-			// pipelines: park the issue with the panic as its (non-resumable)
-			// cause, preserving worktree and logs for a human.
+			// pipelines: park the issue with the panic as its (non-resumable) cause,
+			// preserving worktree and logs for a human. Uses the LIVE parent ctx.
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("issue #%d: pipeline panic: %v\n%s", p.issue.Number, r, debug.Stack())
-					_ = o.park(ctx, p.issue.Number, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
+					log.Printf("issue #%d: pipeline panic: %v\n%s", n, r, debug.Stack())
+					_ = o.park(ctx, n, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
 				}
 			}()
-			log.Printf("issue #%d (%s): %s", p.issue.Number, p.kind, p.reason)
-			if err := o.handleIssue(ctx, p.issue, p.kind, base); err != nil {
-				log.Printf("issue #%d: pipeline failed: %v", p.issue.Number, err)
+			log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
+			if err := o.handleIssue(cctx, p.issue, p.kind, base); err != nil {
+				log.Printf("issue #%d: pipeline failed: %v", n, err)
+			}
+			// A Stop observed during the run transitions the ticket to ai-stopped
+			// here, on the live parent ctx (the child ctx is cancelled). handleIssue
+			// already skipped its normal outcome, leaving the ticket ai-wip for this.
+			if o.consumeStopping(n) {
+				o.pause(ctx, n)
 			}
 		}(picks[i])
 	}
@@ -257,6 +269,12 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content)
 	} else {
 		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath))
+	}
+	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
+	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
+	// transitions it to ai-stopped on the live parent ctx.
+	if o.isStopping(n) {
+		return nil
 	}
 	var done *alreadyDoneError
 	if errors.As(perr, &done) {

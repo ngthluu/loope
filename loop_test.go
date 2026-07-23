@@ -1112,3 +1112,31 @@ func TestPauseTransitionsToStoppedAndPreservesState(t *testing.T) {
 		t.Fatal("pause did not comment the stop notice")
 	}
 }
+
+func TestStopDuringPipelineParksAsStopped(t *testing.T) {
+	env := newFakeEnv(t) // issue 7 eligible; pipeline succeeds unless stopped
+	o := env.orchestrator()
+	started, release := gatePipelines(o, env.f)
+
+	go func() { _ = o.ProcessOnce(context.Background()) }()
+	n := awaitStarted(t, started, 1)[0]
+
+	if err := o.Stop(n); err != nil {
+		t.Fatalf("Stop(%d): %v", n, err)
+	}
+	close(release) // let the gated claude call return
+	o.Wait()
+
+	// The run ends in ai-stopped, not shipped.
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-stopped") {
+		t.Fatalf("want ai-wip->ai-stopped swap, got %v", swap)
+	}
+	if got := env.readLocalState(n); got != "ai-stopped" {
+		t.Fatalf("local state = %q, want ai-stopped", got)
+	}
+	// Ship was skipped: no PR created.
+	if pr := env.callsMatching("gh", "pr create"); len(pr) != 0 {
+		t.Fatalf("a stopped run must not ship a PR, got %v", pr)
+	}
+}
