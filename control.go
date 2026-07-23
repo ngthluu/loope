@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 )
@@ -183,4 +184,64 @@ func (o *Orchestrator) watchStops(ctx context.Context, every time.Duration) {
 			}
 		}
 	}
+}
+
+// prepareContinue validates a continue and performs everything that must happen
+// synchronously — the caller can therefore report a real error — then returns
+// the resume closure to run, or nil when there is nothing to resume.
+//
+// Case 1, a preserved worktree and a saved session: swap stopped -> WIP (the
+// ticket is genuinely working again, so the dashboard shows it live and
+// SweepOrphans can recover it if the daemon dies mid-continue) and return the
+// resume. Case 2, neither survived — the ticket was stopped while queued — so
+// continue means re-queue: drop the stopped label and the local state, and the
+// next poll cycle picks the issue up from scratch through triage.
+func (o *Orchestrator) prepareContinue(ctx context.Context, n int) (func(context.Context) error, error) {
+	state, err := o.currentStateLabel(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if state != o.cfg.StateLabels.Stopped {
+		return nil, fmt.Errorf("#%d is not stopped", n)
+	}
+	if o.registry.running(n) {
+		return nil, fmt.Errorf("#%d is already running", n)
+	}
+	logDir := o.issueLogDir(n)
+
+	resumable := false
+	if _, err := os.Stat(worktreePath(o.cfg.WorkDir, n)); err == nil {
+		if si, serr := readSession(logDir); serr == nil && si.SessionID != "" {
+			resumable = true
+		}
+	}
+
+	clearStopRequest(logDir)
+	if !resumable {
+		if err := o.gh.RemoveLabel(ctx, n, o.cfg.StateLabels.Stopped); err != nil {
+			return nil, fmt.Errorf("issue #%d: re-queueing failed: %w", n, err)
+		}
+		clearState(logDir)
+		log.Printf("issue #%d: nothing to resume — re-queued for a fresh run", n)
+		return nil, nil
+	}
+	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.Stopped, o.cfg.StateLabels.WIP); err != nil {
+		return nil, fmt.Errorf("issue #%d: marking wip failed: %w", n, err)
+	}
+	recordState(logDir, o.cfg.StateLabels.WIP)
+	return func(rctx context.Context) error {
+		return o.resume(rctx, n, o.cfg.StateLabels.WIP)
+	}, nil
+}
+
+// Continue takes stopped issue n out of the operator hold and drives it to a PR,
+// synchronously: it resumes the persisted Claude session in the preserved
+// worktree and then ships (WIP -> Done) or parks (WIP -> Rework) exactly as a
+// rework does. A ticket stopped before any work started is simply re-queued.
+func (o *Orchestrator) Continue(ctx context.Context, n int) error {
+	run, err := o.prepareContinue(ctx, n)
+	if err != nil || run == nil {
+		return err
+	}
+	return run(ctx)
 }

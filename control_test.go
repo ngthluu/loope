@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +197,82 @@ func TestWatchStopsIgnoresUnmarkedRuns(t *testing.T) {
 	case <-cancelled:
 		t.Fatal("watchStops must not cancel a run with no stop marker")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// seedResumable puts a worktree dir and a session file on disk for issue n, so
+// continue takes the real-resume path.
+func seedResumable(t *testing.T, o *Orchestrator, n int, sessionID string) {
+	t.Helper()
+	if err := os.MkdirAll(worktreePath(o.cfg.WorkDir, n), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &Claude{logDir: o.issueLogDir(n)}
+	c.RecordSession(sessionID, "bug")
+}
+
+func TestContinueResumesPersistedSessionAndShips(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-stopped")
+	seedResumable(t, o, 7, "sess-42")
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	if stopRequested(o.issueLogDir(7)) {
+		t.Fatal("continue must clear the stop marker")
+	}
+	swaps := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-wip") {
+		t.Fatalf("want a stopped->wip swap, got %v", swaps)
+	}
+	resumed := env.callsMatching("claude", "--resume sess-42")
+	if len(resumed) == 0 {
+		t.Fatal("continue must resume the persisted session id")
+	}
+	if len(env.callsMatching("gh", "--add-label ai-done")) == 0 {
+		t.Fatal("a successful continue ships: wip -> done")
+	}
+}
+
+func TestContinueWithoutWorktreeRequeues(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-stopped")
+	recordStopRequest(o.issueLogDir(7))
+	recordState(o.issueLogDir(7), "ai-stopped")
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	removals := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(removals) == 0 {
+		t.Fatal("with nothing to resume, continue re-queues by removing ai-stopped")
+	}
+	if _, err := os.Stat(filepath.Join(o.issueLogDir(7), stateFile)); err == nil {
+		t.Fatal("re-queueing must clear the local state marker")
+	}
+	if len(env.callsMatching("claude", "--resume")) != 0 {
+		t.Fatal("there is nothing to resume, so no claude call may be made")
+	}
+	if stopRequested(o.issueLogDir(7)) {
+		t.Fatal("continue must clear the stop marker")
+	}
+}
+
+func TestContinueRefusesRunningIssue(t *testing.T) {
+	_, o := stopEnv(t, "ai-agent", "ai-stopped")
+	seedResumable(t, o, 7, "sess-42")
+	o.registry.register(7, func() {})
+
+	err := o.Continue(context.Background(), 7)
+	if err == nil || !strings.Contains(err.Error(), "#7 is already running") {
+		t.Fatalf("want '#7 is already running', got %v", err)
+	}
+}
+
+func TestContinueRefusesNonStoppedIssue(t *testing.T) {
+	_, o := stopEnv(t, "ai-agent", "ai-rework")
+	err := o.Continue(context.Background(), 7)
+	if err == nil || !strings.Contains(err.Error(), "#7 is not stopped") {
+		t.Fatalf("want '#7 is not stopped', got %v", err)
 	}
 }
