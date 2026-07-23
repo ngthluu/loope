@@ -25,20 +25,27 @@ func TestGuardConvertsPanicToError(t *testing.T) {
 
 // The workDir lock is released by main's deferred release() after runLoop
 // returns, so runLoop must not return while pipelines are still running — a
-// second daemon could otherwise steal live ai-wip work. Before slots, this held
-// because ProcessOnce blocked; now it must be explicit.
-func TestRunLoopOnceDrainsInFlightPipelines(t *testing.T) {
+// second daemon could otherwise steal live ai-wip work. Shutdown is now driven
+// only by context cancellation, so the loop must drain in-flight pipelines on
+// that path before returning.
+func TestRunLoopDrainsInFlightPipelinesOnCancel(t *testing.T) {
 	env := newSlotEnv(t, 7)
 	o := env.orchestrator()
+	// A long poll interval parks the loop in its select so cancellation is the
+	// only wake-up, making the drain deterministic.
+	o.cfg.PollIntervalSec = 3600
 	started, release := gatePipelines(o, env.f)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runLoop(context.Background(), o, o.cfg, true /* once */, false /* sweep */)
+		runLoop(ctx, o, o.cfg, false /* sweep */)
 		close(done)
 	}()
 
 	awaitStarted(t, started, 1)
+	cancel() // signal shutdown while the pipeline is still gated
+
 	select {
 	case <-done:
 		t.Fatal("runLoop returned while a pipeline was still in flight")
