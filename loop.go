@@ -42,7 +42,7 @@ type Orchestrator struct {
 	draining      bool             // shutting down: hand out no further slots
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
-	warnedOnce    map[int]bool // conditions the sweeps re-encounter every cycle
+	warnedOnce    map[int]bool     // conditions the sweeps re-encounter every cycle
 	now           func() time.Time // test seam; nil means time.Now
 }
 

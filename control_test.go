@@ -186,6 +186,34 @@ func TestReleaseDoesNotHoldTheRegistryAcrossItsFilesystemWork(t *testing.T) {
 	}
 }
 
+// The on-disk claim must be gone by the time the marker is read. Stop's order is
+// the mirror — write the marker, then look for an owner — so if the claim were
+// still held here, a Stop that had just probed it would go away believing this
+// run will finish the stop, while this run reads a marker that was not written
+// yet. Neither side would settle it.
+func TestReleaseDropsTheClaimBeforeItReadsTheMarker(t *testing.T) {
+	var reg runRegistry
+	logDir := t.TempDir()
+	claimGone := make(chan bool, 1)
+	reg.stopPending = func(string) bool {
+		// Asked from another goroutine, exactly as a Stop in another process
+		// would ask: is anyone still driving this issue?
+		done := make(chan bool, 1)
+		go func() { _, held := pidLockHeld(runOwnerPath(logDir)); done <- !held }()
+		claimGone <- <-done
+		return true
+	}
+	if !reg.register(7, logDir, func() {}) {
+		t.Fatal("register should succeed")
+	}
+
+	reg.release(7, logDir)
+
+	if !<-claimGone {
+		t.Fatal("the claim was still held while the marker was read: a Stop probing in that window is lost by both sides")
+	}
+}
+
 // The reservation a register makes before it reaches the filesystem must not
 // outlive a claim it then loses: the issue belongs to whoever won it, and a
 // leftover entry would make this process report a run it is not doing.
@@ -936,17 +964,28 @@ func TestARunNeverDiscardsAStopThatLandedOnIt(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		state string // what the issue carries once the terminal path has run
-		run   func(*Orchestrator) error
+		// lateOn, when set, is the gh/git call during which the stop lands —
+		// after the path under test has passed its own stop check, which is the
+		// only window in which a terminal path can be the one to lose it.
+		lateOn string
+		run    func(*Orchestrator) error
 	}{
-		{"done", "ai-done", func(o *Orchestrator) error {
+		{name: "done", state: "ai-done", run: func(o *Orchestrator) error {
 			return o.finishDone(context.Background(), 7, "", "", "ai-wip", "already implemented")
 		}},
-		{"needs-info", "ai-needs-info", func(o *Orchestrator) error {
+		{name: "needs-info", state: "ai-needs-info", run: func(o *Orchestrator) error {
 			return o.finishNeedsInfo(context.Background(), 7, "", "", "ai-wip", &lowConfidenceError{score: 20, feedback: "unclear"})
 		}},
-		{"abort", "", func(o *Orchestrator) error {
+		{name: "abort", state: "", run: func(o *Orchestrator) error {
 			_ = o.abort(context.Background(), 7, "", "", errors.New("boom"))
 			return nil
+		}},
+		// The path the whole thing is about: a run that shipped. ship checks for a
+		// hold before it pushes, so the stop has to land after that — as the PR is
+		// being opened.
+		{name: "shipped", state: "ai-done", lateOn: "pr create", run: func(o *Orchestrator) error {
+			return o.ship(context.Background(), Issue{Number: 7, Title: "Fix crash"},
+				worktreePath(o.cfg.WorkDir, 7), branchName(7), "main", "bug", "ai-wip")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -957,7 +996,17 @@ func TestARunNeverDiscardsAStopThatLandedOnIt(t *testing.T) {
 			env, o := stopEnv(t, labels...)
 			logDir := o.issueLogDir(7)
 			o.registry.register(7, logDir, func() {})
-			recordStopRequest(logDir)
+			if tc.lateOn == "" {
+				recordStopRequest(logDir)
+			} else {
+				base := env.f.handler
+				env.f.handler = func(c rcall) (string, string, error) {
+					if strings.Contains(strings.Join(c.args, " "), tc.lateOn) {
+						recordStopRequest(logDir)
+					}
+					return base(c)
+				}
+			}
 
 			if err := tc.run(o); err != nil {
 				t.Fatal(err)
@@ -1153,6 +1202,54 @@ func TestReleasingAClaimWithNoStopPendingLabelsNothing(t *testing.T) {
 	}
 	if alive, _ := runOwnerAlive(logDir); alive {
 		t.Fatal("releasing must retract the on-disk claim")
+	}
+}
+
+// Two processes legitimately race to finish one stop: the one that ran -stop and
+// the one that owns the run. The marker is what tells the owner its cancelled
+// context was a stop and not a shutdown, so whoever labels first must leave it
+// for that process to consume — retiring it here would let the owning run unwind
+// as if nothing had been requested.
+func TestSettlingAStopLeavesTheMarkerForTheProcessStillUnwinding(t *testing.T) {
+	_, o := stopEnv(t, "ai-agent", "ai-stopped")
+	logDir := o.issueLogDir(7)
+	recordStopRequest(logDir)
+	holdOwner(t, logDir, 1)
+
+	o.settleStopped(7)
+
+	if !stopRequested(logDir) {
+		t.Fatal("the run in the other process is still unwinding and needs the marker to know why")
+	}
+
+	// With nobody else running it, the marker is spent and must go.
+	_, o2 := stopEnv(t, "ai-agent", "ai-stopped")
+	recordStopRequest(o2.issueLogDir(7))
+	o2.settleStopped(7)
+	if stopRequested(o2.issueLogDir(7)) {
+		t.Fatal("a stop that landed with nothing running must retire its marker")
+	}
+}
+
+// The claim is taken before anything else a resume can fail on, so that a run
+// belonging to another process is refused BEFORE any recovery logic relabels it.
+// With the checks first, a continue whose worktree had gone missing would park —
+// swapping the label of a ticket that other process is actively running.
+func TestResumeRefusesAnotherProcessesRunBeforeAnythingElse(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	// No worktree and no session on disk: every later check would fail.
+	holdOwner(t, o.issueLogDir(7), 1)
+
+	err := o.resume(context.Background(), 7, "ai-wip")
+
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("want a refusal naming the live run, got %v", err)
+	}
+	if len(env.callsMatching("gh", "--remove-label ai-wip")) != 0 {
+		t.Fatal("the ticket belongs to the process running it; nothing here may relabel it")
+	}
+	if readParkCause(o.issueLogDir(7)) != "" {
+		t.Fatal("a run we do not own must not have a park cause recorded against it")
 	}
 }
 

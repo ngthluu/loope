@@ -98,6 +98,40 @@ func TestDashboardContinueTakesASlotTheLoopThenYields(t *testing.T) {
 	}
 }
 
+// Every way out of Continue that does not reach the goroutine has to hand the
+// slot back. A leaked one is permanent: with the default budget of one, a single
+// refused click stops the daemon picking up any further work, and the shutdown
+// drain then waits forever for a run that never started.
+func TestARefusedDashboardContinueHandsItsSlotBack(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		label string
+	}{
+		{"not stopped", "ai-wip"},           // prepareContinue returns an error
+		{"nothing to resume", "ai-stopped"}, // prepareContinue re-queues: no run
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSlotEnv(t)
+			o := env.orchestrator()
+			o.cfg.TicketsPerCycle = 1
+			env.stateLabels(9, tc.label)
+
+			_ = o.controller().Continue(9)
+
+			if free := o.freeSlots(); free != 1 {
+				t.Fatalf("freeSlots = %d, want 1: a continue that started nothing must return its slot", free)
+			}
+			drained := make(chan struct{})
+			go func() { o.drain(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(5 * time.Second):
+				t.Fatal("shutdown hung waiting for a run that never started")
+			}
+		})
+	}
+}
+
 // A continue arriving as the daemon shuts down must be refused outright. The
 // dashboard's handler can run at any moment — closing the listener does not join
 // handlers already inside one — and a slot taken after the drain started would

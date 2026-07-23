@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // pidLock is a claim on a path, held for as long as the claiming process lives.
@@ -67,7 +68,7 @@ func claimPIDLock(path string) (*pidLock, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if err := flockExclusive(f); err != nil {
 			f.Close()
 			if err == syscall.EWOULDBLOCK {
 				pid, _ := readPIDFile(path)
@@ -113,14 +114,22 @@ func (l *pidLock) release() {
 // process that did not exist, settleStopped left a marker on a stopped ticket,
 // and register refused a claim nobody held.
 //
-// Probing at all is still an acquisition, so it is serialised with this
-// process's claims (see pidLockGuard) and can still, very rarely, make a
-// claimant in ANOTHER process see a phantom holder. Every caller of a refused
-// claim treats it as "someone else is running this", which is recoverable —
-// the cycle retries — where a phantom read as a real owner was not.
+// Probing is still an acquisition, so it is serialised with this process's own
+// claims (see pidLockGuard) — and a claimant in ANOTHER process waits a reader
+// out rather than believing it (see probeHoldWindow), so a read cannot refuse a
+// claim either.
 func pidLockHeld(path string) (pid int, held bool) {
 	pidLockGuard.Lock()
 	defer pidLockGuard.Unlock()
+	return probeLock(path)
+}
+
+// probeLock is pidLockHeld's body without the process-wide guard, which is what
+// makes it worth having separately: the guard hides the property that matters
+// here — that the probe's lock mode does not conflict with another probe — since
+// no two probes in this process ever reach the syscall together. Nothing but
+// pidLockHeld and its test may call it.
+func probeLock(path string) (pid int, held bool) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return 0, false
@@ -138,6 +147,31 @@ func pidLockHeld(path string) (pid int, held bool) {
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return 0, false
+}
+
+// probeHoldWindow bounds how long a claim waits out a reader before believing
+// the lock is really held. Every lock mode flock offers conflicts with an
+// exclusive claim, so a probe in ANOTHER process — this one's are serialised —
+// can refuse a claimant for the microseconds it spends between opening the file
+// and dropping the lock. Refusing over that is a claim rejected for a run that
+// does not exist. A real holder keeps the lock for the length of a Claude
+// session, so it is not going to be waited out by this.
+const (
+	probeHoldWindow = 20 * time.Millisecond
+	probeHoldRetry  = 2 * time.Millisecond
+)
+
+// flockExclusive takes the exclusive lock, retrying briefly while the only thing
+// in the way could still be a reader. Returns EWOULDBLOCK when it is not.
+func flockExclusive(f *os.File) error {
+	deadline := time.Now().Add(probeHoldWindow)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err != syscall.EWOULDBLOCK || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(probeHoldRetry)
+	}
 }
 
 // sameFileAtPath reports whether the open file is still the one the path names.

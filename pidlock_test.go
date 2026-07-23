@@ -91,6 +91,10 @@ func TestConcurrentProbesDoNotInventAHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Probes are taken through probeLock rather than pidLockHeld deliberately:
+	// the process-wide guard would serialise them, so they would never reach the
+	// syscall together and the lock mode — the thing under test — would not
+	// matter. Two processes have no such guard between them.
 	const probes = 16
 	var wg sync.WaitGroup
 	held := make(chan int, probes)
@@ -98,8 +102,8 @@ func TestConcurrentProbesDoNotInventAHolder(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 50; j++ {
-				if pid, ok := pidLockHeld(path); ok {
+			for j := 0; j < 200; j++ {
+				if pid, ok := probeLock(path); ok {
 					held <- pid
 					return
 				}
@@ -110,6 +114,76 @@ func TestConcurrentProbesDoNotInventAHolder(t *testing.T) {
 	close(held)
 	if pid, ok := <-held; ok {
 		t.Fatalf("a probe reported pid %d as holding a claim nobody holds", pid)
+	}
+}
+
+// A probe must not turn away a claimant either: the claim is the real work, and
+// a reader that blocks it hands back "#N is already running" for a claim nobody
+// holds.
+func TestAProbeDoesNotRefuseAClaimant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claim")
+	if err := os.WriteFile(path, []byte("2147483646"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var probing sync.WaitGroup
+	probing.Add(1)
+	go func() {
+		defer probing.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				probeLock(path)
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		l, err := claimPIDLock(path)
+		if err != nil {
+			close(stop)
+			probing.Wait()
+			t.Fatalf("a reader refused a claim nobody holds: %v", err)
+		}
+		l.release()
+	}
+	close(stop)
+	probing.Wait()
+}
+
+// The other half of the unlink/claim race: a claimant that wins the lock on an
+// inode which has since left the directory holds a claim no other process can
+// see, so it must notice and retry.
+func TestSameFileAtPathRejectsAReplacedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claim")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if !sameFileAtPath(f, path) {
+		t.Fatal("a file still at its path must read as the same file")
+	}
+
+	// A departing holder unlinks it; a new claimant creates a fresh one.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if sameFileAtPath(f, path) {
+		t.Fatal("an unlinked inode must not read as the file at the path")
+	}
+	g, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if sameFileAtPath(f, path) {
+		t.Fatal("a replaced file must not read as the one we hold")
+	}
+	if !sameFileAtPath(g, path) {
+		t.Fatal("the replacement must read as the file at the path")
 	}
 }
 

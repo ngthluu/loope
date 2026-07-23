@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1070,6 +1071,27 @@ func TestSweepStopsLeavesATicketWithASlotAlone(t *testing.T) {
 	}
 }
 
+// The claim spans processes, and so must the guard. A `loope -continue` or
+// `-rework` in another shell owns its run and its stop; a daemon sweeping in
+// would relabel the ticket stopped while that session runs on.
+func TestSweepStopsLeavesAnotherProcessesRunAlone(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	logDir := o.issueLogDir(7)
+	recordStopRequest(logDir)
+	abandonStops(o)
+	holdOwner(t, logDir, 1)
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("the process owning this run labels as it unwinds; the sweep must not do it underneath")
+	}
+	if !stopRequested(logDir) {
+		t.Fatal("the marker is how that process learns of the stop and must survive")
+	}
+}
+
 func TestSweepStopsIgnoresIssuesWithNoMarker(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-wip")
 	recordState(o.issueLogDir(7), "ai-wip")
@@ -1079,6 +1101,39 @@ func TestSweepStopsIgnoresIssuesWithNoMarker(t *testing.T) {
 	}
 	if len(env.callsMatching("gh", "")) != 0 {
 		t.Fatalf("a sweep with nothing pending must not call gh at all, got %v", env.callsMatching("gh", ""))
+	}
+}
+
+// The sweep is now the only thing that recovers a stranded ticket, so one it
+// cannot recover must not hide the rest. Returning on the first failure left
+// every issue behind it in the listing unswept — cycle after cycle, since the
+// failing one fails the same way every time.
+func TestSweepOrphansKeepsGoingPastAnIssueItCannotRecover(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
+			return `[{"number": 7, "title": "a", "labels": [{"name": "ai-wip"}]},
+			         {"number": 8, "title": "b", "labels": [{"name": "ai-wip"}]}]`, "", nil
+		}
+		// #7 can never be recovered: the repo has no ai-stopped label.
+		if c.name == "gh" && strings.Contains(joined, "issue view 7") {
+			return "", "gh: 503", errors.New("exit 1")
+		}
+		if c.name == "gh" && strings.Contains(joined, "--add-label ai-stopped") {
+			return "", "gh: label not found", errors.New("exit 1")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	recordStopRequest(o.issueLogDir(7)) // sends #7 down the failing path
+
+	if err := o.SweepOrphans(context.Background()); err != nil {
+		t.Fatalf("a single unrecoverable issue is not a failed sweep, got %v", err)
+	}
+	if len(env.callsMatching("gh", "issue edit 8")) == 0 {
+		t.Fatal("#8 was never reached: one issue nobody can recover hid every issue behind it")
 	}
 }
 

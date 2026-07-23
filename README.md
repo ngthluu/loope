@@ -123,7 +123,9 @@ can flush its transcript). It finds that process through the run's own
 stopped on the spot rather than handed to a daemon that has no such run to
 halt. The request file is retired once the `ai-stopped` label lands; until then
 it is what survives a crash, so the ticket is recovered as stopped rather than
-resumed — by the daemon's sweep on a later cycle, or by the next start.
+resumed — by the daemon's sweep on a later cycle (it waits a couple of minutes
+before treating a request as abandoned, so it never steps into a stop another
+process is still completing), or by the next start.
 
 Wherever the stop lands in the pipeline, the ticket ends up in `ai-stopped` with
 everything preserved: it is never aborted back into the queue and never parked
@@ -259,7 +261,7 @@ with `~/`.
 | `workDir`         | yes      | —          | Where worktrees and logs are created                    |
 | `eligibleLabel`   | no       | `ai-agent` | Label that marks an issue as available to the loop      |
 | `pollIntervalSec` | no       | `60`       | Seconds between poll cycles                             |
-| `ticketsPerCycle` | no       | `1`        | Maximum number of pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Auto-resumes of parked issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
+| `ticketsPerCycle` | no       | `1`        | Concurrent pipelines the loop starts (a continue you ask for from the dashboard runs on top of this; the loop then starts nothing new until it finishes). Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Auto-resumes of parked issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
 | `personaPath`     | no       | —          | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir` | no       | —          | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call (see below) |
 | `maxQARounds`     | no       | `20`       | Max architect↔answerer rounds before a feature fails    |

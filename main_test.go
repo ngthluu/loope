@@ -104,6 +104,11 @@ func TestRunLoopSweepsEveryCycleNotJustAtStartup(t *testing.T) {
 	o := env.orchestrator()
 	o.cfg.PollIntervalSec = 0
 	captureLog(t)
+	// A stop nobody finished — the daemon was down, or GitHub was — waiting for
+	// the second sweep to pick it up.
+	env.stateLabels(5, "ai-wip")
+	recordStopRequest(o.issueLogDir(5))
+	abandonStops(o)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -114,14 +119,16 @@ func TestRunLoopSweepsEveryCycleNotJustAtStartup(t *testing.T) {
 
 	deadline := time.After(5 * time.Second)
 	for {
-		if n := len(env.callsMatching("gh", "issue list --repo org/repo --label ai-wip")); n >= 3 {
+		sweeps := len(env.callsMatching("gh", "issue list --repo org/repo --label ai-wip"))
+		settled := len(env.callsMatching("gh", "--add-label ai-stopped"))
+		if sweeps >= 3 && settled > 0 {
 			break
 		}
 		select {
 		case <-deadline:
 			cancel()
-			t.Fatalf("orphan sweep ran %d times across many cycles, want it every cycle",
-				len(env.callsMatching("gh", "issue list --repo org/repo --label ai-wip")))
+			t.Fatalf("orphan sweep ran %d times (want it every cycle) and the stop sweep settled %d pending stops (want 1)",
+				sweeps, settled)
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
