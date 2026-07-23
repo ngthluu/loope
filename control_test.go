@@ -107,6 +107,66 @@ func TestRunOwnerOfADeadProcessReadsAsNotRunning(t *testing.T) {
 	}
 }
 
+// The on-disk half of a claim touches the filesystem, and workDir can be a
+// network mount that hangs. Holding the registry mutex across it made every
+// other caller wait on the kernel: a stop could not even be RECORDED — Stop and
+// the stop watcher both go through cancel — and the orphan sweep and dashboard
+// stalled behind it too. A stop landing while a claim is in flight must still
+// reach the run that is starting.
+func TestRegisterDoesNotHoldTheRegistryAcrossTheOnDiskClaim(t *testing.T) {
+	var reg runRegistry
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	reg.claim = func(string) (*pidLock, bool) {
+		close(entered)
+		<-unblock
+		return nil, true
+	}
+
+	cancelled := make(chan struct{})
+	registered := make(chan bool, 1)
+	go func() { registered <- reg.register(7, "irrelevant", func() { close(cancelled) }) }()
+	<-entered
+
+	found := make(chan bool, 1)
+	go func() { found <- reg.cancel(7) }()
+	select {
+	case ok := <-found:
+		if !ok {
+			t.Fatal("a stop landing mid-claim must reach the run that is starting")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel blocked behind an in-flight on-disk claim")
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("cancel must invoke the registered cancel func")
+	}
+
+	close(unblock)
+	if !<-registered {
+		t.Fatal("a won claim must still register")
+	}
+}
+
+// The reservation a register makes before it reaches the filesystem must not
+// outlive a claim it then loses: the issue belongs to whoever won it, and a
+// leftover entry would make this process report a run it is not doing.
+func TestARefusedClaimLeavesNoReservationBehind(t *testing.T) {
+	var reg runRegistry
+	reg.claim = func(string) (*pidLock, bool) { return nil, false }
+
+	if reg.register(7, "irrelevant", func() {}) {
+		t.Fatal("a claim another process holds must be refused")
+	}
+	if reg.running(7) {
+		t.Fatal("a refused register must leave no entry behind")
+	}
+	if reg.cancel(7) {
+		t.Fatal("a refused register must leave nothing to cancel")
+	}
+}
+
 func TestRunRegistryNumbers(t *testing.T) {
 	var reg runRegistry
 	reg.register(3, "", func() {})

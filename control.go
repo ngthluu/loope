@@ -16,6 +16,11 @@ import (
 type runRegistry struct {
 	mu   sync.Mutex
 	live map[int]liveRun
+
+	// claim takes the on-disk half of a register. A seam for tests, which need
+	// to hold one open to observe what the rest of the registry can do while it
+	// is in flight. nil means claimRunOwner.
+	claim func(logDir string) (*pidLock, bool)
 }
 
 // liveRun is one registered pipeline: the cancel func a stop pulls, and the
@@ -28,9 +33,9 @@ type liveRun struct {
 }
 
 // register claims issue n for a pipeline in this process, reporting whether the
-// claim was won. Both halves of the claim are taken here, under one lock: the
-// map, which answers "is this running in THIS process", and logDir's run-owner
-// file, which is the only thing that can answer "in ANY process".
+// claim was won. Both halves are taken here: the map, which answers "is this
+// running in THIS process", and logDir's run-owner claim, which is the only
+// thing that can answer "in ANY process".
 //
 // Both are needed, because a second Claude session in a worktree one is already
 // running in is the same corruption whether the first session belongs to this
@@ -38,19 +43,39 @@ type liveRun struct {
 // second case, and the workDir lock cannot either: it proves no other DAEMON is
 // up, while -once, -rework and -continue drive pipelines holding no lock.
 //
-// Writing the owner file as part of the claim, rather than after it, is what
-// makes the handshake with Stop work — see Stop.
+// Taking the on-disk claim as part of the register, rather than after it, is
+// what makes the handshake with Stop work — see Stop.
+//
+// The two halves are taken in sequence rather than under one lock, because the
+// on-disk half touches the filesystem: workDir can be a network mount, and a
+// register blocked in the kernel used to block every other registry caller
+// behind it — Stop and the stop watcher could not even RECORD a cancellation
+// while a claim hung, and the sweep and dashboard stalled with them. The map
+// entry is therefore reserved first, with the cancel func already in it, so a
+// stop landing mid-claim is honoured rather than queued; a lost claim then
+// removes the reservation again.
 func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.live == nil {
 		r.live = map[int]liveRun{}
 	}
 	if _, ok := r.live[n]; ok {
+		r.mu.Unlock()
 		return false
 	}
-	lock, won := claimRunOwner(logDir)
+	r.live[n] = liveRun{cancel: cancel}
+	r.mu.Unlock()
+
+	claim := r.claim
+	if claim == nil {
+		claim = claimRunOwner
+	}
+	lock, won := claim(logDir)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !won {
+		delete(r.live, n)
 		return false
 	}
 	r.live[n] = liveRun{cancel: cancel, lock: lock}
