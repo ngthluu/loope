@@ -1140,3 +1140,63 @@ func TestStopDuringPipelineParksAsStopped(t *testing.T) {
 		t.Fatalf("a stopped run must not ship a PR, got %v", pr)
 	}
 }
+
+func TestContinueWithSessionQueuesRework(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-stopped")
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
+		t.Fatalf("want ai-stopped->ai-rework swap, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-rework" {
+		t.Fatalf("local state = %q, want ai-rework", got)
+	}
+	if c := readParkCause(logDir); c != interruptedCause {
+		t.Fatalf("park cause = %q, want %q (resumable)", c, interruptedCause)
+	}
+}
+
+func TestContinueWithoutSessionRequeuesEligible(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-stopped")
+	recordParkCause(logDir, "whatever")
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	// ai-stopped removed (not swapped) so the ticket falls back to eligible.
+	rm := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
+		t.Fatalf("want a bare ai-stopped removal, got %v", rm)
+	}
+	if got := env.readLocalState(7); got != "" {
+		t.Fatalf("local state = %q, want cleared", got)
+	}
+	if c := readParkCause(logDir); c != "" {
+		t.Fatalf("park cause = %q, want cleared", c)
+	}
+}
+
+func TestContinueWhileRunningReturnsSentinel(t *testing.T) {
+	o := &Orchestrator{active: map[int]struct{}{7: {}}}
+	if err := o.Continue(context.Background(), 7); err != errAlreadyRunning {
+		t.Fatalf("Continue while running = %v, want errAlreadyRunning", err)
+	}
+}

@@ -425,6 +425,42 @@ func stoppedComment() string {
 	return "⏸ Stopped by user. Worktree, logs and session are preserved. Press Continue to resume."
 }
 
+// Continue re-queues a stopped issue for a deferred resume: it only rewrites
+// labels/state on disk, and the next runLoop cycle picks it up when a slot is
+// free (never synchronously, never bypassing the concurrency budget). With a
+// preserved session it hands the issue to the auto-resume path (ai-stopped ->
+// ai-rework + a resumable park cause, so ResumeParked -> Rework resumes from the
+// session id). Without a session it re-queues from scratch (remove ai-stopped,
+// clear state/cause, so the issue is eligible again and ProcessOnce runs a fresh
+// pipeline; the worktree, if any, is reused per the project's continue-not-reset
+// rule). Being label-driven, it survives a daemon restart — the maps are empty
+// but the session file on disk is the source of truth. Returns errAlreadyRunning
+// if the issue's pipeline is somehow already in flight.
+func (o *Orchestrator) Continue(ctx context.Context, n int) error {
+	o.mu.Lock()
+	_, running := o.active[n]
+	o.mu.Unlock()
+	if running {
+		return errAlreadyRunning
+	}
+	logDir := o.issueLogDir(n)
+	si, _ := readSession(logDir)
+	if si.SessionID != "" {
+		if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.Stopped, o.cfg.StateLabels.Rework); err != nil {
+			return err
+		}
+		recordState(logDir, o.cfg.StateLabels.Rework)
+		recordParkCause(logDir, interruptedCause)
+		return nil
+	}
+	if err := o.gh.RemoveLabel(ctx, n, o.cfg.StateLabels.Stopped); err != nil {
+		return err
+	}
+	clearState(logDir)
+	clearParkCause(logDir)
+	return nil
+}
+
 // ResumeParked scans ai-rework issues and re-runs Rework on the ones parked for
 // a transient, resumable cause (usage/rate limit, turn/budget ceiling, network
 // outage). Genuine errors have no resumable park cause and stay parked for a
