@@ -1069,7 +1069,7 @@ func TestSweepOrphansLeavesARunAnotherProcessOwnsAlone(t *testing.T) {
 		return base(c)
 	}
 	o := env.orchestrator()
-	writeOwner(t, o.issueLogDir(7), 1)
+	holdOwner(t, o.issueLogDir(7), 1)
 
 	if err := o.SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)

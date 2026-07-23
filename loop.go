@@ -575,9 +575,11 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		clearState(logDir)
 		clearParkCause(logDir)
 		clearStopRequest(logDir)
-		// The crashed run's owner file names a dead pid, so it already reads as
-		// "nobody is running this"; removing it just keeps the log dir honest.
-		clearRunOwner(logDir)
+		// The crashed run's owner file is left where it is. It already reads as
+		// "nobody is running this" — the kernel dropped its lock when the process
+		// died — and deleting a claim file we do not hold is how a live claim
+		// becomes invisible to everyone else: the next claimant creates a fresh
+		// file at the same path and both believe they own the issue.
 	}
 	return nil
 }

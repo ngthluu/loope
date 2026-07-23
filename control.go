@@ -15,7 +15,16 @@ import (
 // file are the halves that cross process boundaries and restarts.
 type runRegistry struct {
 	mu   sync.Mutex
-	live map[int]context.CancelFunc
+	live map[int]liveRun
+}
+
+// liveRun is one registered pipeline: the cancel func a stop pulls, and the
+// on-disk claim the run holds for as long as it is running. The claim is a held
+// kernel lock rather than a written file, so it must live exactly as long as the
+// entry — released, not merely deleted, when the run ends.
+type liveRun struct {
+	cancel context.CancelFunc
+	lock   *pidLock
 }
 
 // register claims issue n for a pipeline in this process, reporting whether the
@@ -35,15 +44,16 @@ func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.live == nil {
-		r.live = map[int]context.CancelFunc{}
+		r.live = map[int]liveRun{}
 	}
 	if _, ok := r.live[n]; ok {
 		return false
 	}
-	if !claimRunOwner(logDir) {
+	lock, won := claimRunOwner(logDir)
+	if !won {
 		return false
 	}
-	r.live[n] = cancel
+	r.live[n] = liveRun{cancel: cancel, lock: lock}
 	return true
 }
 
@@ -63,12 +73,13 @@ func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) 
 func (r *runRegistry) release(n int, logDir string) (stopPending bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.live[n]; !ok {
+	run, ok := r.live[n]
+	if !ok {
 		return false
 	}
 	delete(r.live, n)
 	pending := stopRequested(logDir)
-	clearRunOwner(logDir)
+	run.lock.release()
 	return pending
 }
 
@@ -77,12 +88,12 @@ func (r *runRegistry) release(n int, logDir string) (stopPending bool) {
 // releases its claim as it unwinds.
 func (r *runRegistry) cancel(n int) bool {
 	r.mu.Lock()
-	fn, ok := r.live[n]
+	run, ok := r.live[n]
 	r.mu.Unlock()
 	if !ok {
 		return false
 	}
-	fn()
+	run.cancel()
 	return true
 }
 

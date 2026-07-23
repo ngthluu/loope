@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -75,24 +76,34 @@ func TestRunRegistryPublishesTheClaimOnDisk(t *testing.T) {
 // must do the labeling itself rather than wait forever for a process that is
 // gone. This is the hole the workDir lock could not see — it reports "a daemon
 // is up", not "this issue has a run behind it".
+//
+// The pid in the file proves nothing on its own, which is the second case here:
+// the OS reuses the pids of dead processes, so a crashed run's file can end up
+// naming a live stranger. Read as an owner, that file could never be taken over
+// again — the issue would be permanently unclaimable, unsweepable (the sweep
+// skips live runs) and unstoppable (Stop defers to the owner). Only the holder
+// of the claim is an owner.
 func TestRunOwnerOfADeadProcessReadsAsNotRunning(t *testing.T) {
-	logDir := t.TempDir()
-	// pid 1 is alive but is not us; a pid that cannot exist stands in for a
-	// crashed owner.
-	if err := os.WriteFile(runOwnerPath(logDir), []byte("2147483646"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if alive, _ := runOwnerAlive(logDir); alive {
-		t.Fatal("a dead pid must read as no live run")
-	}
-	if otherProcessRunning(logDir) {
-		t.Fatal("a dead pid must not be treated as another process's live run")
-	}
-	if err := os.WriteFile(runOwnerPath(logDir), []byte("garbage"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if alive, _ := runOwnerAlive(logDir); alive {
-		t.Fatal("an unparseable owner file must read as no live run")
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"crashed owner", "2147483646"},
+		{"reused pid", "1"}, // alive, not us, and holding nothing
+		{"garbage", "not-a-pid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logDir := t.TempDir()
+			if err := os.WriteFile(runOwnerPath(logDir), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if alive, _ := runOwnerAlive(logDir); alive {
+				t.Fatal("an owner file nobody holds must read as no live run")
+			}
+			if otherProcessRunning(logDir) {
+				t.Fatal("an owner file nobody holds must not be treated as another process's live run")
+			}
+		})
 	}
 }
 
@@ -642,13 +653,8 @@ func TestStopFinishesAWipIssueNoProcessIsActuallyRunning(t *testing.T) {
 // carrying both ai-wip and ai-stopped while the session ran on to a PR.
 func TestStopDefersToARunInAnotherProcess(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-wip")
-	// pid 1 is alive and is not us: a pipeline in another process.
-	if err := os.MkdirAll(o.issueLogDir(7), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(runOwnerPath(o.issueLogDir(7)), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// A pipeline in another process: it publishes its pid and holds the claim.
+	holdOwner(t, o.issueLogDir(7), 1)
 
 	if err := o.Stop(context.Background(), 7); err != nil {
 		t.Fatal(err)
@@ -692,16 +698,26 @@ func TestTerminalOutcomesClearTheStopMarker(t *testing.T) {
 	}
 }
 
-// writeOwner plants an owner file naming pid, standing in for a run in another
-// process (pid 1, alive and not us) or a crashed one (a pid that cannot exist).
-func writeOwner(t *testing.T, logDir string, pid int) {
+// holdOwner stands in for a live run in ANOTHER process: it publishes pid as the
+// owner and holds the claim for the rest of the test, exactly as that process's
+// pipeline would. The lock is taken on its own fd, so the code under test sees
+// it as an outside holder even though the test shares this process.
+func holdOwner(t *testing.T, logDir string, pid int) {
 	t.Helper()
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(runOwnerPath(logDir), []byte(strconv.Itoa(pid)), 0o644); err != nil {
+	f, err := os.OpenFile(runOwnerPath(logDir), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("holding the owner claim: %v", err)
+	}
+	if _, err := f.WriteString(strconv.Itoa(pid)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
 }
 
 // A claim has to be cross-process, not merely cross-goroutine: the registry map
@@ -712,7 +728,7 @@ func writeOwner(t *testing.T, logDir string, pid int) {
 func TestRegisterRefusesAnIssueAnotherProcessOwns(t *testing.T) {
 	var reg runRegistry
 	logDir := t.TempDir()
-	writeOwner(t, logDir, 1)
+	holdOwner(t, logDir, 1)
 
 	if reg.register(7, logDir, func() {}) {
 		t.Fatal("a claim a live process already holds must be refused")
@@ -726,18 +742,31 @@ func TestRegisterRefusesAnIssueAnotherProcessOwns(t *testing.T) {
 	}
 }
 
-// A crashed run's file names a dead pid, which is no owner at all: continuing
-// from what it left behind is the whole point of -rework.
+// A crashed run's file names nobody who still holds it, which is no owner at
+// all: continuing from what it left behind is the whole point of -rework. That
+// holds however the pid in the file reads — including when the OS has since
+// handed it to an unrelated live process, which used to make the issue
+// permanently unclaimable.
 func TestRegisterTakesOverADeadOwnersClaim(t *testing.T) {
-	var reg runRegistry
-	logDir := t.TempDir()
-	writeOwner(t, logDir, 2147483646)
+	for _, tc := range []struct{ name, pid string }{
+		{"crashed owner", "2147483646"},
+		{"pid reused by a live stranger", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reg runRegistry
+			logDir := t.TempDir()
+			if err := os.WriteFile(runOwnerPath(logDir), []byte(tc.pid), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	if !reg.register(7, logDir, func() {}) {
-		t.Fatal("a dead owner must not block a fresh claim")
-	}
-	if _, isSelf := runOwnerAlive(logDir); !isSelf {
-		t.Fatal("taking over a stale claim must record us as the owner")
+			if !reg.register(7, logDir, func() {}) {
+				t.Fatal("an owner file nobody holds must not block a fresh claim")
+			}
+			if _, isSelf := runOwnerAlive(logDir); !isSelf {
+				t.Fatal("taking over a stale claim must record us as the owner")
+			}
+			reg.release(7, logDir)
+		})
 	}
 }
 
@@ -748,7 +777,7 @@ func TestRegisterTakesOverADeadOwnersClaim(t *testing.T) {
 func TestReworkRefusesAnIssueAnotherProcessIsRunning(t *testing.T) {
 	env, o := stopEnv(t, "ai-agent", "ai-rework")
 	seedResumable(t, o, 7, "sess-42")
-	writeOwner(t, o.issueLogDir(7), 1)
+	holdOwner(t, o.issueLogDir(7), 1)
 
 	err := o.Rework(context.Background(), 7)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
