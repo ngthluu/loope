@@ -50,13 +50,20 @@ func parseConfidence(s string) (int, bool) {
 	return n, true
 }
 
-// stripConfidenceLine returns s with the line containing confidenceSentinel
-// removed, trimmed. When the sentinel is absent it returns s trimmed.
-func stripConfidenceLine(s string) string {
+// sanitizeFeedback returns s with every control-sentinel line removed,
+// trimmed. When no sentinel is present it returns s trimmed.
+//
+// The result is posted verbatim as the public needs-info comment, so it must
+// carry only the architect's prose. Two sentinels can reach it: the confidence
+// score itself, which is machine state rather than feedback; and an
+// already-done claim from a session that scored low, which the gate outranks on
+// purpose — pasting it into the comment would tell the author the issue was
+// closed as implemented when it was in fact escalated as under-specified.
+func sanitizeFeedback(s string) string {
 	lines := strings.Split(s, "\n")
 	kept := lines[:0]
 	for _, ln := range lines {
-		if strings.Contains(ln, confidenceSentinel) {
+		if strings.Contains(ln, confidenceSentinel) || strings.Contains(ln, alreadyDoneSentinel) {
 			continue
 		}
 		kept = append(kept, ln)

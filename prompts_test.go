@@ -16,7 +16,7 @@ var promptTestData = map[string]map[string]any{
 	"done-confirm.md.tmpl": {"Issue": "I", "Persona": "P", "Reason": "R"},
 	"plan.md.tmpl":         {"SpecPath": "docs/spec.md"},
 	"execute.md.tmpl":      {"PlanPath": "docs/plan.md"},
-	"debug.md.tmpl":        {"Issue": "I"},
+	"debug.md.tmpl":        {"Issue": "I", "Threshold": 70},
 	"rework.md.tmpl":       {},
 	"triage.md.tmpl":       {"List": "[]"},
 	"pickup":               {"Kind": "feature", "Branch": "b"},

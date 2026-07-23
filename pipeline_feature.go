@@ -48,7 +48,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 	// A threshold <= 0 disables it. Fail open on an unparseable score.
 	if cfg.ConfidenceThreshold > 0 {
 		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: stripConfidenceLine(output)}
+			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(output)}
 		}
 	}
 

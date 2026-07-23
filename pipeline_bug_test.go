@@ -105,3 +105,90 @@ func TestBugPipelinePromptMentionsAlreadyDoneSentinel(t *testing.T) {
 		t.Errorf("bug prompt should tell the architect how to signal already-done:\n%s", f.calls[0].stdin)
 	}
 }
+
+func TestBugPipelineLowConfidenceEscalates(t *testing.T) {
+	// A one-element queue, not a handler: a handler would answer every call with
+	// the same low score, so the call-count assertion below could never catch a
+	// pipeline that kept going.
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON(
+		"CONFIDENCE: 40\nNo stack trace and no repro steps.\nWhich command triggers the crash?", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "crashes sometimes on startup")
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
+	}
+	if lc.score != 40 {
+		t.Errorf("score = %d, want 40", lc.score)
+	}
+	if !strings.Contains(lc.feedback, "repro steps") || strings.Contains(lc.feedback, confidenceSentinel) {
+		t.Errorf("feedback should carry the reasons without the CONFIDENCE line: %q", lc.feedback)
+	}
+	if len(f.calls) != 1 {
+		t.Errorf("low confidence must stop after the debug turn, got %d calls", len(f.calls))
+	}
+}
+
+func TestBugPipelineHighConfidenceProceeds(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 85\nFixed and committed.", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+		t.Fatalf("a score at or above the threshold must proceed: %v", err)
+	}
+}
+
+// A score exactly at the threshold is not below it, so it proceeds.
+func TestBugPipelineConfidenceAtThresholdProceeds(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 70\nFixed and committed.", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+		t.Fatalf("score == threshold must proceed: %v", err)
+	}
+}
+
+// confidenceThreshold: 0 disables the gate entirely — even an explicit low score
+// in the output is ignored.
+func TestBugPipelineZeroThresholdIgnoresScore(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 5\nFixed and committed.", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+		t.Fatalf("threshold 0 disables the gate: %v", err)
+	}
+}
+
+// Fail open: a session that forgot the sentinel but fixed the bug still ships.
+func TestBugPipelineMissingSentinelFailsOpen(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("Fixed and committed.", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+		t.Fatalf("an absent score must fail open, got %v", err)
+	}
+}
+
+// Confidence outranks already-done: a session too unsure to fix the bug must not
+// be able to close the issue as already implemented either.
+func TestBugPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON(
+		"CONFIDENCE: 20\nI cannot tell what behavior is wrong.\nPIPELINE_ALREADY_DONE: looks fine to me", "s1")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE")
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %T (%v)", err, err)
+	}
+	var done *alreadyDoneError
+	if errors.As(err, &done) {
+		t.Error("a low-confidence session must not close the issue as already done")
+	}
+	// The feedback is posted verbatim as a public GitHub comment, so the ignored
+	// already-done claim must not leak into it.
+	if strings.Contains(lc.feedback, alreadyDoneSentinel) {
+		t.Errorf("needs-info feedback must not leak the already-done sentinel: %q", lc.feedback)
+	}
+}
