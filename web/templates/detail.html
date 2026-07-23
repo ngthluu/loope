@@ -1,4 +1,5 @@
 {{define "detail"}}<div class="max-w-[1160px] px-10 py-7">
+ {{if .Notice}}<div class="mb-5 rounded-md border border-live/30 bg-live/[0.06] px-4 py-3 font-mono text-[12px] leading-relaxed text-live/90">{{.Notice}}</div>{{end}}
  {{if .GHError}}<div class="mb-5 flex items-start gap-2 rounded-md border border-warn/30 bg-warn/[0.06] px-4 py-3 font-mono text-[12px] leading-relaxed text-warn/90"><span class="mt-px">⚠</span><span>GitHub unreachable — showing local logs only. Titles and states may be missing.<br><span class="text-warn/60">{{.GHError}}</span></span></div>{{end}}
  {{with .Selected}}
   {{$k := stateKind .StateLabel}}

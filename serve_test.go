@@ -800,3 +800,77 @@ func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
 		t.Fatalf("page still loads the Tailwind browser CDN")
 	}
 }
+
+func post(t *testing.T, h http.Handler, target string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, nil).WithContext(context.Background())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// serverWithOrch builds a Server and a real Orchestrator sharing one fake runner
+// and workDir, with issue 7's log dir seeded to the given state.
+func serverWithOrch(t *testing.T, state string, session bool) (*Server, *fakeEnv) {
+	t.Helper()
+	env := newFakeEnv(t)
+	cfg := &Config{
+		RepoPath: "/clone", RepoSlug: "org/repo", EligibleLabel: "ai-agent",
+		WorkDir: env.wtDir, MaxQARounds: 3, StateLabels: defaultStateLabels(),
+		Models: Models{Architect: ModelConfig{Model: "opus"}, Triage: ModelConfig{Model: "sonnet"}},
+	}
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if session {
+		if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordState(logDir, state)
+	o := &Orchestrator{cfg: cfg, runner: env.f, gh: NewGitHub(env.f, cfg), wt: &Worktree{runner: env.f, repoPath: cfg.RepoPath}}
+	o.gh.retry = testRetry
+	s, err := NewServer(env.f, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.orch = o
+	return s, env
+}
+
+func TestContinueRouteQueuesReworkAndRendersFragment(t *testing.T) {
+	s, env := serverWithOrch(t, "ai-stopped", true /* session */)
+	code, body := post(t, s.Handler(), "/continue?issue=7")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if strings.Contains(body, "<html") {
+		t.Fatal("continue should return the detail fragment, not a full page")
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
+		t.Fatalf("continue did not queue rework, got %v", swap)
+	}
+}
+
+func TestStopRouteInvokesOrchestratorAndRenders(t *testing.T) {
+	s, _ := serverWithOrch(t, "ai-wip", true)
+	// Nothing is in flight, so Stop returns errNotRunning and we render an inline
+	// notice — not a 5xx.
+	code, body := post(t, s.Handler(), "/stop?issue=7")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (sentinel is non-fatal)", code)
+	}
+	if !strings.Contains(body, "not running") {
+		t.Fatalf("expected an inline not-running notice, got: %s", body)
+	}
+}
+
+func TestMutateRouteRejectsBadIssue(t *testing.T) {
+	s, _ := serverWithOrch(t, "ai-wip", true)
+	code, _ := post(t, s.Handler(), "/stop?issue=abc")
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a non-numeric issue", code)
+	}
+}
