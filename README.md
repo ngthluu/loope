@@ -66,6 +66,7 @@ Label lifecycle (names configurable, see below):
 | `ai-wip`    | The loop is working on it                            |
 | `ai-done`   | PR created; issue leaves the queue                   |
 | `ai-rework` | Pipeline hit an error; progress preserved for manual rework      |
+| `ai-stopped` | You stopped it: work is halted and all progress preserved, awaiting `-continue` |
 | `ai-needs-info` | Brainstorm wasn't confident enough; awaiting author clarification |
 
 On failure the loop comments the error on the issue, swaps `ai-wip` →
@@ -84,6 +85,34 @@ and ships the PR (swapping `ai-rework` → `ai-done`). It is idempotent — if i
 fails again the issue stays `ai-rework` with the worktree intact, so you can
 re-run it. If the worktree or session file is gone, remove the `ai-rework`
 label to re-queue the issue from scratch.
+
+### Stop and continue a ticket
+
+You can take a ticket out of the loop's hands at any stage and put it back
+later. Nothing is deleted: the worktree, branch, logs, and Claude session id are
+all preserved.
+
+```bash
+./loope -stop <N> -config loope.json      # halt work on #N, park it as ai-stopped
+./loope -continue <N> -config loope.json  # resume #N from its saved session and ship it
+```
+
+`-stop` works on a running (`ai-wip`), queued (`ai-agent`), or parked
+(`ai-rework`) ticket, and it is safe to run in a second shell while the daemon
+is running: it writes a durable marker under `logs/issue-<N>/stop`, returns
+immediately, and the daemon halts the live session within a couple of seconds
+(the `claude` process gets a `SIGTERM` so it can flush its transcript). A
+stopped ticket is **never** auto-resumed — that is the whole point of it being
+its own state rather than `ai-rework`.
+
+`-continue` resumes the persisted Claude session in the preserved worktree and
+ships the PR, exactly as `-rework` does, swapping `ai-stopped` → `ai-wip` →
+`ai-done`. It runs synchronously and exits when the ticket ships or parks. If
+the ticket was stopped before any work started (no worktree or no saved
+session), continue simply re-queues it and the next poll cycle picks it up from
+scratch.
+
+Both verbs are also available as buttons in the dashboard's detail pane.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing
 > `ai-failed` issues are still recognized and stay out of the queue.
@@ -109,6 +138,7 @@ gh label create ai-wip    --repo your-org/your-repo
 gh label create ai-done   --repo your-org/your-repo
 gh label create ai-rework --repo your-org/your-repo
 gh label create ai-needs-info --repo your-org/your-repo
+gh label create ai-stopped --repo your-org/your-repo
 ```
 
 ## Build and run
@@ -141,6 +171,12 @@ timeline:
 |----------|------------------|------------------------------------|
 | `-serve` | off              | Serve the dashboard while also running the poll loop |
 | `-addr`  | `localhost:8080` | Address to listen on               |
+
+> **Keep `-addr` bound to `localhost`** (as it defaults to). The dashboard's
+> stop and continue buttons POST to `/stop` and `/continue`, which mutate ticket
+> state, and — like the rest of the dashboard — they are unauthenticated. Binding
+> to a public interface hands anyone who can reach the port control over your
+> tickets.
 
 The dashboard side rebuilds the view from two sources: the `logs/issue-<N>/`
 artifacts on disk and current issue label/title state from `gh` (TTL-cached for
@@ -183,7 +219,7 @@ with `~/`.
 The state labels are configurable; unset fields keep their defaults:
 
 ```json
-"stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info"}
+"stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info", "stopped": "ai-stopped"}
 ```
 
 Partial overrides work — `{"wip": "bot-wip"}` renames only the WIP label.

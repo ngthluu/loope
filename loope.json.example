@@ -9,7 +9,7 @@
   "claudeConfigDir": "~/.claude-personal",
   "maxQARounds": 20,
   "confidenceThreshold": 70,
-  "stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info"},
+  "stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info", "stopped": "ai-stopped"},
   "githubRetry": {"maxAttempts": 0, "baseDelaySec": 2, "maxDelaySec": 60},
   "models": {
     "architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100},
