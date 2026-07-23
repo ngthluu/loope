@@ -29,6 +29,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 			Model:           cfg.Models.Architect,
 			SkipPermissions: true,
 			DisallowedTools: []string{"AskUserQuestion"},
+			Kind:            "feature",
 		})
 	}
 
@@ -121,6 +122,7 @@ func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, spe
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Kind:            "feature",
 	})
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature")
@@ -144,6 +146,7 @@ func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath s
 		Model:           cfg.Models.executeConfig(),
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Kind:            "feature",
 	})
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature")

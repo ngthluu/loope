@@ -11,6 +11,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Kind:            "bug",
 	})
 	// Record before the error check: an errored call (e.g. a 429 session limit)
 	// still returns a session id, and preserving it lets `loop -rework` resume.

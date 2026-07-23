@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -472,5 +473,86 @@ func TestClaudeResultLegacyNoUsageIsZero(t *testing.T) {
 	if cr.NumTurns != 0 || cr.DurationMS != 0 || cr.Usage.InputTokens != 0 || cr.Usage.OutputTokens != 0 {
 		t.Fatalf("legacy log should decode usage as zero, got turns=%d dur=%d usage=%+v",
 			cr.NumTurns, cr.DurationMS, cr.Usage)
+	}
+}
+
+// midStreamRunner writes an init event, then calls check (which asserts the
+// session file already exists), then writes the terminal result event. It is
+// how we prove the sniffer persists the id BEFORE Call returns.
+type midStreamRunner struct {
+	initLine   string
+	resultLine string
+	check      func()
+}
+
+func (m midStreamRunner) Run(ctx context.Context, dir string, env []string, stdin, name string, args ...string) (string, string, error) {
+	return "", "", nil
+}
+
+func (m midStreamRunner) RunStream(ctx context.Context, dir string, env []string, stdin string, w io.Writer, name string, args ...string) (string, error) {
+	_, _ = io.WriteString(w, m.initLine+"\n")
+	if m.check != nil {
+		m.check()
+	}
+	_, _ = io.WriteString(w, m.resultLine+"\n")
+	return "", nil
+}
+
+func TestCallWithKindRecordsSessionMidStream(t *testing.T) {
+	dir := t.TempDir()
+	var midID string
+	r := midStreamRunner{
+		initLine:   `{"type":"system","subtype":"init","session_id":"live-1"}`,
+		resultLine: `{"type":"result","result":"done","session_id":"live-1","is_error":false}`,
+		check: func() {
+			if si, err := readSession(dir); err == nil {
+				midID = si.SessionID
+			}
+		},
+	}
+	c := &Claude{runner: r, logDir: dir}
+	if _, err := c.Call(context.Background(), ClaudeCall{Label: "execute", Kind: "feature", Prompt: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	if midID != "live-1" {
+		t.Fatalf("session recorded mid-stream = %q, want live-1 (a stop mid-call must leave a resumable session)", midID)
+	}
+	si, err := readSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if si.Kind != "feature" {
+		t.Fatalf("kind = %q, want feature", si.Kind)
+	}
+}
+
+func TestCallWithoutKindNeverWritesSession(t *testing.T) {
+	dir := t.TempDir()
+	r := midStreamRunner{
+		initLine:   `{"type":"system","subtype":"init","session_id":"eph-1"}`,
+		resultLine: `{"type":"result","result":"answer","session_id":"eph-1","is_error":false}`,
+	}
+	c := &Claude{runner: r, logDir: dir}
+	if _, err := c.Call(context.Background(), ClaudeCall{Label: "answer-1", Prompt: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSession(dir); err == nil {
+		t.Fatal("an ephemeral (Kind-less) call must never write the session file")
+	}
+}
+
+func TestCallWithKindToleratesMalformedStreamLines(t *testing.T) {
+	dir := t.TempDir()
+	r := midStreamRunner{
+		initLine:   `{not json at all`,
+		resultLine: `{"type":"result","result":"done","session_id":"late-1","is_error":false}`,
+	}
+	c := &Claude{runner: r, logDir: dir}
+	res, err := c.Call(context.Background(), ClaudeCall{Label: "execute", Kind: "bug", Prompt: "go"})
+	if err != nil {
+		t.Fatalf("a malformed stream line must not fail the call: %v", err)
+	}
+	if res.SessionID != "late-1" {
+		t.Fatalf("session id = %q, want late-1", res.SessionID)
 	}
 }

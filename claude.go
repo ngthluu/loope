@@ -77,6 +77,12 @@ type ClaudeCall struct {
 	Resume          string
 	DisallowedTools []string
 	SkipPermissions bool
+	// Kind, when non-empty, marks this as a primary working session: its id is
+	// persisted the moment claude announces it, not after the call returns, so a
+	// session killed mid-call is still resumable. It is the pipeline kind
+	// ("bug"/"feature") stored alongside the id. Ephemeral calls (triage,
+	// answerer) leave it empty and never touch the session file.
+	Kind string
 }
 
 func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, error) {
@@ -116,6 +122,11 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	if f := c.streamFile(seq, call.Label); f != nil {
 		defer f.Close()
 		sink = io.MultiWriter(f, &buf)
+	}
+	// A primary working session persists its id the moment claude announces it,
+	// so a stop or crash mid-call still leaves something continue can resume.
+	if call.Kind != "" {
+		sink = &sessionSniffer{w: sink, on: func(id string) { c.RecordSession(id, call.Kind) }}
 	}
 	stderr, err := c.runner.RunStream(ctx, call.Dir, env, call.Prompt, sink, "claude", args...)
 	if err != nil {
@@ -229,6 +240,54 @@ func (c *Claude) RecordSession(id, kind string) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(c.logDir, "session"), b, 0o644)
+}
+
+// sessionSniffer wraps the stream sink, watching arriving stream-json lines for
+// the first session_id and persisting it immediately. Without this, a session
+// killed mid-call (a stop, a crash) would leave `session` pointing at the
+// previous step, and continue would resume the wrong session or none at all.
+// It writes through unconditionally and never fails a call: sniffing is
+// best-effort, exactly like the other log-writers.
+type sessionSniffer struct {
+	w    io.Writer
+	buf  []byte // partial trailing line
+	done bool
+	on   func(id string)
+}
+
+func (s *sessionSniffer) Write(p []byte) (int, error) {
+	n, err := s.w.Write(p)
+	if s.done {
+		return n, err
+	}
+	s.buf = append(s.buf, p...)
+	for {
+		i := bytes.IndexByte(s.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := s.buf[:i]
+		s.buf = s.buf[i+1:]
+		if id := sniffSessionID(line); id != "" {
+			s.done = true
+			s.buf = nil
+			s.on(id)
+			break
+		}
+	}
+	return n, err
+}
+
+// sniffSessionID returns the session_id carried by one stream-json line, or ""
+// when the line is malformed or carries none.
+func sniffSessionID(line []byte) string {
+	var ev struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(line), &ev) != nil {
+		return ""
+	}
+	return ev.SessionID
 }
 
 // readSession reads the SessionInfo written by RecordSession from logDir.
