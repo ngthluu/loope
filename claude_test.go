@@ -18,7 +18,7 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 		Label:           "brainstorm-0",
 		Prompt:          "hello",
 		Model:           ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100},
-		SkipPermissions: true,
+		PermissionMode:  permissionModeAuto,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	if err != nil {
@@ -31,7 +31,7 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 	if call.name != "claude" || call.dir != "/wt" {
 		t.Errorf("call = %+v", call)
 	}
-	for _, want := range []string{"-p", "--dangerously-skip-permissions"} {
+	for _, want := range []string{"-p", "--permission-mode"} {
 		if !hasArg(call.args, want) {
 			t.Errorf("args missing %q: %v", want, call.args)
 		}
@@ -76,7 +76,7 @@ func TestCallFeedsPromptViaStdin(t *testing.T) {
 		Label:           "brainstorm-0",
 		Prompt:          prompt,
 		Model:           ModelConfig{Model: "opus"},
-		SkipPermissions: true,
+		PermissionMode:  permissionModeAuto,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	if err != nil {

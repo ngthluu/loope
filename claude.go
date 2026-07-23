@@ -69,14 +69,52 @@ type Claude struct {
 	seq       int
 }
 
+// permissionModeAuto is the permission mode every pipeline session runs under.
+// It auto-approves tool calls behind claude's background safety checks instead
+// of disabling the permission system wholesale, as
+// --dangerously-skip-permissions did.
+const permissionModeAuto = "auto"
+
+// pipelineAllowedTools pre-approves the operations the loop itself depends on.
+// Auto mode escalates to a permission prompt when its safety check flags a
+// call, and a headless (-p) session has nobody to answer that prompt: the run
+// aborts. Pre-approving the git/gh work the pipeline exists to do (commit,
+// push, open the PR) keeps the loop moving without prompting, while everything
+// else still goes through auto mode's checks.
+var pipelineAllowedTools = []string{"Bash(git *)", "Bash(gh *)"}
+
 type ClaudeCall struct {
-	Dir             string
-	Label           string
-	Prompt          string
-	Model           ModelConfig
-	Resume          string
+	Dir    string
+	Label  string
+	Prompt string
+	Model  ModelConfig
+	Resume string
+	// PermissionMode is claude's --permission-mode. Empty leaves the flag off,
+	// so the session runs under claude's default (prompting) mode.
+	PermissionMode  string
+	AllowedTools    []string
 	DisallowedTools []string
-	SkipPermissions bool
+}
+
+// unattended returns the call with the policy every headless pipeline session
+// shares: auto permission mode, the pipeline allow-list, and AskUserQuestion
+// denied so no session can ever stop waiting on a human.
+func unattended(call ClaudeCall) ClaudeCall {
+	call.PermissionMode = permissionModeAuto
+	call.AllowedTools = pipelineAllowedTools
+	if !contains(call.DisallowedTools, "AskUserQuestion") {
+		call.DisallowedTools = append(call.DisallowedTools, "AskUserQuestion")
+	}
+	return call
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, error) {
@@ -91,8 +129,11 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	if call.Model.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(call.Model.MaxTurns))
 	}
-	if call.SkipPermissions {
-		args = append(args, "--dangerously-skip-permissions")
+	if call.PermissionMode != "" {
+		args = append(args, "--permission-mode", call.PermissionMode)
+	}
+	if len(call.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(call.AllowedTools, ","))
 	}
 	if len(call.DisallowedTools) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(call.DisallowedTools, ","))

@@ -6,12 +6,10 @@ import (
 )
 
 func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent string) error {
-	res, err := c.Call(ctx, ClaudeCall{
+	res, err := c.Call(ctx, unattended(ClaudeCall{
 		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent),
-		Model:           cfg.Models.Architect,
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-	})
+		Model: cfg.Models.Architect,
+	}))
 	// Record before the error check: an errored call (e.g. a 429 session limit)
 	// still returns a session id, and preserving it lets `loop -rework` resume.
 	if res != nil {

@@ -36,12 +36,10 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 	}
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
-	res, err := c.Call(ctx, ClaudeCall{
+	res, err := c.Call(ctx, unattended(ClaudeCall{
 		Dir: wtPath, Label: "rework", Prompt: reworkPrompt(), Resume: si.SessionID,
-		Model:           o.cfg.Models.Architect,
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-	})
+		Model: o.cfg.Models.Architect,
+	}))
 	// Record before the error check so a rework that fails again (e.g. a fresh
 	// 429) still advances the saved session to the latest one for the next run.
 	if res != nil {

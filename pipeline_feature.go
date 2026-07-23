@@ -24,12 +24,10 @@ const specReadySentinel = "SPEC_READY:"
 func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string) error {
 	start := time.Now()
 	architect := func(label, prompt, resume string) (*ClaudeResult, error) {
-		return c.Call(ctx, ClaudeCall{
+		return c.Call(ctx, unattended(ClaudeCall{
 			Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
-			Model:           cfg.Models.Architect,
-			SkipPermissions: true,
-			DisallowedTools: []string{"AskUserQuestion"},
-		})
+			Model: cfg.Models.Architect,
+		}))
 	}
 
 	res, err := architect("brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
@@ -68,12 +66,11 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 			// Architect claims already implemented — the answerer (PO proxy)
 			// must confirm before we close. This confirmation is terminal, not a
 			// bounded round.
-			confirm, err := c.Call(ctx, ClaudeCall{
+			confirm, err := c.Call(ctx, unattended(ClaudeCall{
 				Dir: wtPath, Label: fmt.Sprintf("done-confirm-%d", round),
-				Prompt:          doneConfirmPrompt(issueContent, persona, reason),
-				Model:           cfg.Models.Answerer,
-				SkipPermissions: true,
-			})
+				Prompt: doneConfirmPrompt(issueContent, persona, reason),
+				Model:  cfg.Models.Answerer,
+			}))
 			if err != nil {
 				return err
 			}
@@ -89,12 +86,11 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 			return fmt.Errorf("feature pipeline: exceeded %d Q&A rounds without a completed spec", cfg.MaxQARounds)
 		}
 		if !donePushback {
-			ans, err := c.Call(ctx, ClaudeCall{
+			ans, err := c.Call(ctx, unattended(ClaudeCall{
 				Dir: wtPath, Label: fmt.Sprintf("answer-%d", round),
-				Prompt:          answererPrompt(issueContent, persona, output),
-				Model:           cfg.Models.Answerer,
-				SkipPermissions: true,
-			})
+				Prompt: answererPrompt(issueContent, persona, output),
+				Model:  cfg.Models.Answerer,
+			}))
 			if err != nil {
 				return err
 			}
@@ -116,12 +112,10 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 // approved spec into a committed plan, then executes it (session C). Both are
 // fresh sessions — the plan session must not carry brainstorm context.
 func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, specPath string, start time.Time) error {
-	res, err := c.Call(ctx, ClaudeCall{
+	res, err := c.Call(ctx, unattended(ClaudeCall{
 		Dir: wtPath, Label: "plan", Prompt: planPrompt(specPath),
-		Model:           cfg.Models.Architect,
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-	})
+		Model: cfg.Models.Architect,
+	}))
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature")
 	}
@@ -139,12 +133,10 @@ func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, spe
 }
 
 func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath string) error {
-	res, err := c.Call(ctx, ClaudeCall{
+	res, err := c.Call(ctx, unattended(ClaudeCall{
 		Dir: wtPath, Label: "execute", Prompt: executePrompt(planPath),
-		Model:           cfg.Models.executeConfig(),
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-	})
+		Model: cfg.Models.executeConfig(),
+	}))
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature")
 	}

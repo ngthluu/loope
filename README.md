@@ -96,9 +96,13 @@ label to re-queue the issue from scratch.
   edit issues, push branches, and open PRs on the target repo.
 - **claude** (Claude Code CLI), logged in.
 
-> **Warning:** pipeline sessions run with `--dangerously-skip-permissions` so
-> they can work unattended. Only point the loop at repositories where you are
-> comfortable with an autonomous agent reading, running, and committing code.
+> **Warning:** pipeline sessions run with `--permission-mode auto` so they can
+> work unattended: tool calls are auto-approved behind Claude Code's background
+> safety checks, and the loop's own `git`/`gh` commands are pre-approved via
+> `--allowedTools` so a safety escalation can never stall a headless run.
+> `AskUserQuestion` is disabled in every session for the same reason. Only point
+> the loop at repositories where you are comfortable with an autonomous agent
+> reading, running, and committing code.
 
 The state labels and the eligible label must exist in the repo before the
 loop can apply them:

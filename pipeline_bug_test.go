@@ -24,7 +24,7 @@ func TestBugPipelineSingleDebugSession(t *testing.T) {
 		!strings.Contains(prompt, "failing test first") {
 		t.Errorf("prompt = %s", prompt)
 	}
-	if call.dir != "/wt" || !hasArg(call.args, "--dangerously-skip-permissions") ||
+	if call.dir != "/wt" || argAfter(call.args, "--permission-mode") != permissionModeAuto ||
 		argAfter(call.args, "--model") != "opus" {
 		t.Errorf("call = %+v", call)
 	}
