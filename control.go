@@ -21,7 +21,14 @@ type runRegistry struct {
 // register claims issue n for a pipeline in this process. It returns false when
 // the issue is already registered, which is what stops a continue from starting
 // a second Claude session in a worktree one is already running in.
-func (r *runRegistry) register(n int, cancel context.CancelFunc) bool {
+//
+// onClaim, when non-nil, runs under the registry lock immediately after a
+// successful claim — and only then, so a run that loses the claim never touches
+// the winner's state. That is what orders a fresh run's stale-marker clear
+// against a concurrent Stop: both do their marker work inside this lock, so a
+// stop whose cancel finds the run registered knows the clear has already
+// happened and cannot wipe the marker it just wrote.
+func (r *runRegistry) register(n int, cancel context.CancelFunc, onClaim func()) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.live == nil {
@@ -31,6 +38,9 @@ func (r *runRegistry) register(n int, cancel context.CancelFunc) bool {
 		return false
 	}
 	r.live[n] = cancel
+	if onClaim != nil {
+		onClaim()
+	}
 	return true
 }
 
@@ -43,11 +53,15 @@ func (r *runRegistry) deregister(n int) {
 }
 
 // cancel halts issue n's pipeline if it is running in this process, reporting
-// whether one was found. The entry is left in place: the pipeline goroutine
-// deregisters as it unwinds.
-func (r *runRegistry) cancel(n int) bool {
+// whether one was found. found, when non-nil, runs under the registry lock on a
+// hit — see register for why the marker work belongs in there. The entry is left
+// in place: the pipeline goroutine deregisters as it unwinds.
+func (r *runRegistry) cancel(n int, found func()) bool {
 	r.mu.Lock()
 	fn, ok := r.live[n]
+	if ok && found != nil {
+		found()
+	}
 	r.mu.Unlock()
 	if !ok {
 		return false
@@ -121,12 +135,18 @@ func (o *Orchestrator) Stop(ctx context.Context, n int) error {
 
 	recordStopRequest(o.issueLogDir(n))
 
-	if o.registry.cancel(n) {
+	// Re-assert the marker under the registry lock on a hit. A pipeline picking
+	// this issue up in the same instant clears a stale hold as it claims the
+	// issue, and that clear could otherwise have landed between the write above
+	// and this cancel — leaving the run to unwind into a park instead of a stop.
+	// Finding the run registered proves its clear already ran, so re-writing here
+	// is the last word.
+	if o.registry.cancel(n, func() { recordStopRequest(o.issueLogDir(n)) }) {
 		log.Printf("stopping #%d (halting the running session)", n)
 		return nil
 	}
 	if state == o.cfg.StateLabels.WIP && lockOwnerAlive(o.cfg.WorkDir) {
-		log.Printf("stop requested for #%d — the running daemon will halt it shortly", n)
+		log.Printf("stop requested for #%d — the process running it will halt it shortly", n)
 		return nil
 	}
 	if err := o.finishStopped(ctx, n, state); err != nil {
@@ -144,8 +164,23 @@ func (o *Orchestrator) Stop(ctx context.Context, n int) error {
 // an already-cancelled one, clears the park cause so ResumeParked can never see
 // the issue as resumable, and deliberately LEAVES the stop marker: the marker is
 // cleared by continue, not by the stop completing.
+//
+// It is idempotent, because two processes legitimately race to finish the same
+// stop: the one that ran `-stop` (which labels when it has no reason to believe
+// another process will) and the one that owns the run (which labels as it
+// unwinds through the cancelled context). Whichever arrives second finds the
+// issue already stopped and must do nothing — a second "Stopped by request"
+// comment is noise, and swapping a label that has already moved is a spurious
+// error on a stop that in fact succeeded.
 func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel string) error {
 	cctx := context.WithoutCancel(ctx)
+	// A read failure here falls through to the labeling below: this check exists
+	// to suppress a duplicate, so losing it costs noise, never correctness.
+	if state, err := o.currentStateLabel(cctx, n); err == nil && state == o.cfg.StateLabels.Stopped {
+		recordState(o.issueLogDir(n), o.cfg.StateLabels.Stopped)
+		clearParkCause(o.issueLogDir(n))
+		return nil
+	}
 	_ = o.gh.Comment(cctx, n, fmt.Sprintf(
 		"🤖 Stopped by request. Progress is preserved — continue with `loope -continue %d` or the dashboard.", n))
 	if fromLabel == "" {
@@ -177,7 +212,7 @@ func (o *Orchestrator) watchStops(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			for _, n := range o.registry.numbers() {
 				if stopRequested(o.issueLogDir(n)) {
-					if o.registry.cancel(n) {
+					if o.registry.cancel(n, nil) {
 						log.Printf("issue #%d: stop requested — halting the running session", n)
 					}
 				}

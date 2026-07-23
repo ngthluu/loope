@@ -18,6 +18,11 @@ import (
 // and is overridden at release time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
+// stopWatchInterval is how often a process running pipelines re-checks its live
+// issues for a stop marker written by another process. One os.Stat per live
+// pipeline per tick, so it stays cheap on a quiet daemon.
+const stopWatchInterval = 2 * time.Second
+
 // cliFlags is loope's whole command-line surface. It is declared in one place
 // so the flag set can be built and asserted on without running main.
 type cliFlags struct {
@@ -70,6 +75,16 @@ func main() {
 	o := &Orchestrator{cfg: cfg, runner: r, gh: NewGitHub(r, cfg), baseCtx: ctx,
 		wt: &Worktree{runner: r, repoPath: cfg.RepoPath, retry: cfg.GitHubRetry.policy()}}
 
+	// -rework and -continue drive a live pipeline in THIS process, exactly as the
+	// daemon does, so they need the daemon's stop watcher too. Without it a
+	// `loope -stop <N>` from another shell has no way to reach this run: that
+	// process can only write the marker, and nothing here would ever read it — the
+	// stop would either silently do nothing or relabel the issue underneath a
+	// claude session that keeps running to completion.
+	if *f.rework > 0 || *f.continueIssue > 0 {
+		go o.watchStops(ctx, stopWatchInterval)
+	}
+
 	if *f.rework > 0 {
 		if err := o.Rework(ctx, *f.rework); err != nil {
 			log.Fatalf("rework #%d: %v", *f.rework, err)
@@ -120,9 +135,9 @@ func main() {
 		defer release()
 		sweep = true
 
-		// Only a lock-holding daemon owns live pipelines, so the watcher that
-		// halts them on an out-of-band stop belongs here.
-		go o.watchStops(ctx, 2*time.Second)
+		// The daemon owns live pipelines for as long as it holds the lock, so it
+		// needs the same watcher the one-shot modes above start.
+		go o.watchStops(ctx, stopWatchInterval)
 	}
 
 	if *f.serve {

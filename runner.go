@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -27,8 +28,9 @@ type execRunner struct{}
 
 // runnerWaitDelay is how long a cancelled process has to exit on SIGTERM before
 // exec escalates to SIGKILL. Ten seconds is enough for claude to flush its
-// session transcript, which is what makes a stop resumable.
-const runnerWaitDelay = 10 * time.Second
+// session transcript, which is what makes a stop resumable. A var, not a const,
+// so tests can shorten it.
+var runnerWaitDelay = 10 * time.Second
 
 // gracefulCancel makes ctx cancellation send SIGTERM rather than the SIGKILL
 // exec.CommandContext defaults to, escalating only if the process is still
@@ -37,6 +39,24 @@ const runnerWaitDelay = 10 * time.Second
 func gracefulCancel(cmd *exec.Cmd) {
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = runnerWaitDelay
+}
+
+// settle maps the result of cmd.Wait to what the caller should see.
+//
+// WaitDelay bounds two separate waits, not one: a cancelled process that will
+// not die, and a process that exited while a descendant still holds its stdout
+// pipe open. The second case is the one that bites here — a claude tool call
+// can leave an MCP server or a backgrounded shell holding that pipe — and exec
+// reports it as ErrWaitDelay on an otherwise clean run. That is a stray
+// file-descriptor report, not a failed command: the process exited 0 and its
+// output was fully drained before Wait gave up, so passing the error through
+// would throw away a good result and park the issue for rework. Anything else,
+// a cancellation included, is returned untouched.
+func settle(cmd *exec.Cmd, err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return nil
+	}
+	return err
 }
 
 func (execRunner) Run(ctx context.Context, dir string, env []string, stdin, name string, args ...string) (string, string, error) {
@@ -53,7 +73,7 @@ func (execRunner) Run(ctx context.Context, dir string, env []string, stdin, name
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return out.String(), errBuf.String(), err
+	return out.String(), errBuf.String(), settle(cmd, err)
 }
 
 func (execRunner) RunStream(ctx context.Context, dir string, env []string, stdin string, w io.Writer, name string, args ...string) (string, error) {
@@ -70,5 +90,5 @@ func (execRunner) RunStream(ctx context.Context, dir string, env []string, stdin
 	cmd.Stdout = w
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return errBuf.String(), err
+	return errBuf.String(), settle(cmd, err)
 }

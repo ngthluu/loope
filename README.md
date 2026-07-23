@@ -98,12 +98,15 @@ all preserved.
 ```
 
 `-stop` works on a running (`ai-wip`), queued (`ai-agent`), or parked
-(`ai-rework`) ticket, and it is safe to run in a second shell while the daemon
-is running: it writes a durable marker under `logs/issue-<N>/stop`, returns
-immediately, and the daemon halts the live session within a couple of seconds
-(the `claude` process gets a `SIGTERM` so it can flush its transcript). A
-stopped ticket is **never** auto-resumed — that is the whole point of it being
-its own state rather than `ai-rework`.
+(`ai-rework`) ticket, and it is safe to run in a second shell: it writes a
+durable marker under `logs/issue-<N>/stop`, returns immediately, and whichever
+process owns the run — the daemon, a `-rework`, or a `-continue` — halts the
+live session within a couple of seconds (the `claude` process gets a `SIGTERM`
+so it can flush its transcript). Wherever the stop lands in the pipeline, the
+ticket ends up in `ai-stopped` with everything preserved: it is never aborted
+back into the queue and never parked for rework. A stopped ticket is **never**
+auto-resumed — that is the whole point of it being its own state rather than
+`ai-rework`.
 
 `-continue` resumes the persisted Claude session in the preserved worktree and
 ships the PR, exactly as `-rework` does, swapping `ai-stopped` → `ai-wip` →
@@ -194,7 +197,10 @@ timeline:
 > stop and continue buttons POST to `/stop` and `/continue`, which mutate ticket
 > state, and — like the rest of the dashboard — they are unauthenticated. Binding
 > to a public interface hands anyone who can reach the port control over your
-> tickets.
+> tickets. Those two routes refuse cross-origin requests (so a page you happen to
+> be browsing cannot post to your dashboard's port), but that is not
+> authentication: it only stops the browser you are already using from being
+> turned against you.
 
 The dashboard side rebuilds the view from two sources: the `logs/issue-<N>/`
 artifacts on disk and current issue label/title state from `gh` (TTL-cached for

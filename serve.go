@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -103,7 +104,9 @@ func NewServer(r Runner, cfg *Config, ctl Controller) (*Server, error) {
 
 // Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail and
 // GET /detail (the poll fragments), and the mutating /stop and /continue, which
-// accept POST only so a link or a crawler cannot trigger either.
+// accept POST only so a link or a crawler cannot trigger either, and only from
+// the dashboard's own origin so another page the operator is browsing cannot
+// either (see sameOrigin).
 //
 // The mutating routes are registered method-less and check the method in act:
 // a method-scoped "POST /stop" would leave GET /stop to be swallowed by the
@@ -143,6 +146,10 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, fn func(int) error)
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
 	}
+	if !sameOrigin(r) {
+		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
 	if s.ctl == nil {
 		http.Error(w, "no daemon behind this dashboard", http.StatusServiceUnavailable)
 		return
@@ -157,6 +164,40 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, fn func(int) error)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sameOrigin reports whether a mutating request came from the dashboard itself.
+//
+// POST alone does not protect these routes: a form post is a CORS-simple
+// request, so any page the operator happens to be browsing can submit one at
+// localhost:8080 and halt or resume a ticket, and the attacker never needs to
+// read the (opaque) response. The dashboard has no login and therefore no
+// session token to bind a CSRF token to, so the check is the header pair every
+// current browser attaches and no cross-site page can forge: Sec-Fetch-Site,
+// falling back to Origin against the request's own Host.
+//
+// A client that sends neither (curl, a script, the CLI) is allowed through:
+// those are not the confused deputy this is defending against, and the routes
+// are deliberately usable without a browser.
+func sameOrigin(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "":
+		// No Fetch Metadata: fall through to the Origin check below.
+	default:
+		// "cross-site" or "same-site" — a different origin either way.
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // stats is the fleet-wide telemetry shown in the command bar: how many tickets

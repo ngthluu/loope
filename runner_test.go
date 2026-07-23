@@ -84,6 +84,53 @@ func TestExecRunnerStreamReturnsErrorOnNonZeroExit(t *testing.T) {
 	}
 }
 
+// shortWaitDelay shrinks the WaitDelay so the lingering-descendant tests below
+// finish in well under a second instead of the production ten.
+func shortWaitDelay(t *testing.T) {
+	t.Helper()
+	prev := runnerWaitDelay
+	runnerWaitDelay = 100 * time.Millisecond
+	t.Cleanup(func() { runnerWaitDelay = prev })
+}
+
+// A claude tool call can leave a descendant (an MCP server, a backgrounded
+// shell) holding the stdout pipe after claude itself exits 0. exec reports that
+// as ErrWaitDelay once WaitDelay expires; treating it as a failure would throw
+// away a successful result and park the issue for rework.
+func TestExecRunnerSucceedsWhenDescendantOutlivesACleanExit(t *testing.T) {
+	shortWaitDelay(t)
+	var r execRunner
+	out, _, err := r.Run(context.Background(), "", nil, "", "sh", "-c", "sleep 5 & printf done")
+	if err != nil {
+		t.Fatalf("a command that exited 0 must not fail because a descendant held the pipe: %v", err)
+	}
+	if out != "done" {
+		t.Errorf("stdout = %q, want %q", out, "done")
+	}
+}
+
+func TestExecRunnerStreamSucceedsWhenDescendantOutlivesACleanExit(t *testing.T) {
+	shortWaitDelay(t)
+	var r execRunner
+	var buf bytes.Buffer
+	if _, err := r.RunStream(context.Background(), "", nil, "", &buf, "sh", "-c", "sleep 5 & printf done"); err != nil {
+		t.Fatalf("a streamed command that exited 0 must not fail because a descendant held the pipe: %v", err)
+	}
+	if buf.String() != "done" {
+		t.Errorf("streamed stdout = %q, want %q", buf.String(), "done")
+	}
+}
+
+// The ErrWaitDelay allowance is scoped to a CLEAN exit: a non-zero exit with a
+// lingering descendant is still a failure.
+func TestExecRunnerStillFailsWhenExitIsNonZeroWithLingeringDescendant(t *testing.T) {
+	shortWaitDelay(t)
+	var r execRunner
+	if _, _, err := r.Run(context.Background(), "", nil, "", "sh", "-c", "sleep 5 & exit 3"); err == nil {
+		t.Error("want error on non-zero exit, got nil")
+	}
+}
+
 // A cancelled command must be asked to exit with SIGTERM first, so claude gets
 // a chance to flush its session transcript before it dies. The trap records
 // that it arrived; a SIGKILL is untrappable and would leave no marker.

@@ -165,7 +165,13 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	// below.
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if !o.registry.register(n, cancel) {
+	// A marker left over from an earlier life of this issue — stopped, then
+	// re-queued by a human removing the label rather than by continue — would
+	// make this fresh run finish as stopped the instant it reached ship or park.
+	// The issue being eligible at all is the decision to run it, so the hold is
+	// stale by definition. Clearing it as part of the claim (rather than after)
+	// is what lets a racing Stop know its own marker is safe; see register.
+	if !o.registry.register(n, cancel, func() { clearStopRequest(o.issueLogDir(n)) }) {
 		return fmt.Errorf("issue #%d is already running", n)
 	}
 	defer o.registry.deregister(n)
@@ -177,11 +183,11 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 
 	wtPath, err := o.wt.Create(ictx, o.cfg.WorkDir, n, base)
 	if err != nil {
-		return o.abort(ictx, n, "", "", err)
+		return o.stopOrAbort(ictx, n, "", "", err)
 	}
 	content, err := o.gh.FetchIssueContent(ictx, n)
 	if err != nil {
-		return o.abort(ictx, n, wtPath, branch, err)
+		return o.stopOrAbort(ictx, n, wtPath, branch, err)
 	}
 	content = DownloadIssueImages(ictx, o.runner, content, o.issueLogDir(n))
 
@@ -232,6 +238,7 @@ func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, fr
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
 	clearParkCause(o.issueLogDir(n))
+	clearStopRequest(o.issueLogDir(n))
 	return o.gh.CloseIssue(cctx, n)
 }
 
@@ -260,6 +267,7 @@ func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, wtPath, branc
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.NeedsInfo)
 	clearParkCause(o.issueLogDir(n))
+	clearStopRequest(o.issueLogDir(n))
 	return nil
 }
 
@@ -313,6 +321,15 @@ func failureGuidance(cause error) string {
 // file are left untouched. Uses a cancellation-proof context so a Ctrl-C
 // mid-pipeline still records the state.
 func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause error) error {
+	// An operator hold outranks a park, and this is the backstop that guarantees
+	// it for every caller (a ship failure, a panic) — not just the pipeline paths
+	// that check the marker themselves. Parking with a stop pending would leave
+	// the issue in rework WITH a marker: shouldResume refuses it ("stopped by
+	// request") and continue refuses it ("not stopped"), so nothing but a human
+	// deleting the file could ever move it again.
+	if stopRequested(o.issueLogDir(n)) {
+		return o.finishStopped(ctx, n, fromLabel)
+	}
 	cctx := context.WithoutCancel(ctx)
 	guidance, resumable := classifyCause(cause.Error())
 	// A repeated resumable failure while already parked re-parks silently: the
@@ -479,6 +496,7 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		}
 		clearState(logDir)
 		clearParkCause(logDir)
+		clearStopRequest(logDir)
 	}
 	return nil
 }
@@ -494,6 +512,14 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // commits also parks. Returns nil only when fully shipped.
 func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, base, kind, fromLabel string) error {
 	n := issue.Number
+	// A stop that lands between the pipeline succeeding and the push is still a
+	// stop: honour the hold before touching git or gh, rather than pushing and
+	// opening a PR on a ticket the operator just halted. (park is the backstop
+	// for a stop that lands mid-ship, once these calls start failing on the
+	// cancelled context.)
+	if stopRequested(o.issueLogDir(n)) {
+		return o.finishStopped(ctx, n, fromLabel)
+	}
 	onInfra := func(err error) error {
 		return o.park(ctx, n, fromLabel, err)
 	}
@@ -524,6 +550,7 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
 	clearParkCause(o.issueLogDir(n))
+	clearStopRequest(o.issueLogDir(n))
 	_ = o.wt.Remove(ctx, wtPath)
 	return nil
 }
@@ -541,6 +568,7 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 	_ = o.gh.RemoveLabel(cctx, n, o.cfg.StateLabels.WIP)
 	clearState(o.issueLogDir(n))
 	clearParkCause(o.issueLogDir(n))
+	clearStopRequest(o.issueLogDir(n))
 	if wtPath != "" {
 		_ = o.wt.Remove(cctx, wtPath)
 	}
@@ -548,4 +576,18 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 		_ = o.wt.DeleteBranch(cctx, branch)
 	}
 	return cause
+}
+
+// stopOrAbort routes a setup-phase tooling failure. A stop cancels the
+// pipeline's context, so the git/gh call in flight fails like any other tooling
+// error — but abort is destructive (it deletes the worktree and branch and
+// re-queues the ticket), which is the exact opposite of what a stop promised.
+// The marker is what tells the two apart, so check it before backing anything
+// out: an operator hold finishes as stopped, preserving whatever setup got as
+// far as creating.
+func (o *Orchestrator) stopOrAbort(ctx context.Context, n int, wtPath, branch string, cause error) error {
+	if stopRequested(o.issueLogDir(n)) {
+		return o.finishStopped(ctx, n, o.cfg.StateLabels.WIP)
+	}
+	return o.abort(ctx, n, wtPath, branch, cause)
 }

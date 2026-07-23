@@ -39,7 +39,10 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if !o.registry.register(n, cancel) {
+	// No stale-marker clear here, unlike handleIssue: a resume continues an
+	// existing life of the issue rather than starting a fresh one, and continue
+	// has already lifted the hold it was resuming from.
+	if !o.registry.register(n, cancel, nil) {
 		return fmt.Errorf("#%d is already running", n)
 	}
 	defer o.registry.deregister(n)

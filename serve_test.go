@@ -596,6 +596,70 @@ func TestGetStopIsNotRegistered(t *testing.T) {
 	}
 }
 
+// postFrom issues a POST carrying the headers a browser attaches, so the
+// cross-origin guard can be exercised the way a real request would hit it.
+func postFrom(t *testing.T, h http.Handler, target string, headers map[string]string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, nil).WithContext(context.Background())
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// POST alone does not protect a mutating route: a cross-site form post is a
+// CORS-simple request, so any page the operator browses could halt a ticket on
+// the dashboard's well-known localhost port and never need to read the response.
+func TestCrossSitePostIsRefused(t *testing.T) {
+	for _, h := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "http://evil.example"},
+	} {
+		ctl := &fakeController{}
+		s := newTestServerWithController(t, ctl)
+		code, _ := postFrom(t, s.Handler(), "/stop?issue=142", h)
+		if code != http.StatusForbidden {
+			t.Errorf("headers %v: code = %d, want 403", h, code)
+		}
+		if len(ctl.stopped) != 0 {
+			t.Errorf("headers %v: a refused request must not reach the controller", h)
+		}
+	}
+}
+
+func TestSameOriginPostIsAllowed(t *testing.T) {
+	for _, h := range []map[string]string{
+		{"Sec-Fetch-Site": "same-origin"},
+		{"Sec-Fetch-Site": "none"},
+		{"Origin": "http://example.com"}, // httptest's default Host
+		{},                               // curl or the CLI: no browser headers at all
+	} {
+		ctl := &fakeController{}
+		s := newTestServerWithController(t, ctl)
+		code, body := postFrom(t, s.Handler(), "/stop?issue=142", h)
+		if code != http.StatusNoContent {
+			t.Errorf("headers %v: code = %d body = %q, want 204", h, code, body)
+		}
+	}
+}
+
+// Fetch Metadata wins over Origin when both are present: it is the header a
+// cross-site page cannot influence.
+func TestSecFetchSiteOverridesAMatchingOrigin(t *testing.T) {
+	ctl := &fakeController{}
+	s := newTestServerWithController(t, ctl)
+	code, _ := postFrom(t, s.Handler(), "/stop?issue=142", map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+		"Origin":         "http://example.com",
+	})
+	if code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403", code)
+	}
+}
+
 func TestNilControllerRoutesAre503AndButtonsAbsent(t *testing.T) {
 	s := newTestServer(t) // ctl is nil
 	if code, _ := postTo(t, s.Handler(), "/stop?issue=142"); code != http.StatusServiceUnavailable {

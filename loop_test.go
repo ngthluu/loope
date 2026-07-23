@@ -951,7 +951,16 @@ func TestHandleIssuePipelineErrorWithStopMarkerFinishesStopped(t *testing.T) {
 	env := newFakeEnv(t)
 	env.failClaude = true
 	o := env.orchestrator()
-	recordStopRequest(o.issueLogDir(7))
+	// The stop lands mid-pipeline, which is the only way a marker can be present
+	// here: picking the issue up clears any stale one, so a marker this run sees
+	// was written by an operator while the run was live.
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" {
+			recordStopRequest(o.issueLogDir(7))
+		}
+		return base(c)
+	}
 
 	err := o.handleIssue(context.Background(), Issue{Number: 7, Title: "Fix crash"}, "bug", "origin/main")
 	if err != nil {

@@ -283,8 +283,12 @@ func stopRequested(logDir string) bool {
 	return err == nil
 }
 
-// clearStopRequest removes the stop marker. Called by continue — never by the
-// stop completing, since the marker is the durable record of the hold.
+// clearStopRequest removes the stop marker. Never called by the stop
+// completing: the marker is the durable record of the hold, and finishStopped
+// deliberately leaves it. It is cleared by continue (the hold is lifted) and by
+// every transition into a terminal non-stopped state — done, needs-info, or
+// re-queued — where the hold no longer describes anything. A marker left behind
+// by one of those would outlive its run and misread the NEXT one as stopped.
 func clearStopRequest(logDir string) {
 	if logDir == "" {
 		return
