@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -52,5 +53,58 @@ func TestRunLoopOnceDrainsInFlightPipelines(t *testing.T) {
 	}
 	if n := len(env.callsMatching("gh", "pr create")); n != 1 {
 		t.Fatalf("pr create count = %d, want 1 (the pipeline must have completed)", n)
+	}
+}
+
+func TestGateBlocksOnRequiredFailure(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"claude --version": {err: errors.New("not found")},
+	})}
+	var buf bytes.Buffer
+	code, proceed := gate(context.Background(), &buf, f, preflightConfig(), false)
+	if proceed {
+		t.Fatal("proceed = true, want false when a required check failed")
+	}
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(buf.String(), "claude") {
+		t.Fatalf("report must name the failing check, got %q", buf.String())
+	}
+}
+
+func TestGateWarningsOnlyProceedSilently(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"curl --version": {err: errors.New("not found")},
+	})}
+	var buf bytes.Buffer
+	code, proceed := gate(context.Background(), &buf, f, preflightConfig(), false)
+	if !proceed || code != 0 {
+		t.Fatalf("gate = (%d, %v), want (0, true) for warnings only", code, proceed)
+	}
+	if buf.String() != "" {
+		t.Fatalf("a healthy run must print nothing, got %q", buf.String())
+	}
+}
+
+func TestGateDoctorAlwaysReportsAndNeverProceeds(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	var buf bytes.Buffer
+	code, proceed := gate(context.Background(), &buf, f, preflightConfig(), true)
+	if proceed {
+		t.Fatal("-doctor must never proceed into the loop")
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 when everything passes", code)
+	}
+	if !strings.Contains(buf.String(), "loope preflight") {
+		t.Fatalf("-doctor must print the report even when healthy, got %q", buf.String())
+	}
+
+	f2 := &fakeRunner{handler: okHandler(map[string]rresp{"gh --version": {err: errors.New("not found")}})}
+	var buf2 bytes.Buffer
+	code2, _ := gate(context.Background(), &buf2, f2, preflightConfig(), true)
+	if code2 != 1 {
+		t.Fatalf("-doctor exit code = %d, want 1 when a required check failed", code2)
 	}
 }
