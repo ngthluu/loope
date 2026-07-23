@@ -545,3 +545,39 @@ func TestStaticUnknownPath404(t *testing.T) {
 		t.Fatalf("status = %d, want 404", code)
 	}
 }
+
+func TestPageWiresHTMXPolling(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	for _, want := range []string{
+		`src="/static/htmx.min.js"`,
+		`src="/static/idiomorph-ext.min.js"`,
+		`src="/static/app.js"`,
+		`hx-ext="morph"`,
+		`hx-get="/rail?issue=142"`,
+		`hx-get="/detail?issue=142"`,
+		`hx-trigger="every 3s"`,
+		`hx-swap="morph:innerHTML"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page missing %q", want)
+		}
+	}
+}
+
+// The rail's ticket rows and the pipeline's step items must stay keyed, so
+// idiomorph matches them by identity instead of rebuilding them on every poll.
+func TestPollFragmentsAreKeyed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, rail := get(t, h, "/rail?issue=142")
+	if !strings.Contains(rail, `data-k="t142"`) {
+		t.Fatalf("rail row not keyed: %s", rail)
+	}
+	_, detail := get(t, h, "/detail?issue=142")
+	if !strings.Contains(detail, `data-k="s1"`) {
+		t.Fatalf("step item not keyed: %s", detail)
+	}
+}
