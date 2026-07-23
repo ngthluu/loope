@@ -125,6 +125,14 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	}
 	// A primary working session persists its id the moment claude announces it,
 	// so a stop or crash mid-call still leaves something continue can resume.
+	//
+	// Sniffing can only ever advance the record to the session that is actually
+	// working, never away from it. A fresh call announces the new session, which
+	// IS the one to resume from — the point of doing this before the call
+	// returns. A resumed call announces the id it was given: claude reuses the
+	// original session id unless --fork-session is passed, which loope never
+	// does. If that ever changes, this write starts pointing continue at the fork
+	// rather than the original.
 	if call.Kind != "" {
 		sink = &sessionSniffer{w: sink, on: func(id string) { c.RecordSession(id, call.Kind) }}
 	}
