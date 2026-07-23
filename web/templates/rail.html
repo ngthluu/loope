@@ -7,7 +7,7 @@
  {{range .Tickets}}
   {{$sel := and $.Selected (eq .Number $.Selected.Number)}}
   {{$k := stateKind .StateLabel}}
-  <a href="/?issue={{.Number}}" data-k="t{{.Number}}" class="group relative block border-b border-line/60 pl-4 pr-3.5 py-3 {{if $sel}}bg-panel2{{else}}hover:bg-panel2/50{{end}}">
+  <a href="/?issue={{.Number}}" id="t{{.Number}}" class="group relative block border-b border-line/60 pl-4 pr-3.5 py-3 {{if $sel}}bg-panel2{{else}}hover:bg-panel2/50{{end}}">
    <span class="absolute inset-y-0 left-0 w-[3px] {{stripeClass .StateLabel}}"></span>
    <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
@@ -34,6 +34,11 @@
    <div class="flex items-center gap-1.5 text-faint"><span class="hb inline-block h-1.5 w-1.5 rounded-full bg-live"></span><span>live · <span id="ago" class="tabular-nums text-muted">0s</span> ago</span></div>
 {{end}}
 
-{{define "statbar-oob"}}<div id="statbar" hx-swap-oob="true" class="flex items-center gap-4 font-mono text-xs sm:gap-5">{{template "statbar" .}}</div>{{end}}
+{{/* The statbar wrapper is emitted twice — inline by "page" and again here for
+     the out-of-band swap, which replaces the whole element. The classes live in
+     one define so the two can never drift and re-layout the header mid-poll. */}}
+{{define "statbar-class"}}flex items-center gap-4 font-mono text-xs sm:gap-5{{end}}
+
+{{define "statbar-oob"}}<div id="statbar" hx-swap-oob="true" class="{{template "statbar-class"}}">{{template "statbar" .}}</div>{{end}}
 
 {{define "railpoll"}}{{template "rail" .}}{{template "statbar-oob" .}}{{end}}

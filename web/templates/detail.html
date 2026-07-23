@@ -50,7 +50,7 @@
    <ol class="relative pt-2">
     <span class="absolute left-[12px] top-2 bottom-4 w-px bg-line2" aria-hidden="true"></span>
     {{range .Steps}}
-    <li data-k="s{{.Seq}}" class="relative fadein pl-9 pb-2.5">
+    <li class="relative fadein pl-9 pb-2.5">
      <span class="{{nodeClass .Status}} absolute left-[6px] top-[14px] h-3.5 w-3.5 rounded-full border-2 border-ink" aria-hidden="true"></span>
      {{if eq .Status "running"}}<span class="ring absolute left-[6px] top-[14px] h-3.5 w-3.5 rounded-full" aria-hidden="true"></span>{{end}}
      {{template "stepcard" .}}

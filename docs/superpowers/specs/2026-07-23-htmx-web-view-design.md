@@ -237,8 +237,11 @@ signal that output drifted.
   with the selected issue number in the `hx-get` query.
 - The `/rail` response contains the `hx-swap-oob` statbar with the correct
   ticket, running and spend values.
-- Rail rows still carry `data-k="t<N>"` and step list items `data-k="s<seq>"`,
-  so idiomorph can key them.
+- Rail rows carry `id="t<N>"` and step cards `id="s<seq>"`, so idiomorph can key
+  them. The key must be `id` — idiomorph derives its match sets from id
+  attributes alone, so a bespoke `data-k` would read as keyed while actually
+  morphing positionally. Keying the step card rather than its wrapper covers
+  both the single-column and two-column pipeline layouts at once.
 - `/static/htmx.min.js`, `/static/idiomorph-ext.min.js`, `/static/app.js` and
   `/static/app.css` each serve 200 with a non-empty body and a sane
   `Content-Type`; an unknown static path serves 404.

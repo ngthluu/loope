@@ -1,4 +1,7 @@
-{{define "stepcard"}}<div class="fadein overflow-hidden rounded-md {{cardClass .Status}}">
+{{/* The id is idiomorph's matching key. It lives on the card rather than the
+     caller's wrapper so both pipeline layouts — the single-column <ol> and the
+     two-column architect/answerer grid — are keyed by the same one attribute. */}}
+{{define "stepcard"}}<div id="s{{.Seq}}" class="fadein overflow-hidden rounded-md {{cardClass .Status}}">
  <div class="flex items-center gap-3 px-4 py-2.5">
   <span class="w-7 shrink-0 font-mono text-[11px] tabular-nums text-faint">{{printf "%03d" .Seq}}</span>
   <span class="truncate text-[13px] font-medium text-text">{{.Label}}</span>

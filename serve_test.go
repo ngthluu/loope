@@ -584,17 +584,19 @@ func TestPageWiresHTMXPolling(t *testing.T) {
 	}
 }
 
-// The rail's ticket rows and the pipeline's step items must stay keyed, so
+// The rail's ticket rows and the pipeline's step cards must stay keyed, so
 // idiomorph matches them by identity instead of rebuilding them on every poll.
+// The key has to be `id`: idiomorph builds its match sets from id attributes
+// only, so a bespoke data-* key would look keyed while morphing positionally.
 func TestPollFragmentsAreKeyed(t *testing.T) {
 	h := newTestServer(t).Handler()
 	_, rail := get(t, h, "/rail?issue=142")
-	if !strings.Contains(rail, `data-k="t142"`) {
+	if !strings.Contains(rail, `id="t142"`) {
 		t.Fatalf("rail row not keyed: %s", rail)
 	}
 	_, detail := get(t, h, "/detail?issue=142")
-	if !strings.Contains(detail, `data-k="s1"`) {
-		t.Fatalf("step item not keyed: %s", detail)
+	if !strings.Contains(detail, `id="s1"`) {
+		t.Fatalf("step card not keyed: %s", detail)
 	}
 }
 
