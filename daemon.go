@@ -91,17 +91,41 @@ const runOwnerFile = "owner"
 
 func runOwnerPath(logDir string) string { return filepath.Join(logDir, runOwnerFile) }
 
-// recordRunOwner claims issue ownership for this process. Best-effort like the
-// other markers: losing it costs Stop precision (it labels the issue itself
-// instead of deferring), never the correctness of the run.
-func recordRunOwner(logDir string) {
+// claimRunOwner claims issue ownership for this process, reporting whether the
+// claim was won. It is the cross-process half of runRegistry.register and works
+// exactly like acquireLock: O_EXCL makes the claim atomic, so two processes
+// racing for the same issue cannot both read "nobody owns this" and both win.
+// A file naming a dead pid — or our own, left by a run that has already
+// unwound — is stale and is taken over.
+//
+// A claim that cannot be written (an unwritable log dir) is granted rather than
+// refused: the file is an advisory record, and refusing every run because of it
+// would trade a rare double-run for a daemon that ships nothing.
+func claimRunOwner(logDir string) bool {
 	if logDir == "" {
-		return
+		return true
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return
+		return true
 	}
-	_ = os.WriteFile(runOwnerPath(logDir), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	path := runOwnerPath(logDir)
+	if err := tryClaimLock(path); err == nil {
+		return true
+	} else if !os.IsExist(err) {
+		return true
+	}
+	// The file exists: only a live process OTHER than us is a real owner.
+	if otherProcessRunning(logDir) {
+		return false
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return true
+	}
+	// Retry the atomic claim exactly once. Losing that retry means a racing
+	// process created the file in between and now legitimately owns the issue —
+	// the only failure worth refusing over.
+	err := tryClaimLock(path)
+	return err == nil || !os.IsExist(err)
 }
 
 // clearRunOwner releases this process's claim on an issue. A file left behind
@@ -137,12 +161,6 @@ func runOwnerAlive(logDir string) (alive, isSelf bool) {
 func otherProcessRunning(logDir string) bool {
 	alive, isSelf := runOwnerAlive(logDir)
 	return alive && !isSelf
-}
-
-// pidFileAlive reports whether path holds the pid of a live process.
-func pidFileAlive(path string) bool {
-	pid, ok := readPIDFile(path)
-	return ok && pidAlive(pid)
 }
 
 // readPIDFile reads a pid from a one-line pid file, reporting whether it held a

@@ -126,10 +126,6 @@ func main() {
 		}
 		defer release()
 		sweep = true
-
-		// The daemon owns live pipelines for as long as it holds the lock, so it
-		// needs the same watcher the one-shot modes above start.
-		go o.watchStops(ctx, stopWatchInterval)
 	}
 
 	if *f.serve {

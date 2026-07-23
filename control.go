@@ -18,14 +18,19 @@ type runRegistry struct {
 	live map[int]context.CancelFunc
 }
 
-// register claims issue n for a pipeline in this process. It returns false when
-// the issue is already registered, which is what stops a continue from starting
-// a second Claude session in a worktree one is already running in.
+// register claims issue n for a pipeline in this process, reporting whether the
+// claim was won. Both halves of the claim are taken here, under one lock: the
+// map, which answers "is this running in THIS process", and logDir's run-owner
+// file, which is the only thing that can answer "in ANY process".
 //
-// The claim is recorded on disk too, under the registry lock: logDir's run-owner
-// file is what a `loope -stop` in another process reads to learn that this issue
-// has a live pipeline behind it. Writing it as part of the claim (rather than
-// after) is what makes the handshake with Stop work — see Stop.
+// Both are needed, because a second Claude session in a worktree one is already
+// running in is the same corruption whether the first session belongs to this
+// daemon or to a `loope -rework` in another shell. The map alone cannot see the
+// second case, and the workDir lock cannot either: it proves no other DAEMON is
+// up, while -once, -rework and -continue drive pipelines holding no lock.
+//
+// Writing the owner file as part of the claim, rather than after it, is what
+// makes the handshake with Stop work — see Stop.
 func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -35,18 +40,36 @@ func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) 
 	if _, ok := r.live[n]; ok {
 		return false
 	}
+	if !claimRunOwner(logDir) {
+		return false
+	}
 	r.live[n] = cancel
-	recordRunOwner(logDir)
 	return true
 }
 
-// deregister releases issue n, in memory and on disk. Always called via defer by
-// the pipeline that registered it, so a panicking run still frees its slot.
-func (r *runRegistry) deregister(n int, logDir string) {
+// release drops this process's claim on issue n and reports whether a stop
+// marker was pending as it did so — a stop that landed too late for the run to
+// act on, which the caller must now finish.
+//
+// The report and the release happen under one lock, and Stop's cancel takes the
+// same lock, which is what makes the two possible orders exhaustive: either
+// Stop finds the claim (and the stop it just recorded is seen here) or it does
+// not (and Stop finishes the stop itself). Without that, a marker written in
+// the instant between a run's last stop check and its release was consumed by
+// nobody and left behind to be read as a fresh hold by the issue's next life.
+//
+// Only a claim we actually hold is retracted: a refused register must never
+// delete the owner file of the process that beat us to it.
+func (r *runRegistry) release(n int, logDir string) (stopPending bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.live[n]; !ok {
+		return false
+	}
 	delete(r.live, n)
+	pending := stopRequested(logDir)
 	clearRunOwner(logDir)
+	return pending
 }
 
 // cancel halts issue n's pipeline if it is running in this process, reporting
@@ -172,11 +195,38 @@ func (o *Orchestrator) Stop(ctx context.Context, n int) error {
 // error on a stop that in fact succeeded.
 func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel string) error {
 	cctx := context.WithoutCancel(ctx)
-	// A read failure here falls through to the labeling below: this check exists
-	// to suppress a duplicate, so losing it costs noise, never correctness.
-	if state, err := o.currentStateLabel(cctx, n); err == nil && state == o.cfg.StateLabels.Stopped {
-		o.settleStopped(n)
-		return nil
+	// The issue's own labels outrank what the caller believes about them: the
+	// caller's fromLabel was read before whatever it did next, and handleIssue
+	// passes "" whenever its read failed outright. Adding ai-stopped on top of
+	// the ai-wip that is really there would leave the ticket in two states at
+	// once, which continue, stop and the dashboard all read differently and no
+	// transition can undo.
+	//
+	// A read failure falls back to the caller's fromLabel — unless that is ""
+	// too, which is where guessing does the damage: "" means "a queued ticket
+	// carrying no state label" to the code below, and adding ai-stopped to an
+	// issue that in fact carries ai-wip is the wedge above. Nobody knows the
+	// state, so nobody labels: the request stays pending for the sweep or the
+	// next pickup to finish, which is what a marker is for.
+	state, rerr := o.currentStateLabel(cctx, n)
+	switch {
+	case rerr != nil && fromLabel == "":
+		return fmt.Errorf("issue #%d: marking stopped failed: reading its labels failed: %w", n, rerr)
+	case rerr == nil:
+		switch state {
+		case o.cfg.StateLabels.Stopped:
+			o.settleStopped(n)
+			return nil
+		case o.cfg.StateLabels.Done, o.cfg.StateLabels.NeedsInfo:
+			// The run finished before the stop reached it. There is nothing left to
+			// stop, and relabelling would take the issue back out of a state it
+			// legitimately reached, so retire the request instead — a marker kept
+			// here would be read as a fresh hold by the issue's next life.
+			log.Printf("issue #%d: stop arrived after the run finished as %s — nothing to stop", n, state)
+			clearStopRequest(o.issueLogDir(n))
+			return nil
+		}
+		fromLabel = state
 	}
 	_ = o.gh.Comment(cctx, n, fmt.Sprintf(
 		"🤖 Stopped by request. Progress is preserved — continue with `loope -continue %d` or the dashboard.", n))
@@ -213,6 +263,29 @@ func (o *Orchestrator) settleStopped(n int) {
 	clearParkCause(logDir)
 	if !otherProcessRunning(logDir) {
 		clearStopRequest(logDir)
+	}
+}
+
+// releaseRun ends a pipeline's claim on issue n and finishes a stop that
+// arrived too late for the run itself to honour — after its last stop check but
+// before it let the claim go. Every path that registers a run defers this
+// instead of deregistering directly.
+//
+// The late stop is a real one: the operator asked for the ticket to halt while
+// it was still running, so it is finished here rather than discarded. Whether
+// that means parking it as stopped or simply retiring the request is
+// finishStopped's call — it re-reads the issue, and a run that had already
+// shipped leaves nothing to stop.
+//
+// The context is the run's own, which a stop has cancelled by the time we get
+// here; finishStopped works on a cancellation-proof copy of it.
+func (o *Orchestrator) releaseRun(ctx context.Context, n int, logDir string) {
+	if !o.registry.release(n, logDir) {
+		return
+	}
+	log.Printf("issue #%d: stop arrived as the run was finishing — settling it now", n)
+	if err := o.finishStopped(ctx, n, ""); err != nil {
+		log.Printf("issue #%d: settling a late stop failed (the request stays pending): %v", n, err)
 	}
 }
 

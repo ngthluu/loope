@@ -1044,3 +1044,32 @@ func TestSweepOrphansStoppedWIPFinishesStopped(t *testing.T) {
 		t.Fatal("SweepOrphans must not park a stopped issue for resume")
 	}
 }
+
+// The workDir lock proves no other DAEMON is up; it says nothing about whether
+// a given issue has a live run. -continue and -once drive pipelines while
+// holding no lock, and both label ai-wip — so a daemon starting up would sweep
+// a live run: park it out from under its session, or, with no session recorded
+// yet, force-remove the worktree claude is working in.
+func TestSweepOrphansLeavesARunAnotherProcessOwnsAlone(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
+			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	writeOwner(t, o.issueLogDir(7), 1)
+
+	if err := o.SweepOrphans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("git", "worktree remove")) != 0 || len(env.callsMatching("git", "branch -D")) != 0 {
+		t.Fatal("the sweep must not reclaim a worktree a live run is working in")
+	}
+	if len(env.callsMatching("gh", "--remove-label ai-wip")) != 0 {
+		t.Fatal("the sweep must not relabel an issue another process is driving")
+	}
+}

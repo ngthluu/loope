@@ -357,15 +357,19 @@ The daemon is designed to run until you stop it:
   the label stripped to re-queue the issue from scratch. No manual cleanup.
 - **One daemon per workDir.** A pid lock at `<workDir>/logs/daemon.lock`
   refuses a second instance while one is alive and is taken over when stale.
+- **One run per issue, across processes.** Every pipeline claims its issue on
+  disk (`logs/issue-<N>/owner`) before it starts, so a manual `loope -rework
+  <N>` or `-continue <N>` against an issue a daemon is already driving is
+  refused (`#N is already running`) instead of opening a second Claude session
+  in the same worktree. The same claim keeps the daemon's startup orphan sweep
+  off issues a `-once`, `-rework` or `-continue` in another shell is working on
+  — the workDir lock proves no second *daemon* is up, not that an issue is idle.
 - **Panics don't kill the loop.** A panic in one issue's pipeline parks that
   issue with the panic recorded; the daemon and sibling pipelines continue. In
   `-serve` mode a dashboard listener error is logged, never fatal.
 
 GitHub stays current throughout: labels, comments, and PRs are retried with
 backoff (see `githubRetry`) until connectivity returns.
-
-If a daemon is running against the same workDir, prefer letting it auto-resume:
-a manual `loope -rework <N>` races the daemon's own resume of the same issue.
 
 ## Run as a service (macOS)
 

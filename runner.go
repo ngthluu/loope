@@ -47,10 +47,17 @@ func gracefulCancel(cmd *exec.Cmd) {
 // not die, and a process that exited while a descendant still holds its stdout
 // pipe open. The second case is the one that bites here — a claude tool call
 // can leave an MCP server or a backgrounded shell holding that pipe — and exec
-// reports it as ErrWaitDelay on an otherwise clean run. That is a stray
-// file-descriptor report, not a failed command: the process exited 0 and its
-// output was fully drained before Wait gave up, so passing the error through
-// would throw away a good result and park the issue for rework.
+// reports it as ErrWaitDelay on an otherwise clean run. That is a report about
+// a stray file descriptor, not a failed command: the command itself exited 0,
+// and passing the error through would throw away its result and park the issue
+// for rework.
+//
+// What the pardon does NOT promise is that stdout was complete: exec force-
+// closes the pipes when the delay elapses, so a copy still in flight is cut
+// short. It is the descendant that is still writing, not the command, so in
+// practice what is lost is trailing noise — but when it is not, the truncated
+// stream fails its own parse (Claude.Call finds no result line) and the run
+// parks with that error instead of shipping something half-read.
 //
 // The pardon is confined to an uncancelled run. Once ctx is done the delay is
 // the FIRST case — the process was signalled and exec force-closed the pipes on

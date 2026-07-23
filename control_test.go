@@ -5,12 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestRunRegistryRegisterCancelDeregister(t *testing.T) {
+func TestRunRegistryRegisterCancelRelease(t *testing.T) {
 	var reg runRegistry
 	_, cancel := context.WithCancel(context.Background())
 	cancelled := false
@@ -31,9 +32,9 @@ func TestRunRegistryRegisterCancelDeregister(t *testing.T) {
 	if !cancelled {
 		t.Fatal("cancel must invoke the registered cancel func")
 	}
-	reg.deregister(7, "")
+	reg.release(7, "")
 	if reg.running(7) {
-		t.Fatal("deregistered issue must not report running")
+		t.Fatal("a released issue must not report running")
 	}
 	if reg.cancel(7) {
 		t.Fatal("cancel of an unregistered issue should report not found")
@@ -64,9 +65,9 @@ func TestRunRegistryPublishesTheClaimOnDisk(t *testing.T) {
 		t.Fatal("a refused register must not record ownership")
 	}
 
-	reg.deregister(7, logDir)
+	reg.release(7, logDir)
 	if alive, _ := runOwnerAlive(logDir); alive {
-		t.Fatal("deregistering must retract the on-disk claim")
+		t.Fatal("releasing must retract the on-disk claim")
 	}
 }
 
@@ -688,5 +689,192 @@ func TestTerminalOutcomesClearTheStopMarker(t *testing.T) {
 				t.Fatalf("%s is terminal: the stop marker must not survive it", tc.name)
 			}
 		})
+	}
+}
+
+// writeOwner plants an owner file naming pid, standing in for a run in another
+// process (pid 1, alive and not us) or a crashed one (a pid that cannot exist).
+func writeOwner(t *testing.T, logDir string, pid int) {
+	t.Helper()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runOwnerPath(logDir), []byte(strconv.Itoa(pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A claim has to be cross-process, not merely cross-goroutine: the registry map
+// lives in one process, so a daemon and a `loope -rework` in a shell both won
+// the same issue and ran two Claude sessions in one worktree — and whichever
+// finished first deleted the other's owner file, leaving a later -stop to
+// relabel a run that was still going.
+func TestRegisterRefusesAnIssueAnotherProcessOwns(t *testing.T) {
+	var reg runRegistry
+	logDir := t.TempDir()
+	writeOwner(t, logDir, 1)
+
+	if reg.register(7, logDir, func() {}) {
+		t.Fatal("a claim a live process already holds must be refused")
+	}
+	if pid, _ := readPIDFile(runOwnerPath(logDir)); pid != 1 {
+		t.Fatalf("the refused claim overwrote the owner's file: pid = %d, want 1", pid)
+	}
+	reg.release(7, logDir)
+	if pid, _ := readPIDFile(runOwnerPath(logDir)); pid != 1 {
+		t.Fatal("releasing a claim we never held must not retract the owner's")
+	}
+}
+
+// A crashed run's file names a dead pid, which is no owner at all: continuing
+// from what it left behind is the whole point of -rework.
+func TestRegisterTakesOverADeadOwnersClaim(t *testing.T) {
+	var reg runRegistry
+	logDir := t.TempDir()
+	writeOwner(t, logDir, 2147483646)
+
+	if !reg.register(7, logDir, func() {}) {
+		t.Fatal("a dead owner must not block a fresh claim")
+	}
+	if _, isSelf := runOwnerAlive(logDir); !isSelf {
+		t.Fatal("taking over a stale claim must record us as the owner")
+	}
+}
+
+// The same hole one level up: resume claimed a run with the in-process registry
+// only, so `loope -rework <N>` would start a second session in a worktree a
+// daemon was already driving. prepareContinue has always checked for this;
+// resume — the body both continue and rework run — must too.
+func TestReworkRefusesAnIssueAnotherProcessIsRunning(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-rework")
+	seedResumable(t, o, 7, "sess-42")
+	writeOwner(t, o.issueLogDir(7), 1)
+
+	err := o.Rework(context.Background(), 7)
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("want a refusal naming the live run, got %v", err)
+	}
+	if len(env.callsMatching("claude", "--resume")) != 0 {
+		t.Fatal("a second session must not be started in a worktree another process is driving")
+	}
+	if pid, _ := readPIDFile(runOwnerPath(o.issueLogDir(7))); pid != 1 {
+		t.Fatalf("the refused run took the owner's file: pid = %d, want 1", pid)
+	}
+}
+
+// finishStopped is handed the label its caller BELIEVES the issue carries, and
+// handleIssue passes "" whenever the label read failed. Adding ai-stopped on
+// top of the ai-wip that is really there wedges the ticket in two states at
+// once: continue refuses it ("not stopped"), stop re-labels it every time, and
+// only manual label surgery frees it. The read finishStopped already does is
+// the authority on what to swap away from.
+func TestFinishStoppedSwapsTheLabelTheIssueActuallyCarries(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+
+	if err := o.finishStopped(context.Background(), 7, ""); err != nil {
+		t.Fatal(err)
+	}
+	swaps := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-stopped") {
+		t.Fatalf("want a wip->stopped swap, got %v", swaps)
+	}
+	if len(env.callsMatching("gh", "--repo org/repo --add-label ai-stopped")) != 0 {
+		t.Fatal("ai-stopped added alongside ai-wip leaves the issue in two states at once")
+	}
+}
+
+// A stop can be requested in the instant a run is finishing. If it lands after
+// the run has already shipped there is nothing left to stop: the issue must not
+// be relabelled out from under its PR, and the marker must be retired rather
+// than left for the issue's next life to read as a fresh hold.
+func TestFinishStoppedOnAnAlreadyFinishedIssueRetiresTheMarker(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-done")
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.finishStopped(context.Background(), 7, "ai-wip"); err != nil {
+		t.Fatalf("losing the race to a finished run is not an error, got %v", err)
+	}
+	if stopRequested(o.issueLogDir(7)) {
+		t.Fatal("a marker nothing will ever consume must not outlive the run it was aimed at")
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("an issue that already shipped must not be relabelled stopped")
+	}
+}
+
+// The last hole in the stop handshake: a marker written after the run passed
+// its final stop check but before it released its claim. Stop found the claim,
+// cancelled a context nobody was reading any more and reported "stopping"; the
+// run shipped; the marker stayed behind. Reading the marker and releasing the
+// claim under one lock is what makes the two orders exhaustive — either Stop
+// sees the claim, and the release honours the stop, or it does not, and Stop
+// finishes the stop itself.
+func TestReleasingAClaimHonoursAStopThatArrivedTooLate(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-rework")
+	logDir := o.issueLogDir(7)
+	o.registry.register(7, logDir, func() {})
+	recordStopRequest(logDir)
+
+	o.releaseRun(context.Background(), 7, logDir)
+
+	swaps := env.callsMatching("gh", "--remove-label ai-rework")
+	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-stopped") {
+		t.Fatalf("a stop that arrived while we still held the claim must still land, got %v", swaps)
+	}
+	if stopRequested(logDir) {
+		t.Fatal("the stop landed, so its marker is spent")
+	}
+}
+
+func TestReleasingAClaimWithNoStopPendingLabelsNothing(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	logDir := o.issueLogDir(7)
+	o.registry.register(7, logDir, func() {})
+
+	o.releaseRun(context.Background(), 7, logDir)
+
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("a run that finished with no stop pending must not be relabelled")
+	}
+	if alive, _ := runOwnerAlive(logDir); alive {
+		t.Fatal("releasing must retract the on-disk claim")
+	}
+}
+
+// When neither the caller nor finishStopped itself can learn what the issue
+// carries, the one thing it must not do is guess. "" means "a queued ticket
+// with no state label" to the labeling below, so guessing it onto an issue that
+// really carries ai-wip leaves the ticket in two states at once — which no
+// transition undoes. The request stays pending instead, which is what a marker
+// is for.
+func TestFinishStoppedRefusesToGuessAnUnreadableLabel(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue view") && strings.Contains(joined, "labels") {
+			return "", "gh: 503", errors.New("exit 1")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.finishStopped(context.Background(), 7, ""); err == nil {
+		t.Fatal("a state neither side could read must be reported, not guessed at")
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("no label may be applied on top of a state we could not read")
+	}
+	if !stopRequested(o.issueLogDir(7)) {
+		t.Fatal("an incomplete stop must stay pending on disk")
+	}
+	// A caller that DOES know the label is still served from it.
+	if err := o.finishStopped(context.Background(), 7, "ai-wip"); err != nil {
+		t.Fatalf("a known label must still be swapped when the read fails: %v", err)
+	}
+	swaps := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-stopped") {
+		t.Fatalf("want a wip->stopped swap, got %v", swaps)
 	}
 }

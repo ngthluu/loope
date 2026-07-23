@@ -173,7 +173,7 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("issue #%d is already running", n)
 	}
-	defer o.registry.deregister(n, logDir)
+	defer o.releaseRun(ictx, n, logDir)
 	// The issue was listed as eligible, but that was a triage call ago and a stop
 	// can have landed since — completing entirely, label and all, before this run
 	// had an owner file for it to notice. Re-read the label: it is the only trace
@@ -487,6 +487,16 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 	for _, is := range issues {
 		n := is.Number
 		logDir := o.issueLogDir(n)
+		// Not every ai-wip issue is an orphan. The lock proves no other DAEMON is
+		// up, which is what makes this sweep safe against a second daemon — but
+		// -once, -rework and -continue drive pipelines holding no lock, and label
+		// ai-wip while they do. Sweeping one of those would park a ticket out from
+		// under its live session, or force-remove the worktree claude is working
+		// in. The issue's own claim is what distinguishes them.
+		if o.registry.running(n) || otherProcessRunning(logDir) {
+			log.Printf("issue #%d: %s belongs to a live run, not a crashed one — leaving it alone", n, o.cfg.StateLabels.WIP)
+			continue
+		}
 		// A stop marker means the run was stopped and the daemon then died. The
 		// operator's hold outlives the crash, so recover it into stopped rather
 		// than parking it for auto-resume.

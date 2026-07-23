@@ -53,10 +53,13 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The claim spans processes, so this also refuses a worktree a daemon (or
+	// another shell's -rework) is already driving — the check prepareContinue
+	// makes before it ever gets here, which rework had no equivalent of.
 	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("#%d is already running", n)
 	}
-	defer o.registry.deregister(n, logDir)
+	defer o.releaseRun(ictx, n, logDir)
 	// Claim, then check for a hold — the same order as handleIssue, and for the
 	// same reason (see Stop). A stop that landed while this resume was starting
 	// is honoured before the Claude session, not after it.
