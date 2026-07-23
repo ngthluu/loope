@@ -606,3 +606,54 @@ func TestRailFragmentCarriesOOBStatbar(t *testing.T) {
 		t.Fatalf("rail still emits the obsolete #railmeta element")
 	}
 }
+
+// TestAppCSSCoversBothClassSources is the guard against the manual Tailwind
+// regeneration step being skipped. Half the dashboard's classes exist only in
+// templates and half only in Go helpers, so app.css is checked for one sentinel
+// from each source. A miss means someone changed classes without re-running:
+//
+//	tailwindcss -i web/tailwind.css -o web/static/app.css --minify
+func TestAppCSSCoversBothClassSources(t *testing.T) {
+	css, err := webFS.ReadFile("web/static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(css) < 4096 {
+		t.Fatalf("app.css is only %d bytes — the Tailwind build produced nothing useful", len(css))
+	}
+	for _, want := range []string{
+		`line-clamp-2`, // template-only: web/templates/rail.html
+		`bg-ok\/50`,    // Go-only: stripeClass in render.go
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Fatalf("app.css missing %q — regenerate it: tailwindcss -i web/tailwind.css -o web/static/app.css --minify", want)
+		}
+	}
+}
+
+func TestStaticCSSServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/static/app.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("empty body")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
+		t.Fatalf("content-type = %q, want text/css", ct)
+	}
+}
+
+func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, body := get(t, h, "/")
+	if !strings.Contains(body, `href="/static/app.css"`) {
+		t.Fatalf("page does not link the vendored stylesheet")
+	}
+	if strings.Contains(body, "cdn.tailwindcss.com") {
+		t.Fatalf("page still loads the Tailwind browser CDN")
+	}
+}
