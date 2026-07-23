@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -225,15 +226,17 @@ func TestServeRetriesGitHubUntilSuccess(t *testing.T) {
 	s, r := newTestServerWithRunner(t)
 	now := time.Unix(0, 0)
 	s.now = func() time.Time { return now }
-	// First poll fails, second succeeds, then a fourth response would only be
-	// consumed by an (incorrect) re-fetch. backfillPR runs unconditionally once
-	// per selected ticket regardless of gh success/failure, so it fires on this
-	// very first poll (ticket #142 has no PRURL); the second queued response
-	// answers that lookup ("no PR for this branch") so it doesn't steal the
-	// real issue-list response meant for the second poll.
+	// First poll fails, second succeeds, then a fifth response would only be
+	// consumed by an (incorrect) re-fetch. Two per-ticket backfills also run
+	// once per selected ticket regardless of gh success/failure, and both fire
+	// on this very first poll (ticket #142 has neither a PRURL nor — while the
+	// list is failing — a title): responses 2 and 3 answer them permanently
+	// ("no PR for this branch", "no such issue"), so they are memoized and
+	// don't steal the real issue-list response meant for the second poll.
 	r.queue = []rresp{
 		{err: errors.New("could not connect")},
 		{stdout: `{"url":""}`},
+		{err: errors.New("could not resolve to an issue")},
 		{stdout: `[{"number":142,"title":"Add OAuth login","labels":[{"name":"ai-wip"}]}]`},
 		{stdout: "[]"},
 	}
@@ -248,8 +251,8 @@ func TestServeRetriesGitHubUntilSuccess(t *testing.T) {
 	if _, body := get(t, h, "/?issue=142"); !strings.Contains(body, "Add OAuth login") {
 		t.Fatalf("third poll should reuse the memoized title")
 	}
-	if len(r.calls) != 3 {
-		t.Fatalf("want 3 gh calls (one failed, one succeeded, plus the one-time PR backfill), got %d", len(r.calls))
+	if len(r.calls) != 4 {
+		t.Fatalf("want 4 gh calls (one failed list, one succeeded, plus the one-time PR and title backfills), got %d", len(r.calls))
 	}
 }
 
@@ -513,5 +516,127 @@ func TestTxLineEscapesHTML(t *testing.T) {
 	}
 	if !strings.Contains(toolOut, "a &amp; b") {
 		t.Errorf("tool detail not escaped: %q", toolOut)
+	}
+}
+
+// railTitleEnv builds a dashboard over a single issue-<n> log dir (one step, no
+// title file) plus a gh handler that mimics the reported bug: the issue no
+// longer carries the eligible label, so the label-scoped `gh issue list` never
+// returns it — its title is only reachable via a per-issue `gh issue view`.
+func railTitleEnv(t *testing.T, num int, title string) (*Server, *fakeRunner) {
+	t.Helper()
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", fmt.Sprintf("issue-%d", num))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStep(t, dir, 1, "architect", "design the thing", "the design output",
+		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
+	mustWrite(t, filepath.Join(dir, stateFile), "ai-done")
+	cfg := &Config{WorkDir: work, RepoPath: "/clone", RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		switch {
+		case strings.HasPrefix(joined, "issue list"):
+			return "[]", "", nil
+		case strings.HasPrefix(joined, "issue view"):
+			return fmt.Sprintf(`{"title":%q}`, title), "", nil
+		}
+		return "", "", nil
+	}}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, r
+}
+
+// TestServeBackfillsTitleForUnlabeledIssue reproduces issue #16: a finished
+// ticket whose issue lost the eligible label drops out of the label-scoped
+// issue list, leaving the card stuck on the "awaiting GitHub title" placeholder
+// forever. The dashboard must fall back to a per-issue title lookup.
+func TestServeBackfillsTitleForUnlabeledIssue(t *testing.T) {
+	s, _ := railTitleEnv(t, 3, "Enhance: add Stop/Continue")
+	code, body := get(t, s.Handler(), "/?issue=3")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "Enhance: add Stop/Continue") {
+		t.Fatalf("body missing backfilled title: %s", body)
+	}
+	if strings.Contains(body, "awaiting GitHub title") {
+		t.Fatalf("body still shows the placeholder: %s", body)
+	}
+}
+
+// TestServeTitleBackfillPersistsAndIsNotRepeated asserts the backfill is cached
+// like the PR backfill: the title is written to the issue's log dir (so it
+// survives a restart with GitHub unreachable) and `gh issue view` is not
+// re-issued on every 3s poll.
+func TestServeTitleBackfillPersistsAndIsNotRepeated(t *testing.T) {
+	s, r := railTitleEnv(t, 3, "Enhance: add Stop/Continue")
+	for i := 0; i < 3; i++ {
+		get(t, s.Handler(), "/?issue=3")
+	}
+	views := 0
+	for _, c := range r.calls {
+		if c.name == "gh" && strings.HasPrefix(strings.Join(c.args, " "), "issue view") {
+			views++
+		}
+	}
+	if views != 1 {
+		t.Fatalf("gh issue view called %d times, want 1", views)
+	}
+	body, err := os.ReadFile(filepath.Join(s.cfg.WorkDir, "logs", "issue-3", titleFile))
+	if err != nil {
+		t.Fatalf("title not persisted: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "Enhance: add Stop/Continue" {
+		t.Fatalf("persisted title = %q", body)
+	}
+}
+
+// TestServeUsesPersistedTitleWhenGitHubUnreachable is the restart case from the
+// issue: the process comes up with GitHub down, so nothing can be fetched — the
+// title recorded on disk during the run must still render.
+func TestServeUsesPersistedTitleWhenGitHubUnreachable(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-142")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStep(t, dir, 1, "architect", "design the thing", "the design output",
+		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
+	mustWrite(t, filepath.Join(dir, titleFile), "Add OAuth login")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{handler: func(rcall) (string, string, error) { return "", "", errors.New("could not connect") }}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "Add OAuth login") {
+		t.Fatalf("persisted title missing while gh is down: %s", body)
+	}
+	if strings.Contains(body, "awaiting GitHub title") {
+		t.Fatalf("placeholder shown despite persisted title: %s", body)
+	}
+}
+
+// TestServePersistsFetchedTitles covers the cheap path: when the issue list does
+// return the ticket, its title is mirrored to the log dir so the next restart
+// needs no gh call at all.
+func TestServePersistsFetchedTitles(t *testing.T) {
+	s := newTestServer(t)
+	get(t, s.Handler(), "/?issue=142")
+	body, err := os.ReadFile(filepath.Join(s.cfg.WorkDir, "logs", "issue-142", titleFile))
+	if err != nil {
+		t.Fatalf("fetched title not persisted: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "Add OAuth login" {
+		t.Fatalf("persisted title = %q", body)
 	}
 }

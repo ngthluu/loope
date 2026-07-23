@@ -497,3 +497,36 @@ func TestParseTranscript(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordTitleRoundTrip covers the title marker the loop drops next to the
+// state marker: a scan must read it back as the ticket's title so the dashboard
+// has one without asking GitHub. Empty inputs are no-ops, like the other
+// best-effort writers.
+func TestRecordTitleRoundTrip(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "issue-3")
+	recordTitle(dir, "Enhance: add Stop/Continue")
+	tk, ok := scanIssueDir(dir, 3)
+	if !ok {
+		t.Fatal("scanIssueDir failed")
+	}
+	if tk.Title != "Enhance: add Stop/Continue" {
+		t.Fatalf("Title = %q", tk.Title)
+	}
+	recordTitle(dir, "")
+	recordTitle("", "x")
+	if tk2, _ := scanIssueDir(dir, 3); tk2.Title != "Enhance: add Stop/Continue" {
+		t.Fatalf("empty write clobbered the title: %q", tk2.Title)
+	}
+}
+
+// TestOverlayIssuesKeepsPersistedTitle guards the merge: a gh entry that
+// carries no title (or an issue missing from the list entirely) must not wipe
+// the title already recovered from disk.
+func TestOverlayIssuesKeepsPersistedTitle(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	tickets := []Ticket{{Number: 3, Title: "Enhance: add Stop/Continue", StateLabel: "ai-done"}}
+	got := overlayIssues(tickets, []Issue{{Number: 3, Labels: []Label{{Name: "ai-agent"}}}}, cfg)
+	if got[0].Title != "Enhance: add Stop/Continue" {
+		t.Fatalf("Title = %q, want the persisted one", got[0].Title)
+	}
+}
