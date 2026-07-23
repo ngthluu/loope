@@ -986,3 +986,52 @@ func TestHandleIssueRegistersAndDeregisters(t *testing.T) {
 		t.Fatal("handleIssue must deregister the issue when it returns")
 	}
 }
+
+func TestShouldResumeFalseWhenStopMarkerPresent(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := o.issueLogDir(7)
+	// Everything else says "resumable": cause, worktree, session.
+	recordParkCause(logDir, "session limit reached")
+	if err := os.MkdirAll(worktreePath(o.cfg.WorkDir, 7), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	(&Claude{logDir: logDir}).RecordSession("s1", "bug")
+	if !o.shouldResume(7) {
+		t.Fatal("precondition: this issue should be auto-resumable without a stop marker")
+	}
+
+	recordStopRequest(logDir)
+	if o.shouldResume(7) {
+		t.Fatal("a stopped issue must never be auto-resumed")
+	}
+}
+
+func TestSweepOrphansStoppedWIPFinishesStopped(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") {
+			return `[{"number":7,"title":"Fix crash","labels":[{"name":"ai-wip"}]}]`, "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	logDir := o.issueLogDir(7)
+	if err := os.MkdirAll(worktreePath(o.cfg.WorkDir, 7), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	(&Claude{logDir: logDir}).RecordSession("s1", "bug")
+	recordStopRequest(logDir)
+
+	if err := o.SweepOrphans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(env.readLocalState(7)); got != "ai-stopped" {
+		t.Fatalf("state = %q, want ai-stopped — a stopped-then-crashed run must not be parked for auto-resume", got)
+	}
+	if len(env.callsMatching("gh", "--add-label ai-rework")) != 0 {
+		t.Fatal("SweepOrphans must not park a stopped issue for resume")
+	}
+}

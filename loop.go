@@ -373,7 +373,9 @@ func (o *Orchestrator) ResumeParked(ctx context.Context) error {
 func (o *Orchestrator) shouldResume(n int) bool {
 	logDir := o.issueLogDir(n)
 	reason := ""
-	if cause := readParkCause(logDir); cause == "" {
+	if stopRequested(logDir) {
+		reason = "stopped by request; resume it with `loope -continue`"
+	} else if cause := readParkCause(logDir); cause == "" {
 		reason = "no recorded park cause; waiting for a human (`loop -rework`)"
 	} else if _, resumable := classifyCause(cause); !resumable {
 		reason = "cause needs a human; fix it and run `loop -rework`"
@@ -449,6 +451,16 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 	for _, is := range issues {
 		n := is.Number
 		logDir := o.issueLogDir(n)
+		// A stop marker means the run was stopped and the daemon then died. The
+		// operator's hold outlives the crash, so recover it into stopped rather
+		// than parking it for auto-resume.
+		if stopRequested(logDir) {
+			log.Printf("issue #%d: stale %s from a crashed run that was stopped — recovering as %s", n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped)
+			if err := o.finishStopped(ctx, n, o.cfg.StateLabels.WIP); err != nil {
+				return err
+			}
+			continue
+		}
 		// Reuse before reclaim: a surviving worktree plus a recorded session is
 		// exactly what rework resumes from, so park it (which relabels WIP->rework
 		// and records the cause) and let the resume machinery continue the work.
