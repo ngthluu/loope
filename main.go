@@ -18,6 +18,32 @@ import (
 // and is overridden at release time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
+// cliMode is the run mode resolved from the parsed command-line flags.
+type cliMode int
+
+const (
+	modeRun            cliMode = iota // start the daemon (config given)
+	modeVersion                       // print version and exit, without reading config
+	modeHelp                          // print usage and exit 0 (bare invocation / --help)
+	modeDoctorNoConfig                // --doctor without --config: usage error, exit 2
+)
+
+// resolveMode maps the parsed flags to a run mode. --version wins over
+// everything (the config is never read); a missing --config means help unless
+// --doctor was asked for, which is a usage error.
+func resolveMode(configPath string, showVersion, doctor bool) cliMode {
+	switch {
+	case showVersion:
+		return modeVersion
+	case configPath == "" && doctor:
+		return modeDoctorNoConfig
+	case configPath == "":
+		return modeHelp
+	default:
+		return modeRun
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "loope.json", "path to config file")
 	once := flag.Bool("once", false, "run a single poll cycle and exit")

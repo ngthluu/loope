@@ -108,3 +108,26 @@ func TestGateDoctorAlwaysReportsAndNeverProceeds(t *testing.T) {
 		t.Fatalf("-doctor exit code = %d, want 1 when a required check failed", code2)
 	}
 }
+
+func TestResolveMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		configPath string
+		version    bool
+		doctor     bool
+		want       cliMode
+	}{
+		{"version wins over config and doctor", "loope.json", true, true, modeVersion},
+		{"version without config", "", true, false, modeVersion},
+		{"config runs", "loope.json", false, false, modeRun},
+		{"config with doctor still runs", "loope.json", false, true, modeRun},
+		{"bare invocation is help", "", false, false, modeHelp},
+		{"doctor without config is a usage error", "", false, true, modeDoctorNoConfig},
+	}
+	for _, c := range cases {
+		if got := resolveMode(c.configPath, c.version, c.doctor); got != c.want {
+			t.Errorf("%s: resolveMode(%q, %v, %v) = %d, want %d",
+				c.name, c.configPath, c.version, c.doctor, got, c.want)
+		}
+	}
+}
