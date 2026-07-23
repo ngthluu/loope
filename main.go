@@ -87,10 +87,13 @@ func main() {
 }
 
 // runLoop drives the poll cycle forever: one startup orphan sweep (retried
-// until it succeeds once), then process eligible issues and auto-resume
-// resumable parked ones, waiting one interval between cycles. Every stage runs
-// under guard, so a panic is one bad cycle, not a dead daemon. Returns when the
-// context is cancelled or after a single cycle when once is set.
+// until it succeeds once), then top the in-flight pipeline set up from the
+// eligible queue and auto-resume resumable parked ones, waiting one interval
+// between cycles. Cycles no longer block on the pipelines they start, so both
+// exit paths drain in-flight work with o.Wait() before returning — main's
+// deferred workDir-lock release must not run while a pipeline is live. Every
+// stage runs under guard, so a panic is one bad cycle, not a dead daemon.
+// Returns when the context is cancelled or after a single cycle when once is set.
 func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool) {
 	log.Printf("watching %s for label %q every %ds", cfg.RepoSlug, cfg.EligibleLabel, cfg.PollIntervalSec)
 	for {
@@ -108,11 +111,18 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 			log.Printf("auto-resume error: %v", err)
 		}
 		if once {
+			// -once fills slots once and drains them; it does not top up as
+			// pipelines complete.
+			o.Wait()
 			return
 		}
 		select {
 		case <-ctx.Done():
 			log.Println("shutting down")
+			// Pipelines see the cancelled context and unwind through their
+			// existing context.WithoutCancel cleanup paths, exactly as they did
+			// when a Ctrl-C landed during the old in-cycle wg.Wait().
+			o.Wait()
 			return
 		case <-time.After(time.Duration(cfg.PollIntervalSec) * time.Second):
 		}
