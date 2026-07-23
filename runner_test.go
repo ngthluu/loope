@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecRunnerCapturesStdout(t *testing.T) {
@@ -78,5 +81,33 @@ func TestExecRunnerStreamReturnsErrorOnNonZeroExit(t *testing.T) {
 	_, err := r.RunStream(context.Background(), "", nil, "", &buf, "false")
 	if err == nil {
 		t.Error("want error on non-zero exit, got nil")
+	}
+}
+
+// A cancelled command must be asked to exit with SIGTERM first, so claude gets
+// a chance to flush its session transcript before it dies. The trap records
+// that it arrived; a SIGKILL is untrappable and would leave no marker.
+//
+// Note: the exit error is deliberately NOT asserted to be nil. os/exec maps a
+// cancelled command that exits cleanly to ctx.Err(), and suppressing that would
+// make a stopped claude call look like a success to the pipeline.
+func TestExecRunnerCancelSendsSIGTERM(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "sigterm")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = execRunner{}.Run(ctx, "", nil, "", "sh", "-c",
+			`trap 'touch `+marker+`; exit 0' TERM; sleep 5 & wait`)
+	}()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("cancelled command did not exit")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("cancelled command was not sent SIGTERM (no marker): %v", err)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Runner abstracts process execution so tests can fake git/gh/claude. env holds
@@ -23,8 +25,23 @@ type Runner interface {
 
 type execRunner struct{}
 
+// runnerWaitDelay is how long a cancelled process has to exit on SIGTERM before
+// exec escalates to SIGKILL. Ten seconds is enough for claude to flush its
+// session transcript, which is what makes a stop resumable.
+const runnerWaitDelay = 10 * time.Second
+
+// gracefulCancel makes ctx cancellation send SIGTERM rather than the SIGKILL
+// exec.CommandContext defaults to, escalating only if the process is still
+// alive after runnerWaitDelay. This matters for `claude`: a SIGKILL mid-call
+// loses the session transcript, so a stopped run could not be continued.
+func gracefulCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = runnerWaitDelay
+}
+
 func (execRunner) Run(ctx context.Context, dir string, env []string, stdin, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	gracefulCancel(cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
@@ -41,6 +58,7 @@ func (execRunner) Run(ctx context.Context, dir string, env []string, stdin, name
 
 func (execRunner) RunStream(ctx context.Context, dir string, env []string, stdin string, w io.Writer, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	gracefulCancel(cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
