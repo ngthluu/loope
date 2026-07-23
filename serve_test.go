@@ -581,3 +581,28 @@ func TestPollFragmentsAreKeyed(t *testing.T) {
 		t.Fatalf("step item not keyed: %s", detail)
 	}
 }
+
+func TestRailFragmentCarriesOOBStatbar(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/rail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-swap-oob="true"`) {
+		t.Fatalf("rail fragment carries no out-of-band statbar: %s", body)
+	}
+	if !strings.Contains(body, `id="statbar"`) {
+		t.Fatalf("out-of-band statbar has no id to swap into: %s", body)
+	}
+	// The stats the header shows must be in the fragment: one ticket, none
+	// running (the seeded step is settled), $0.51 spent.
+	for _, want := range []string{`id="stat-tickets" class="text-base font-semibold tabular-nums text-text">1<`, `id="stat-running">0<`, `>$0.51<`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("statbar missing %q: %s", want, body)
+		}
+	}
+	// The dead patching hook is gone.
+	if strings.Contains(body, "railmeta") {
+		t.Fatalf("rail still emits the obsolete #railmeta element")
+	}
+}

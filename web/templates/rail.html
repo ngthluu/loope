@@ -1,5 +1,4 @@
 {{define "rail"}}
- <div id="railmeta" hidden data-tickets="{{.Stats.Tickets}}" data-running="{{.Stats.Running}}" data-spend="{{dollars .Stats.Spend}}"></div>
  <div class="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-panel px-4 py-2.5">
   <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">queue · {{.Stats.Tickets}}</span>
   <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">cost</span>
@@ -24,3 +23,17 @@
   </a>
  {{else}}<div class="px-4 py-8 text-center font-mono text-[11px] leading-relaxed text-faint">No tickets in flight.<br>The loop hasn't picked up any labeled issues yet.</div>{{end}}
 {{end}}
+
+{{define "statbar"}}
+   <div class="hidden items-baseline gap-1.5 md:flex"><span id="stat-tickets" class="text-base font-semibold tabular-nums text-text">{{.Stats.Tickets}}</span><span class="text-faint">tickets</span></div>
+   <div class="hidden h-4 w-px bg-line2 md:block"></div>
+   <div class="hidden items-baseline gap-1.5 md:flex"><span class="flex items-center gap-1.5 text-base font-semibold tabular-nums text-live"><span class="hb inline-block h-1.5 w-1.5 rounded-full bg-live"></span><span id="stat-running">{{.Stats.Running}}</span></span><span class="text-faint">running</span></div>
+   <div class="hidden h-4 w-px bg-line2 md:block"></div>
+   <div class="flex items-baseline gap-1.5"><span id="stat-spend" class="text-base font-semibold tabular-nums text-text">{{dollars .Stats.Spend}}</span><span class="text-faint">spend</span></div>
+   <div class="h-4 w-px bg-line2"></div>
+   <div class="flex items-center gap-1.5 text-faint"><span class="hb inline-block h-1.5 w-1.5 rounded-full bg-live"></span><span>live · <span id="ago" class="tabular-nums text-muted">0s</span> ago</span></div>
+{{end}}
+
+{{define "statbar-oob"}}<div id="statbar" hx-swap-oob="true" class="flex items-center gap-4 font-mono text-xs sm:gap-5">{{template "statbar" .}}</div>{{end}}
+
+{{define "railpoll"}}{{template "rail" .}}{{template "statbar-oob" .}}{{end}}

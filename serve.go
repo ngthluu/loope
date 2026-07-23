@@ -225,10 +225,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	renderHTML(w, s.tmpl, "page", v)
 }
 
-// handleRail renders only the left-rail fragment for the poll refresh.
+// handleRail renders the left-rail poll fragment plus the out-of-band header
+// statbar, which htmx relocates into the page header itself.
 func (s *Server) handleRail(w http.ResponseWriter, r *http.Request) {
 	v := s.load(r.Context(), r.URL.Query().Get("issue"))
-	renderHTML(w, s.tmpl, "rail", v)
+	renderHTML(w, s.tmpl, "railpoll", v)
 }
 
 // handleDetail renders only the detail-pane fragment for the live poll refresh.
