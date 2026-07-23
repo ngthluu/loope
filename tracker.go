@@ -272,11 +272,12 @@ func clearParkCause(logDir string) {
 	_ = os.Remove(filepath.Join(logDir, parkCauseFile))
 }
 
-// scanLogs reads workDir/logs and returns one Ticket per issue-<N> dir, steps
-// ordered by seq and cost summed, sorted by LastActive descending. A missing
-// logs dir yields an empty slice, not an error.
-func scanLogs(workDir string) ([]Ticket, error) {
-	logsDir := filepath.Join(workDir, "logs")
+// scanLogs reads cfg.WorkDir/logs and returns one Ticket per issue-<N> dir,
+// steps ordered by seq and cost summed, sorted by attention-priority status
+// tier then Number descending (see sortTickets). A missing logs dir yields an
+// empty slice, not an error.
+func scanLogs(cfg *Config) ([]Ticket, error) {
+	logsDir := filepath.Join(cfg.WorkDir, "logs")
 	entries, err := os.ReadDir(logsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -298,22 +299,44 @@ func scanLogs(workDir string) ([]Ticket, error) {
 			tickets = append(tickets, tk)
 		}
 	}
-	sortTickets(tickets)
+	sortTickets(cfg, tickets)
 	if tickets == nil {
 		tickets = []Ticket{}
 	}
 	return tickets, nil
 }
 
-// sortTickets orders tickets by LastActive descending, breaking ties by
-// ascending Number so tickets sharing a zero LastActive (label-only, no
-// logs yet) don't jitter between refreshes.
-func sortTickets(tickets []Ticket) {
+// statusRank orders tickets in the sidebar: lower rank sorts higher. Active
+// states that need attention float to the top; done sinks to the bottom. It
+// reuses stateKind (render.go) so renamed StateLabels still tier correctly.
+func statusRank(cfg *Config, label string) int {
+	switch stateKind(cfg, label) {
+	case "failed":
+		return 0
+	case "rework":
+		return 1
+	case "wip":
+		return 2
+	case "queued":
+		return 3
+	case "done":
+		return 5
+	default: // "" unknown/other
+		return 4
+	}
+}
+
+// sortTickets orders tickets by attention-priority status tier, then by issue
+// Number descending within each tier. The combination of (tier, Number) is a
+// total order with no duplicate keys (issue Numbers are unique), so the result
+// is deterministic and does not jitter between refreshes.
+func sortTickets(cfg *Config, tickets []Ticket) {
 	sort.SliceStable(tickets, func(i, j int) bool {
-		if !tickets[i].LastActive.Equal(tickets[j].LastActive) {
-			return tickets[i].LastActive.After(tickets[j].LastActive)
+		ri, rj := statusRank(cfg, tickets[i].StateLabel), statusRank(cfg, tickets[j].StateLabel)
+		if ri != rj {
+			return ri < rj
 		}
-		return tickets[i].Number < tickets[j].Number
+		return tickets[i].Number > tickets[j].Number
 	})
 }
 
@@ -607,7 +630,7 @@ func overlayIssues(tickets []Ticket, issues []Issue, cfg *Config) []Ticket {
 		}
 		tickets = append(tickets, Ticket{Number: is.Number, Title: is.Title, StateLabel: state, Steps: []Step{}})
 	}
-	sortTickets(tickets)
+	sortTickets(cfg, tickets)
 	return tickets
 }
 
@@ -615,7 +638,7 @@ func overlayIssues(tickets []Ticket, issues []Issue, cfg *Config) []Ticket {
 // issue number. On a gh failure it returns the logs-only tickets plus ghErr so
 // the caller can show a "GitHub unreachable" banner.
 func BuildTickets(ctx context.Context, r Runner, cfg *Config) ([]Ticket, error) {
-	tickets, err := scanLogs(cfg.WorkDir)
+	tickets, err := scanLogs(cfg)
 	if err != nil {
 		return nil, err
 	}
