@@ -62,3 +62,21 @@ func TestAcquireLockTakesOverStaleLock(t *testing.T) {
 	}
 	release2()
 }
+
+func TestLockOwnerAlive(t *testing.T) {
+	work := t.TempDir()
+	if lockOwnerAlive(work) {
+		t.Fatal("no lock file: owner cannot be alive")
+	}
+	release, err := acquireLock(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockOwnerAlive(work) {
+		t.Fatal("we hold the lock, so its owner (us) is alive")
+	}
+	release()
+	if lockOwnerAlive(work) {
+		t.Fatal("lock released: owner must not be reported alive")
+	}
+}

@@ -75,3 +75,18 @@ func pidAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
 }
+
+// lockOwnerAlive reports whether a live process currently holds workDir's daemon
+// lock. Stop uses it to tell "a daemon is running this issue and will react to
+// the marker" from "nothing is running, so I must do the labeling myself".
+func lockOwnerAlive(workDir string) bool {
+	b, err := os.ReadFile(lockPath(workDir))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return pidAlive(pid)
+}

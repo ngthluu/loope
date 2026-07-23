@@ -179,6 +179,22 @@ func (g *GitHub) IssueTitle(ctx context.Context, num int) (string, error) {
 	return v.Title, nil
 }
 
+// IssueLabels returns the labels currently on an issue. Stop reads it to decide
+// which state it is transitioning out of.
+func (g *GitHub) IssueLabels(ctx context.Context, num int) ([]Label, error) {
+	out, err := g.gh(ctx, "issue", "view", strconv.Itoa(num), "--repo", g.slug, "--json", "labels")
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Labels []Label `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil, fmt.Errorf("parse issue labels: %w", err)
+	}
+	return payload.Labels, nil
+}
+
 func (g *GitHub) CreatePR(ctx context.Context, branch, title, body string) (string, error) {
 	out, err := g.gh(ctx, "pr", "create", "--repo", g.slug, "--head", branch,
 		"--title", title, "--body", body)

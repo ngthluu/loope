@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"sync"
 )
 
@@ -73,15 +75,83 @@ func (r *runRegistry) numbers() []int {
 	return out
 }
 
-// finishStopped parks issue n in the operator-held stopped state, preserving
-// every artifact. fromLabel is the state label the issue currently carries, or
-// "" when it carries none (a queued ticket).
+// currentStateLabel returns the state label issue n currently carries on
+// GitHub, or "" when it carries none (a queued ticket).
+func (o *Orchestrator) currentStateLabel(ctx context.Context, n int) (string, error) {
+	labels, err := o.gh.IssueLabels(ctx, n)
+	if err != nil {
+		return "", err
+	}
+	sl := o.cfg.StateLabels
+	for _, want := range []string{sl.WIP, sl.Stopped, sl.Rework, sl.Done, sl.NeedsInfo, sl.Failed} {
+		if want != "" && hasLabel(labels, want) {
+			return want, nil
+		}
+	}
+	return "", nil
+}
+
+// Stop halts work on issue n and parks it in the operator-held stopped state,
+// preserving every artifact. The stop marker is written FIRST, so the request is
+// durable before anything else can fail — that is what lets `loope -stop <N>` in
+// a second shell halt a run a daemon in another process owns, and what makes the
+// stop survive a daemon restart.
+//
+// Then, by what is actually running: a pipeline live in THIS process is
+// cancelled and does its own labeling as it unwinds; a WIP issue owned by a live
+// daemon elsewhere is left to that daemon's watcher (~2s); anything else
+// (queued, parked, or WIP with no daemon alive) is labeled here and now.
+//
+// Stopping a stopped issue is a no-op success. Stopping a done or needs-info
+// issue is an error: there is nothing to stop.
+func (o *Orchestrator) Stop(ctx context.Context, n int) error {
+	state, err := o.currentStateLabel(ctx, n)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case o.cfg.StateLabels.Stopped:
+		log.Printf("stopped #%d", n)
+		return nil
+	case o.cfg.StateLabels.Done, o.cfg.StateLabels.NeedsInfo:
+		return fmt.Errorf("#%d is %s — there is nothing to stop", n, state)
+	}
+
+	recordStopRequest(o.issueLogDir(n))
+
+	if o.registry.cancel(n) {
+		log.Printf("stopping #%d (halting the running session)", n)
+		return nil
+	}
+	if state == o.cfg.StateLabels.WIP && lockOwnerAlive(o.cfg.WorkDir) {
+		log.Printf("stop requested for #%d — the running daemon will halt it shortly", n)
+		return nil
+	}
+	if err := o.finishStopped(ctx, n, state); err != nil {
+		return err
+	}
+	log.Printf("stopped #%d", n)
+	return nil
+}
+
+// finishStopped moves issue n into the stopped state, preserving the worktree,
+// branch, logs, and session file — continue builds on all of it. fromLabel is
+// the state label the issue carries, or "" for a queued ticket that has none.
+//
+// It uses a cancellation-proof context because the pipeline path calls it with
+// an already-cancelled one, clears the park cause so ResumeParked can never see
+// the issue as resumable, and deliberately LEAVES the stop marker: the marker is
+// cleared by continue, not by the stop completing.
 func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel string) error {
 	cctx := context.WithoutCancel(ctx)
+	_ = o.gh.Comment(cctx, n, fmt.Sprintf(
+		"🤖 Stopped by request. Progress is preserved — continue with `loope -continue %d` or the dashboard.", n))
 	if fromLabel == "" {
-		_ = o.gh.AddLabel(cctx, n, o.cfg.StateLabels.Stopped)
-	} else {
-		_ = o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Stopped)
+		if err := o.gh.AddLabel(cctx, n, o.cfg.StateLabels.Stopped); err != nil {
+			return fmt.Errorf("issue #%d: marking stopped failed: %w", n, err)
+		}
+	} else if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Stopped); err != nil {
+		return fmt.Errorf("issue #%d: marking stopped failed: %w", n, err)
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Stopped)
 	clearParkCause(o.issueLogDir(n))
