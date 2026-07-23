@@ -490,7 +490,11 @@ func statusChip(st StepStatus) template.HTML {
 
 // ── templates ───────────────────────────────────────────────────────────────
 
-const pageTmpl = `{{define "page"}}<!doctype html>
+// pageTmpl is split around uiJS so the client script stays a plain .go string
+// with no template actions in it (see ui.go).
+const pageTmpl = pageHead + uiJS + pageTail
+
+const pageHead = `{{define "page"}}<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loop // telemetry</title>
@@ -539,37 +543,9 @@ tailwind.config={theme:{extend:{
   <main id="main" class="scroll min-w-0 flex-1 overflow-y-auto">{{template "detail" .}}</main>
  </div>
 </div>
-<script>
- var railEl=document.getElementById('rail'),ago=document.getElementById('ago'),since=0;
- function copySid(btn){if(btn.dataset.copying)return;var id=btn.getAttribute('data-sid')||'';var orig=btn.textContent;var done=function(){btn.dataset.copying='1';btn.textContent='copied';setTimeout(function(){delete btn.dataset.copying;btn.textContent=orig;},1200);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(id).then(done,done);}else{var ta=document.createElement('textarea');ta.value=id;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);done();}}
- function setText(id,v){var e=document.getElementById(id);if(e&&v!=null)e.textContent=v;}
- function applyMeta(root){var m=root.querySelector('#railmeta');if(!m)return;setText('stat-tickets',m.dataset.tickets);setText('stat-running',m.dataset.running);setText('stat-spend',m.dataset.spend);}
- setInterval(function(){since++;if(ago)ago.textContent=since+'s';},1000);
- var mainEl=document.getElementById('main');
- // Swapping innerHTML re-inserts every card, which re-triggers the .fadein entrance
- // animation. Doing that unconditionally every poll makes the panel flicker even when
- // nothing changed, so we cache the last server fragment and only swap when it differs.
- // Compare against the previous *fetched* string (raw server output) rather than
- // element.innerHTML, which the browser re-serializes and would never byte-match.
- var lastRail=null,lastDetail=null;
- function discKeys(root){var out={};root.querySelectorAll('details[data-disc]').forEach(function(d){if(d.open)out[d.getAttribute('data-disc')]=1;});return out;}
- function txScroll(root){var out={};root.querySelectorAll('.txfeed').forEach(function(f){var atBottom=f.scrollHeight-f.scrollTop-f.clientHeight<8;out[f.getAttribute('data-seq')]={atBottom:atBottom,top:f.scrollTop};});return out;}
- async function poll(){try{var sel=new URLSearchParams(location.search).get('issue')||'';var q=sel?('?issue='+sel):'';
-   var railP=fetch('/rail'+q).then(function(r){return r.text();});
-   var open=discKeys(mainEl),scr=txScroll(mainEl);
-   var detP=fetch('/detail'+q).then(function(r){return r.text();});
-   var railHTML=await railP;
-   if(railHTML!==lastRail){lastRail=railHTML;railEl.innerHTML=railHTML;}
-   applyMeta(railEl);
-   var detHTML=await detP;
-   if(detHTML!==lastDetail){lastDetail=detHTML;
-     mainEl.innerHTML=detHTML;
-     mainEl.querySelectorAll('details[data-disc]').forEach(function(d){d.open=!!open[d.getAttribute('data-disc')];});
-     mainEl.querySelectorAll('.txfeed').forEach(function(f){var st=scr[f.getAttribute('data-seq')];if(!st||st.atBottom){f.scrollTop=f.scrollHeight;}else{f.scrollTop=st.top;}});
-   }
-   since=0;if(ago)ago.textContent='0s';}catch(e){}}
- setInterval(poll,3000);
-</script>
+<script>`
+
+const pageTail = `</script>
 </body></html>{{end}}`
 
 const railTmpl = `{{define "rail"}}
@@ -582,7 +558,7 @@ const railTmpl = `{{define "rail"}}
  {{range .Tickets}}
   {{$sel := and $.Selected (eq .Number $.Selected.Number)}}
   {{$k := stateKind .StateLabel}}
-  <a href="/?issue={{.Number}}" class="group relative block border-b border-line/60 pl-4 pr-3.5 py-3 {{if $sel}}bg-panel2{{else}}hover:bg-panel2/50{{end}}">
+  <a href="/?issue={{.Number}}" data-k="t{{.Number}}" class="group relative block border-b border-line/60 pl-4 pr-3.5 py-3 {{if $sel}}bg-panel2{{else}}hover:bg-panel2/50{{end}}">
    <span class="absolute inset-y-0 left-0 w-[3px] {{stripeClass .StateLabel}}"></span>
    <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
@@ -651,7 +627,7 @@ const detailTmpl = `{{define "detail"}}<div class="max-w-[1160px] px-10 py-7">
    <ol class="relative pt-2">
     <span class="absolute left-[12px] top-2 bottom-4 w-px bg-line2" aria-hidden="true"></span>
     {{range .Steps}}
-    <li class="relative fadein pl-9 pb-2.5">
+    <li data-k="s{{.Seq}}" class="relative fadein pl-9 pb-2.5">
      <span class="{{nodeClass .Status}} absolute left-[6px] top-[14px] h-3.5 w-3.5 rounded-full border-2 border-ink" aria-hidden="true"></span>
      {{if eq .Status "running"}}<span class="ring absolute left-[6px] top-[14px] h-3.5 w-3.5 rounded-full" aria-hidden="true"></span>{{end}}
      {{template "stepcard" .}}
