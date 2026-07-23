@@ -79,3 +79,73 @@ func TestPreflightMissingBinaryFails(t *testing.T) {
 		}
 	}
 }
+
+func TestPreflightGHAuthFailsAndBlocksNothingElseYet(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh auth status": {stderr: "You are not logged into any GitHub hosts.", err: errors.New("exit status 1")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "gh auth")
+	if c.Status != statusFail {
+		t.Fatalf("gh auth status = %d, want statusFail", c.Status)
+	}
+	if len(c.Fix) != 1 || c.Fix[0] != "gh auth login" {
+		t.Fatalf("gh auth fix = %v, want [gh auth login]", c.Fix)
+	}
+}
+
+func TestPreflightSkipsDependentChecks(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh --version":     {err: errors.New("not found")},
+		"claude --version": {err: errors.New("not found")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	for name, blocker := range map[string]string{"gh auth": "gh", "superpowers": "claude"} {
+		c := resultByName(t, results, name)
+		if c.Status != statusSkip {
+			t.Fatalf("%s status = %d, want statusSkip", name, c.Status)
+		}
+		if !strings.Contains(c.Detail, blocker) {
+			t.Fatalf("%s detail = %q, want it to name %q", name, c.Detail, blocker)
+		}
+	}
+}
+
+func TestPreflightSuperpowersMissingPlugin(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"claude plugin list": {stdout: "some-other-plugin@vendor  enabled"},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "superpowers")
+	if c.Status != statusFail {
+		t.Fatalf("superpowers status = %d, want statusFail", c.Status)
+	}
+	if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "claude plugin install superpowers@") {
+		t.Fatalf("superpowers fix = %v", c.Fix)
+	}
+}
+
+func TestPreflightSuperpowersUsesClaudeConfigDir(t *testing.T) {
+	cfg := preflightConfig()
+	cfg.ClaudeConfigDir = "/home/you/.claude-personal"
+	f := &fakeRunner{handler: okHandler(nil)}
+	Preflight(context.Background(), f, cfg)
+	var got []string
+	for _, c := range f.calls {
+		if c.name == "claude" && hasArg(c.args, "plugin") {
+			got = c.env
+		}
+	}
+	if len(got) != 1 || got[0] != "CLAUDE_CONFIG_DIR=/home/you/.claude-personal" {
+		t.Fatalf("plugin list env = %v, want [CLAUDE_CONFIG_DIR=/home/you/.claude-personal]", got)
+	}
+
+	cfg.ClaudeConfigDir = ""
+	f2 := &fakeRunner{handler: okHandler(nil)}
+	Preflight(context.Background(), f2, cfg)
+	for _, c := range f2.calls {
+		if c.name == "claude" && hasArg(c.args, "plugin") && len(c.env) != 0 {
+			t.Fatalf("plugin list env = %v, want none when claudeConfigDir is unset", c.env)
+		}
+	}
+}

@@ -71,10 +71,65 @@ func binaryCheck(ctx context.Context, r Runner, name string, fix []string, args 
 	return CheckResult{Name: name, Status: statusOK, Detail: firstLine(out)}
 }
 
+var fixSuperpowers = []string{"claude plugin install superpowers@claude-plugins-official"}
+
+// skipIfBlocked returns a statusSkip result naming the first blocker that did
+// not pass. A skipped check is never fatal on its own — its blocker already is.
+func skipIfBlocked(name string, blockers ...CheckResult) (CheckResult, bool) {
+	for _, b := range blockers {
+		if b.Status == statusFail || b.Status == statusSkip {
+			return CheckResult{Name: name, Status: statusSkip, Detail: fmt.Sprintf("skipped (%s failed)", b.Name)}, true
+		}
+	}
+	return CheckResult{}, false
+}
+
+func checkGHAuth(ctx context.Context, r Runner, gh CheckResult) CheckResult {
+	if res, skipped := skipIfBlocked("gh auth", gh); skipped {
+		return res
+	}
+	out, err := probe(ctx, r, "", nil, "gh", "auth", "status")
+	if err != nil {
+		return CheckResult{Name: "gh auth", Status: statusFail, Detail: "not authenticated", Fix: []string{"gh auth login"}}
+	}
+	detail := firstLine(out)
+	if detail == "" {
+		detail = "authenticated"
+	}
+	return CheckResult{Name: "gh auth", Status: statusOK, Detail: detail}
+}
+
+// checkSuperpowers verifies the superpowers plugin is installed in the *same*
+// Claude profile the pipeline runs under: without CLAUDE_CONFIG_DIR a user on a
+// dedicated profile would get a false pass from their default ~/.claude.
+func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckResult) CheckResult {
+	if res, skipped := skipIfBlocked("superpowers", claude); skipped {
+		return res
+	}
+	var env []string
+	if cfg.ClaudeConfigDir != "" {
+		env = []string{"CLAUDE_CONFIG_DIR=" + cfg.ClaudeConfigDir}
+	}
+	out, err := probe(ctx, r, "", env, "claude", "plugin", "list")
+	if err != nil {
+		return CheckResult{Name: "superpowers", Status: statusFail, Detail: "claude plugin list failed: " + err.Error(), Fix: fixSuperpowers}
+	}
+	if !strings.Contains(out, "superpowers@") {
+		detail := "plugin not installed"
+		if cfg.ClaudeConfigDir != "" {
+			detail += " (CLAUDE_CONFIG_DIR=" + cfg.ClaudeConfigDir + ")"
+		}
+		return CheckResult{Name: "superpowers", Status: statusFail, Detail: detail, Fix: fixSuperpowers}
+	}
+	return CheckResult{Name: "superpowers", Status: statusOK, Detail: "installed"}
+}
+
 // Preflight runs every check in order and returns the results.
 func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
 	git := binaryCheck(ctx, r, "git", fixGit, "--version")
 	gh := binaryCheck(ctx, r, "gh", fixGH, "--version")
+	ghAuth := checkGHAuth(ctx, r, gh)
 	claude := binaryCheck(ctx, r, "claude", fixClaude, "--version")
-	return []CheckResult{git, gh, claude}
+	superpowers := checkSuperpowers(ctx, r, cfg, claude)
+	return []CheckResult{git, gh, ghAuth, claude, superpowers}
 }
