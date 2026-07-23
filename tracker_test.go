@@ -62,7 +62,7 @@ func TestScanLogs(t *testing.T) {
 	// session file recorded by RecordSession
 	mustWrite(t, filepath.Join(dir, "session"), `{"sessionId":"a3f9","kind":"feature"}`)
 
-	tickets, err := scanLogs(work)
+	tickets, err := scanLogs(&Config{WorkDir: work, StateLabels: defaultStateLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestScanLogsUnparsedAndMissing(t *testing.T) {
 	}
 	writeStep(t, dir, 1, "triage", "pick one", "", "{not valid json")
 
-	tickets, err := scanLogs(work)
+	tickets, err := scanLogs(&Config{WorkDir: work, StateLabels: defaultStateLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestScanLogsStepError(t *testing.T) {
 	writeStep(t, dir, 1, "execute", "do it", "it broke",
 		`{"result":"it broke","session_id":"e1","is_error":true,"total_cost_usd":0.2}`)
 
-	tickets, err := scanLogs(work)
+	tickets, err := scanLogs(&Config{WorkDir: work, StateLabels: defaultStateLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestScanLogsStepError(t *testing.T) {
 }
 
 func TestScanLogsNoDir(t *testing.T) {
-	tickets, err := scanLogs(t.TempDir()) // no logs/ subdir
+	tickets, err := scanLogs(&Config{WorkDir: t.TempDir(), StateLabels: defaultStateLabels()}) // no logs/ subdir
 	if err != nil {
 		t.Fatalf("missing logs dir should not error: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestScanLogsCarriesUsage(t *testing.T) {
 		 "usage":{"input_tokens":100,"cache_creation_input_tokens":0,
 		 "cache_read_input_tokens":900,"output_tokens":50}}`)
 
-	tickets, err := scanLogs(work)
+	tickets, err := scanLogs(&Config{WorkDir: work, StateLabels: defaultStateLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestScanReadsTranscriptPRAndRunningSession(t *testing.T) {
 			`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"x.go"}}]}}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "pr"), []byte("https://github.com/o/r/pull/9\n"), 0o644)
 
-	tickets, err := scanLogs(work)
+	tickets, err := scanLogs(&Config{WorkDir: work, StateLabels: defaultStateLabels()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,5 +528,155 @@ func TestOverlayIssuesKeepsPersistedTitle(t *testing.T) {
 	got := overlayIssues(tickets, []Issue{{Number: 3, Labels: []Label{{Name: "ai-agent"}}}}, cfg)
 	if got[0].Title != "Enhance: add Stop/Continue" {
 		t.Fatalf("Title = %q, want the persisted one", got[0].Title)
+	}
+}
+
+// mkTicket builds a minimal ticket carrying only the fields the sidebar sort
+// reads: its issue Number and state label.
+func mkTicket(number int, label string) Ticket {
+	return Ticket{Number: number, StateLabel: label}
+}
+
+// numbers returns the ticket Numbers in slice order, for compact assertions.
+func numbers(tickets []Ticket) []int {
+	out := make([]int, len(tickets))
+	for i, t := range tickets {
+		out[i] = t.Number
+	}
+	return out
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSortTicketsDoneSinksToBottom(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	sl := defaultStateLabels()
+	tickets := []Ticket{
+		mkTicket(21, sl.Done),
+		mkTicket(2, sl.WIP),
+		mkTicket(13, sl.Done),
+		mkTicket(6, sl.Rework),
+	}
+	sortTickets(cfg, tickets)
+	// Every active ticket precedes every done ticket, regardless of Number.
+	got := numbers(tickets)
+	want := []int{6, 2, 21, 13} // rework, wip, then done by Number desc
+	if !equalInts(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestSortTicketsAttentionTiers(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	sl := defaultStateLabels()
+	// One ticket per bucket, deliberately shuffled on input.
+	tickets := []Ticket{
+		mkTicket(1, sl.Done),
+		mkTicket(2, "some-unknown-label"),
+		mkTicket(3, sl.WIP),
+		mkTicket(4, cfg.EligibleLabel), // queued
+		mkTicket(5, sl.Rework),
+		mkTicket(6, sl.Failed),
+	}
+	sortTickets(cfg, tickets)
+	got := numbers(tickets)
+	// failed -> rework -> wip -> queued -> unknown -> done
+	want := []int{6, 5, 3, 4, 2, 1}
+	if !equalInts(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestSortTicketsNumberDescendingWithinTier(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	sl := defaultStateLabels()
+	tickets := []Ticket{
+		mkTicket(4, sl.WIP),
+		mkTicket(21, sl.WIP),
+		mkTicket(1, sl.WIP),
+		mkTicket(13, sl.WIP),
+	}
+	sortTickets(cfg, tickets)
+	got := numbers(tickets)
+	want := []int{21, 13, 4, 1}
+	if !equalInts(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestSortTicketsCustomLabelsHonored(t *testing.T) {
+	cfg := &Config{
+		EligibleLabel: "queued-please",
+		StateLabels: StateLabels{
+			WIP:    "in-progress",
+			Failed: "blocked",
+			Done:   "shipped",
+			Rework: "revise",
+		},
+	}
+	tickets := []Ticket{
+		mkTicket(1, "shipped"),       // done -> rank 5
+		mkTicket(2, "in-progress"),   // wip  -> rank 2
+		mkTicket(3, "blocked"),       // failed -> rank 0
+		mkTicket(4, "queued-please"), // queued -> rank 3
+		mkTicket(5, "revise"),        // rework -> rank 1
+	}
+	sortTickets(cfg, tickets)
+	got := numbers(tickets)
+	want := []int{3, 5, 2, 4, 1} // blocked, revise, in-progress, queued, shipped
+	if !equalInts(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestSortTicketsDeterministicNoOp(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	sl := defaultStateLabels()
+	tickets := []Ticket{
+		mkTicket(6, sl.Failed),
+		mkTicket(5, sl.Rework),
+		mkTicket(3, sl.WIP),
+		mkTicket(4, cfg.EligibleLabel),
+		mkTicket(2, "unknown"),
+		mkTicket(1, sl.Done),
+	}
+	sortTickets(cfg, tickets)
+	first := numbers(tickets)
+	sortTickets(cfg, tickets) // sorting an already-sorted slice must not change it
+	second := numbers(tickets)
+	if !equalInts(first, second) {
+		t.Fatalf("second sort changed order: %v -> %v", first, second)
+	}
+}
+
+func TestStatusRank(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	sl := defaultStateLabels()
+	cases := []struct {
+		label string
+		want  int
+	}{
+		{sl.Failed, 0},
+		{sl.Rework, 1},
+		{sl.WIP, 2},
+		{cfg.EligibleLabel, 3},
+		{"totally-unknown", 4},
+		{"", 4},
+		{sl.Done, 5},
+	}
+	for _, c := range cases {
+		if got := statusRank(cfg, c.label); got != c.want {
+			t.Errorf("statusRank(%q) = %d, want %d", c.label, got, c.want)
+		}
 	}
 }
