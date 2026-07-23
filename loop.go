@@ -160,41 +160,56 @@ func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue) ([]pick
 func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base string) error {
 	n := issue.Number
 	branch := branchName(n)
-	if err := o.gh.AddLabel(ctx, n, o.cfg.StateLabels.WIP); err != nil {
+	// Own this issue for the life of the pipeline: a stop cancels ictx, which
+	// kills the in-flight claude process and unwinds us into the stop branch
+	// below.
+	ictx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if !o.registry.register(n, cancel) {
+		return fmt.Errorf("issue #%d is already running", n)
+	}
+	defer o.registry.deregister(n)
+	if err := o.gh.AddLabel(ictx, n, o.cfg.StateLabels.WIP); err != nil {
 		return err
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.WIP)
-	_ = o.gh.Comment(ctx, n, fmt.Sprintf("🤖 Picked up (%s flow). Branch: `%s`", kind, branch))
+	_ = o.gh.Comment(ictx, n, fmt.Sprintf("🤖 Picked up (%s flow). Branch: `%s`", kind, branch))
 
-	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
+	wtPath, err := o.wt.Create(ictx, o.cfg.WorkDir, n, base)
 	if err != nil {
-		return o.abort(ctx, n, "", "", err)
+		return o.abort(ictx, n, "", "", err)
 	}
-	content, err := o.gh.FetchIssueContent(ctx, n)
+	content, err := o.gh.FetchIssueContent(ictx, n)
 	if err != nil {
-		return o.abort(ctx, n, wtPath, branch, err)
+		return o.abort(ictx, n, wtPath, branch, err)
 	}
-	content = DownloadIssueImages(ctx, o.runner, content, o.issueLogDir(n))
+	content = DownloadIssueImages(ictx, o.runner, content, o.issueLogDir(n))
 
 	c := &Claude{runner: o.runner, logDir: o.issueLogDir(n), configDir: o.cfg.ClaudeConfigDir}
 	var perr error
 	if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content)
+		perr = RunBugPipeline(ictx, c, o.cfg, wtPath, content)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath))
+		perr = RunFeaturePipeline(ictx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath))
 	}
 	var done *alreadyDoneError
 	if errors.As(perr, &done) {
-		return o.finishDone(ctx, n, wtPath, branch, o.cfg.StateLabels.WIP, done.reason)
+		return o.finishDone(ictx, n, wtPath, branch, o.cfg.StateLabels.WIP, done.reason)
 	}
 	var lowConf *lowConfidenceError
 	if errors.As(perr, &lowConf) {
-		return o.finishNeedsInfo(ctx, n, wtPath, branch, o.cfg.StateLabels.WIP, lowConf)
+		return o.finishNeedsInfo(ictx, n, wtPath, branch, o.cfg.StateLabels.WIP, lowConf)
 	}
 	if perr != nil {
-		return o.park(ctx, n, o.cfg.StateLabels.WIP, perr)
+		// A stop and a daemon shutdown both surface as a cancelled claude call.
+		// The marker is what tells them apart: only a stop leaves one, so a
+		// SIGTERM to the daemon still parks its in-flight issues as before.
+		if stopRequested(o.issueLogDir(n)) {
+			return o.finishStopped(ictx, n, o.cfg.StateLabels.WIP)
+		}
+		return o.park(ictx, n, o.cfg.StateLabels.WIP, perr)
 	}
-	return o.ship(ctx, issue, wtPath, branch, base, kind, o.cfg.StateLabels.WIP)
+	return o.ship(ictx, issue, wtPath, branch, base, kind, o.cfg.StateLabels.WIP)
 }
 
 // finishDone closes an issue a pipeline judged already implemented. It runs on

@@ -10,8 +10,18 @@ import (
 // worktree and the saved Claude session, resumes that session headlessly with a
 // "finish the job" prompt, then runs the shared ship step (swapping
 // ai-rework->ai-done on success). Idempotent: a failure re-parks as ai-rework
-// with the worktree intact, so it can be run again.
+// with the worktree intact, so it can be run again. It is the entry point for
+// `-rework` and for ResumeParked's auto-resume; behaviour is unchanged.
 func (o *Orchestrator) Rework(ctx context.Context, n int) error {
+	return o.resume(ctx, n, o.cfg.StateLabels.Rework)
+}
+
+// resume resumes issue n's persisted Claude session in its preserved worktree,
+// then ships. fromLabel is the state label the issue currently carries, which
+// ship swaps to Done and park swaps to Rework — ai-rework for a rework, ai-wip
+// for a continue. Like handleIssue it registers the run so a stop can cancel it,
+// and finishes as stopped rather than parked when a stop marker is present.
+func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) error {
 	wtPath := worktreePath(o.cfg.WorkDir, n)
 	if _, err := os.Stat(wtPath); err != nil {
 		return fmt.Errorf("issue #%d: no preserved worktree at %s to resume (remove the %s label to re-queue from scratch): %w",
@@ -26,21 +36,30 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 	if si.SessionID == "" {
 		return fmt.Errorf("issue #%d: saved session file has no session id", n)
 	}
-	base, err := o.wt.DefaultBranch(ctx)
+
+	ictx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if !o.registry.register(n, cancel) {
+		return fmt.Errorf("#%d is already running", n)
+	}
+	defer o.registry.deregister(n)
+
+	base, err := o.wt.DefaultBranch(ictx)
 	if err != nil {
 		return err
 	}
-	title, err := o.gh.IssueTitle(ctx, n)
+	title, err := o.gh.IssueTitle(ictx, n)
 	if err != nil {
 		return err
 	}
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
-	res, err := c.Call(ctx, ClaudeCall{
+	res, err := c.Call(ictx, ClaudeCall{
 		Dir: wtPath, Label: "rework", Prompt: reworkPrompt(), Resume: si.SessionID,
 		Model:           o.cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Kind:            si.Kind,
 	})
 	// Record before the error check so a rework that fails again (e.g. a fresh
 	// 429) still advances the saved session to the latest one for the next run.
@@ -48,14 +67,17 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 		c.RecordSession(res.SessionID, si.Kind)
 	}
 	if err != nil {
-		return o.park(ctx, n, o.cfg.StateLabels.Rework, err)
+		if stopRequested(logDir) {
+			return o.finishStopped(ictx, n, fromLabel)
+		}
+		return o.park(ictx, n, fromLabel, err)
 	}
 
 	branch := branchName(n)
 	if reason, ok := parseAlreadyDone(res.Result); ok {
-		return o.finishDone(ctx, n, wtPath, branch, o.cfg.StateLabels.Rework, reason)
+		return o.finishDone(ictx, n, wtPath, branch, fromLabel, reason)
 	}
-	return o.ship(ctx, Issue{Number: n, Title: title}, wtPath, branch, base, si.Kind, o.cfg.StateLabels.Rework)
+	return o.ship(ictx, Issue{Number: n, Title: title}, wtPath, branch, base, si.Kind, fromLabel)
 }
 
 func reworkPrompt() string {

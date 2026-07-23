@@ -72,3 +72,18 @@ func (r *runRegistry) numbers() []int {
 	}
 	return out
 }
+
+// finishStopped parks issue n in the operator-held stopped state, preserving
+// every artifact. fromLabel is the state label the issue currently carries, or
+// "" when it carries none (a queued ticket).
+func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel string) error {
+	cctx := context.WithoutCancel(ctx)
+	if fromLabel == "" {
+		_ = o.gh.AddLabel(cctx, n, o.cfg.StateLabels.Stopped)
+	} else {
+		_ = o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Stopped)
+	}
+	recordState(o.issueLogDir(n), o.cfg.StateLabels.Stopped)
+	clearParkCause(o.issueLogDir(n))
+	return nil
+}

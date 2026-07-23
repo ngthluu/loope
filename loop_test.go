@@ -946,3 +946,43 @@ func TestHandleIssuePanicParksIssue(t *testing.T) {
 		t.Error("a panicking pipeline must park the issue for rework")
 	}
 }
+
+func TestHandleIssuePipelineErrorWithStopMarkerFinishesStopped(t *testing.T) {
+	env := newFakeEnv(t)
+	env.failClaude = true
+	o := env.orchestrator()
+	recordStopRequest(o.issueLogDir(7))
+
+	err := o.handleIssue(context.Background(), Issue{Number: 7, Title: "Fix crash"}, "bug", "origin/main")
+	if err != nil {
+		t.Fatalf("a stopped pipeline is a clean outcome, got %v", err)
+	}
+	if got := strings.TrimSpace(env.readLocalState(7)); got != "ai-stopped" {
+		t.Fatalf("state = %q, want ai-stopped", got)
+	}
+	if len(env.callsMatching("gh", "--add-label ai-rework")) != 0 {
+		t.Fatal("a stopped pipeline must not park as ai-rework")
+	}
+}
+
+func TestHandleIssuePipelineErrorWithoutStopMarkerStillParks(t *testing.T) {
+	env := newFakeEnv(t)
+	env.failClaude = true
+	o := env.orchestrator()
+
+	if err := o.handleIssue(context.Background(), Issue{Number: 7, Title: "Fix crash"}, "bug", "origin/main"); err == nil {
+		t.Fatal("a genuine pipeline failure must still return its error")
+	}
+	if got := strings.TrimSpace(env.readLocalState(7)); got != "ai-rework" {
+		t.Fatalf("state = %q, want ai-rework", got)
+	}
+}
+
+func TestHandleIssueRegistersAndDeregisters(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	_ = o.handleIssue(context.Background(), Issue{Number: 7, Title: "Fix crash"}, "bug", "origin/main")
+	if o.registry.running(7) {
+		t.Fatal("handleIssue must deregister the issue when it returns")
+	}
+}
