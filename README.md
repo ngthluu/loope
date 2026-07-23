@@ -139,12 +139,13 @@ the ticket was stopped before any work started (no worktree or no saved
 session), continue simply re-queues it and the next poll cycle picks it up from
 scratch.
 
-Both verbs are also available as buttons in the dashboard's detail pane. The
-dashboard's continue draws from the same `ticketsPerCycle` budget as the poll
-loop — it runs a full pipeline, so it is refused while every slot is busy
-(`#N cannot start yet: all 2 ticket slots are busy`) and the ticket stays in the
-hold until you retry. A continue in flight also holds shutdown open, exactly as
-a cycle's pipelines do, so `Ctrl-C` never kills a session mid-run.
+Both verbs are also available as buttons in the dashboard's detail pane. A
+continue you start there runs a full pipeline, so it enters the same ledger as
+the poll loop's own work: it does not queue behind `ticketsPerCycle` (you asked
+for one named ticket, not for more throughput), but the loop yields to it —
+while it runs there are no free slots, so no new tickets are picked up. It also
+holds shutdown open exactly as a cycle's pipelines do, so `Ctrl-C` never kills a
+session mid-run.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing
 > `ai-failed` issues are still recognized and stay out of the queue.

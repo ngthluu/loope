@@ -32,13 +32,42 @@ func (o *Orchestrator) slots() int {
 func (o *Orchestrator) tryAcquire(n int) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if len(o.active) >= o.slots() {
+		return false
+	}
+	return o.take(n)
+}
+
+// acquireOperator claims a slot for work a human asked for by name, waiting for
+// no budget. The budget bounds the LOOP's own concurrency; queueing an operator
+// behind it means queueing them behind an eligible list that may never empty —
+// with the default budget of one they would be racing the poll cycle for a slot
+// that reopens for a few seconds every few minutes, and nothing records the
+// intent or retries it.
+//
+// The over-commit is self-correcting rather than unbounded: freeSlots floors at
+// zero, so the cycles that follow start no new work until the operator's run
+// finishes. Total concurrency stays at the budget plus what a human has
+// explicitly asked for — the same accounting `loope -continue` in another shell
+// has always had, since a second process shares no ledger at all.
+//
+// It refuses only a genuine conflict: a run already in flight for this issue,
+// or a daemon that is shutting down.
+func (o *Orchestrator) acquireOperator(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.take(n)
+}
+
+// take records the slot. Callers must hold mu.
+func (o *Orchestrator) take(n int) bool {
+	if o.draining {
+		return false
+	}
 	if o.active == nil {
 		o.active = map[int]struct{}{}
 	}
 	if _, busy := o.active[n]; busy {
-		return false
-	}
-	if len(o.active) >= o.slots() {
 		return false
 	}
 	o.active[n] = struct{}{}
@@ -46,17 +75,15 @@ func (o *Orchestrator) tryAcquire(n int) bool {
 	return true
 }
 
-// slotRefusal explains why tryAcquire turned issue n away, for a caller that has
-// a human waiting on the answer (the dashboard). It re-reads the ledger, so it
-// can in principle name a reason that has just stopped being true — this is an
-// error message, not a decision.
-func (o *Orchestrator) slotRefusal(n int) error {
+// operatorRefusal explains why acquireOperator turned issue n away, for a caller
+// with a human waiting on the answer (the dashboard).
+func (o *Orchestrator) operatorRefusal(n int) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if _, busy := o.active[n]; busy {
-		return fmt.Errorf("#%d is already running", n)
+	if o.draining {
+		return fmt.Errorf("the daemon is shutting down — start it again to continue #%d", n)
 	}
-	return fmt.Errorf("#%d cannot start yet: all %d ticket slots are busy — try again when one finishes", n, o.slots())
+	return fmt.Errorf("#%d is already running", n)
 }
 
 // release returns issue n's slot. Every successful tryAcquire must be paired
@@ -94,7 +121,22 @@ func (o *Orchestrator) filterInactive(issues []Issue) []Issue {
 	return out
 }
 
-// Wait blocks until every in-flight pipeline and resume has finished. runLoop
-// calls it before returning so the workDir lock outlives all work, exactly as it
-// did when ProcessOnce blocked on its own WaitGroup.
+// Wait blocks until every in-flight pipeline and resume has finished.
 func (o *Orchestrator) Wait() { o.inFlight.Wait() }
+
+// drain closes the ledger and then waits for every slot still out to come back.
+// runLoop calls it before returning, so the workDir lock outlives all work.
+//
+// Closing it first is what makes waiting safe at all. The dashboard's continue
+// takes a slot from an HTTP handler, which can run at any moment — including
+// while a drain is under way, since closing the listener does not join handlers
+// already inside one. A WaitGroup panics if an Add lands concurrently with a
+// Wait, and net/http would swallow that panic, leaving the ledger holding a slot
+// that never comes back and an issue this process can never start again. Under
+// the same mutex every acquire takes, no Add can follow the flag.
+func (o *Orchestrator) drain() {
+	o.mu.Lock()
+	o.draining = true
+	o.mu.Unlock()
+	o.inFlight.Wait()
+}

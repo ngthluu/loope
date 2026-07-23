@@ -210,7 +210,7 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 		if once {
 			// -once fills slots once and drains them; it does not top up as
 			// pipelines complete.
-			o.Wait()
+			o.drain()
 			return
 		}
 		select {
@@ -219,7 +219,7 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 			// Pipelines see the cancelled context and unwind through their
 			// existing context.WithoutCancel cleanup paths, exactly as they did
 			// when a Ctrl-C landed during the old in-cycle wg.Wait().
-			o.Wait()
+			o.drain()
 			return
 		case <-time.After(time.Duration(cfg.PollIntervalSec) * time.Second):
 		}

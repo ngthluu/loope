@@ -39,6 +39,7 @@ type Orchestrator struct {
 	mu            sync.Mutex
 	active        map[int]struct{} // issue numbers with a pipeline in flight
 	inFlight      sync.WaitGroup   // one Add per acquired slot; drained on shutdown
+	draining      bool             // shutting down: hand out no further slots
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
 	now           func() time.Time // test seam; nil means time.Now

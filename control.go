@@ -463,12 +463,13 @@ func (c orchestratorController) Stop(n int) error {
 // then runs the multi-minute resume in the background on the daemon's context.
 //
 // The resume is a full pipeline, so it takes a slot before anything else and
-// holds it until it finishes. That is two things at once, and it used to be
-// neither: the slot is the TicketsPerCycle budget, which a bare goroutine
-// escaped (a budget of one ran two concurrent Claude sessions), and it is the
-// in-flight registration shutdown drains, which a bare goroutine also escaped —
-// so a SIGTERM returned from Wait, released the workDir lock and exited out from
-// under a live session, with none of its labeling done.
+// holds it until it finishes. The slot is what makes it part of the two
+// accountings a bare goroutine escaped: the ledger the poll cycle reads, so the
+// loop backs off by one while an operator's run is going (see acquireOperator —
+// the operator does not queue behind the budget, but the budget yields to them),
+// and the in-flight set shutdown drains, so a SIGTERM no longer returns from the
+// drain, releases the workDir lock and exits out from under a live session with
+// none of its labeling done.
 //
 // The slot is taken BEFORE prepareContinue, so a refused continue leaves the
 // ticket in the operator hold rather than swapping it to ai-wip for a run that
@@ -478,8 +479,8 @@ func (c orchestratorController) Stop(n int) error {
 // The CLI's -continue needs none of this: it is the whole process, drives one
 // pipeline, and returns before main does.
 func (c orchestratorController) Continue(n int) error {
-	if !c.o.tryAcquire(n) {
-		return c.o.slotRefusal(n)
+	if !c.o.acquireOperator(n) {
+		return c.o.operatorRefusal(n)
 	}
 	run, err := c.o.prepareContinue(c.o.base(), n)
 	if err != nil || run == nil {

@@ -37,12 +37,17 @@ func TestProcessOnceReturnsBeforePipelinesFinish(t *testing.T) {
 }
 
 // A continue started from the dashboard runs a full pipeline — the same
-// multi-minute Claude session as any other — so it has to be part of the same
-// two accountings every pipeline is part of. It used to be part of neither: it
-// spawned a bare goroutine, so a budget of one ran two concurrent sessions, and
-// shutdown drained only the cycle's pipelines and then exited out from under it,
-// killing the session mid-flight with none of its labeling done.
-func TestDashboardContinueRunsOnTheSlotBudget(t *testing.T) {
+// multi-minute Claude session as any other — so it has to be in the ledger every
+// other pipeline is in. It used to be in neither half of it: shutdown drained
+// only the cycle's pipelines and then exited out from under it, killing the
+// session mid-flight with none of its labeling done, and the poll loop kept
+// starting work as though nothing were running.
+//
+// It does NOT queue behind the budget, though. A human asking for one named
+// ticket would be racing the poll cycle for a slot that reopens for seconds
+// every few minutes; the loop yields to them instead, by having no free slots
+// while their run is in flight.
+func TestDashboardContinueTakesASlotTheLoopThenYields(t *testing.T) {
 	env := newSlotEnv(t, 7)
 	o := env.orchestrator()
 	o.cfg.TicketsPerCycle = 1
@@ -55,40 +60,65 @@ func TestDashboardContinueRunsOnTheSlotBudget(t *testing.T) {
 	if err := o.ProcessOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	awaitStarted(t, started, 1)
+	if got := awaitStarted(t, started, 1); got[0] != 7 {
+		t.Fatalf("first pipeline = #%d, want #7", got[0])
+	}
 
-	if err := ctl.Continue(9); err == nil {
-		t.Fatal("a continue that would exceed the ticket budget must be refused, not run anyway")
+	if err := ctl.Continue(9); err != nil {
+		t.Fatalf("an operator continue must not queue behind the loop's budget: %v", err)
+	}
+	if got := awaitStarted(t, started, 1); got[0] != 9 {
+		t.Fatalf("continued pipeline = #%d, want #9", got[0])
+	}
+
+	// ...and the loop yields for as long as it runs: no free slots, so the next
+	// cycle starts nothing new.
+	if free := o.freeSlots(); free != 0 {
+		t.Fatalf("freeSlots = %d, want 0 with the budget over-committed", free)
+	}
+	env.setEligible(7, 8)
+	if err := o.ProcessOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	assertNoStart(t, started, 200*time.Millisecond)
-	if len(env.callsMatching("gh", "--add-label ai-wip")) != 1 {
-		t.Fatal("a refused continue must not move the ticket out of the operator hold")
-	}
 
-	// The slot frees up; now the continue runs — and shutdown must wait for it.
-	close(release)
-	o.Wait()
-
-	started2, release2 := gatePipelines(o, env.f)
-	if err := ctl.Continue(9); err != nil {
-		t.Fatalf("a continue with a free slot must start: %v", err)
-	}
-	awaitStarted(t, started2, 1)
-	if free := o.freeSlots(); free != 0 {
-		t.Fatalf("freeSlots = %d, want 0 while the continue is running", free)
-	}
+	// Shutdown drains the continue like anything else.
 	drained := make(chan struct{})
-	go func() { o.Wait(); close(drained) }()
+	go func() { o.drain(); close(drained) }()
 	select {
 	case <-drained:
-		t.Fatal("shutdown drained while the continue was still mid-session")
+		t.Fatal("shutdown drained while pipelines were still mid-session")
 	case <-time.After(200 * time.Millisecond):
 	}
-	close(release2)
+	close(release)
 	select {
 	case <-drained:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the continue never released its slot")
+	}
+}
+
+// A continue arriving as the daemon shuts down must be refused outright. The
+// dashboard's handler can run at any moment — closing the listener does not join
+// handlers already inside one — and a slot taken after the drain started would
+// panic the WaitGroup, which net/http would swallow, leaving the ledger holding
+// a slot that never comes back.
+func TestDashboardContinueIsRefusedOnceTheDrainStarts(t *testing.T) {
+	env := newSlotEnv(t)
+	o := env.orchestrator()
+	env.stateLabels(9, "ai-stopped")
+	seedResumable(t, o, 9, "sess-9")
+
+	o.drain() // nothing in flight, so this returns at once and closes the ledger
+
+	if err := o.controller().Continue(9); err == nil {
+		t.Fatal("a continue arriving during shutdown must be refused")
+	}
+	if len(env.callsMatching("gh", "--add-label ai-wip")) != 0 {
+		t.Fatal("a refused continue must leave the ticket in the operator hold")
+	}
+	if len(env.callsMatching("claude", "--resume")) != 0 {
+		t.Fatal("no session may be started during shutdown")
 	}
 }
 
