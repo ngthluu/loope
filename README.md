@@ -139,7 +139,12 @@ the ticket was stopped before any work started (no worktree or no saved
 session), continue simply re-queues it and the next poll cycle picks it up from
 scratch.
 
-Both verbs are also available as buttons in the dashboard's detail pane.
+Both verbs are also available as buttons in the dashboard's detail pane. The
+dashboard's continue draws from the same `ticketsPerCycle` budget as the poll
+loop — it runs a full pipeline, so it is refused while every slot is busy
+(`#N cannot start yet: all 2 ticket slots are busy`) and the ticket stays in the
+hold until you retry. A continue in flight also holds shutdown open, exactly as
+a cycle's pipelines do, so `Ctrl-C` never kills a session mid-run.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing
 > `ai-failed` issues are still recognized and stay out of the queue.
@@ -371,13 +376,17 @@ The daemon is designed to run until you stop it:
   worktree intact and auto-resumed, so the crash costs no pipeline work. Only
   when nothing resumable remains are the leftover worktree/branch removed and
   the label stripped to re-queue the issue from scratch. No manual cleanup.
-- **One daemon per workDir.** A pid lock at `<workDir>/logs/daemon.lock`
-  refuses a second instance while one is alive and is taken over when stale.
+- **One daemon per workDir.** A lock at `<workDir>/logs/daemon.lock` refuses a
+  second instance while one is alive. It is held with `flock(2)`, which the
+  kernel releases when the holder dies however it dies, so a crashed instance
+  never leaves a lock a human has to clear — and a lock file whose pid the OS
+  has since recycled onto an unrelated process is still free. (workDir must be
+  on a filesystem that supports `flock`; the daemon says so if it is not.)
 - **One run per issue, across processes.** Every pipeline claims its issue on
-  disk (`logs/issue-<N>/owner`) before it starts, so a manual `loope -rework
-  <N>` or `-continue <N>` against an issue a daemon is already driving is
-  refused (`#N is already running`) instead of opening a second Claude session
-  in the same worktree. The same claim keeps the daemon's startup orphan sweep
+  disk (`logs/issue-<N>/owner`, the same kind of lock) before it starts, so a
+  manual `loope -rework <N>` or `-continue <N>` against an issue a daemon is
+  already driving is refused (`#N is already running`) instead of opening a
+  second Claude session in the same worktree. The same claim keeps the daemon's startup orphan sweep
   off issues a `-once`, `-rework` or `-continue` in another shell is working on
   — the workDir lock proves no second *daemon* is up, not that an issue is idle.
 - **Panics don't kill the loop.** A panic in one issue's pipeline parks that

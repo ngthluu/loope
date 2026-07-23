@@ -21,6 +21,13 @@ func lockPath(workDir string) string {
 // free, whatever pid it names. Holding the lock is what makes the startup orphan
 // sweep safe: any ai-wip issue found can only belong to a dead run. The returned
 // release drops the lock; call it on clean shutdown.
+//
+// A lock that cannot be taken for any other reason is fatal, unlike the
+// per-issue claim, which is advisory and grants itself on doubt. Nothing here
+// can be proven without it: an unlocked daemon may race a second daemon for live
+// work, and the startup orphan sweep would reclaim worktrees out from under it.
+// A filesystem that cannot flock (some network mounts) therefore stops the
+// daemon rather than being worked around, and says so.
 func acquireLock(workDir string) (release func(), err error) {
 	path := lockPath(workDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -32,7 +39,7 @@ func acquireLock(workDir string) (release func(), err error) {
 		if errors.As(err, &held) {
 			return nil, fmt.Errorf("another loop instance (pid %d) owns %s — stop it first or use a different workDir", held.pid, workDir)
 		}
-		return nil, err
+		return nil, fmt.Errorf("could not lock %s (%w) — workDir must be on a filesystem that supports flock(2)", workDir, err)
 	}
 	return l.release, nil
 }
