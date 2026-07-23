@@ -148,3 +148,67 @@ Respond with ONLY a JSON object, no other text:
 {"issueNumber": <int>, "kind": "bug" or "feature", "reason": "<one sentence>"}`
 	check(t, "triagePrompt", triagePrompt("[LIST]"), want)
 }
+
+func TestGoldenPickupComment(t *testing.T) {
+	check(t, "pickupComment", pickupComment("feature", "ai/issue-12"),
+		"🤖 Picked up (feature flow). Branch: `ai/issue-12`")
+}
+
+func TestGoldenAlreadyDoneComment(t *testing.T) {
+	check(t, "alreadyDoneComment", alreadyDoneComment("The flag already exists."),
+		"🤖 Already implemented — closing. The flag already exists.")
+}
+
+func TestGoldenNeedsInfoComment(t *testing.T) {
+	check(t, "needsInfoComment", needsInfoComment(42, "ai-needs-info", "Which database?"),
+		"🤖 Not confident enough to implement (confidence 42/100). Please clarify and remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
+}
+
+func TestGoldenParkCommentFull(t *testing.T) {
+	check(t, "parkComment(guidance+error)", parkComment(12, "Cause: network outage — the loop auto-resumes when connectivity returns.", "dial tcp: i/o timeout"),
+		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nCause: network outage — the loop auto-resumes when connectivity returns.\nError: dial tcp: i/o timeout")
+}
+
+func TestGoldenParkCommentNoGuidance(t *testing.T) {
+	check(t, "parkComment(error only)", parkComment(12, "", "boom"),
+		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nError: boom")
+}
+
+func TestGoldenParkCommentNoError(t *testing.T) {
+	check(t, "parkComment(guidance only)", parkComment(12, "Cause: x.", ""),
+		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nCause: x.")
+}
+
+func TestGoldenParkCommentBare(t *testing.T) {
+	check(t, "parkComment(bare)", parkComment(12, "", ""),
+		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.")
+}
+
+func TestGoldenPRComment(t *testing.T) {
+	check(t, "prComment", prComment("https://example.test/pr/1"), "🤖 PR: https://example.test/pr/1")
+}
+
+func TestGoldenPRTitle(t *testing.T) {
+	check(t, "prTitle", prTitle("Externalize prompts", 12), "Externalize prompts (#12)")
+}
+
+func TestGoldenPRBody(t *testing.T) {
+	check(t, "prBody", prBody(12, "feature"),
+		"Closes #12\n\nAutomated by loope (feature flow). Spec and plan, if any, are committed in this branch under docs/.")
+}
+
+func TestGoldenClassifyCauseGuidance(t *testing.T) {
+	cases := []struct{ msg, want string }{
+		{"session limit reached", "Cause: Claude usage/rate limit — the loop auto-resumes it (with backoff) once the limit resets."},
+		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run — the loop auto-resumes where it stopped (raise the execute maxTurns/maxBudgetUSD if this recurs)."},
+		{"interrupted mid-run", "Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session."},
+		{"dial tcp: i/o timeout", "Cause: network outage — the loop auto-resumes when connectivity returns."},
+	}
+	for _, tc := range cases {
+		got, resumable := classifyCause(tc.msg)
+		if !resumable {
+			t.Errorf("classifyCause(%q) resumable = false, want true", tc.msg)
+		}
+		check(t, "classifyCause("+tc.msg+")", got, tc.want)
+	}
+}

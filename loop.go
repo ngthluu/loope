@@ -163,7 +163,7 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		return err
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.WIP)
-	_ = o.gh.Comment(ctx, n, fmt.Sprintf("🤖 Picked up (%s flow). Branch: `%s`", kind, branch))
+	_ = o.gh.Comment(ctx, n, pickupComment(kind, branch))
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
 	if err != nil {
@@ -210,7 +210,7 @@ func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, fr
 	if branch != "" {
 		_ = o.wt.DeleteBranch(cctx, branch)
 	}
-	_ = o.gh.Comment(cctx, n, fmt.Sprintf("🤖 Already implemented — closing. %s", reason))
+	_ = o.gh.Comment(cctx, n, alreadyDoneComment(reason))
 	if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Done); err != nil {
 		return fmt.Errorf("issue #%d: already implemented but marking done failed: %w", n, err)
 	}
@@ -236,9 +236,7 @@ func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, wtPath, branc
 	if branch != "" {
 		_ = o.wt.DeleteBranch(cctx, branch)
 	}
-	body := fmt.Sprintf("🤖 Not confident enough to implement (confidence %d/100). Please clarify and remove the `%s` label to re-queue:\n\n%s",
-		lc.score, o.cfg.StateLabels.NeedsInfo, lc.feedback)
-	_ = o.gh.Comment(cctx, n, body)
+	_ = o.gh.Comment(cctx, n, needsInfoComment(lc.score, o.cfg.StateLabels.NeedsInfo, lc.feedback))
 	if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.NeedsInfo); err != nil {
 		return fmt.Errorf("issue #%d: low confidence but marking needs-info failed: %w", n, err)
 	}
@@ -304,12 +302,7 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 	// retrying on backoff would otherwise post a comment per attempt. A
 	// non-resumable cause is new information for the operator, so it comments.
 	if !(fromLabel == o.cfg.StateLabels.Rework && resumable) {
-		comment := fmt.Sprintf("🤖 Parked for rework — run `loop -rework %d -config <cfg>`.", n)
-		if guidance != "" {
-			comment += "\n" + guidance
-		}
-		comment += fmt.Sprintf("\nError: %s", tail(cause.Error(), 800))
-		_ = o.gh.Comment(cctx, n, comment)
+		_ = o.gh.Comment(cctx, n, parkComment(n, guidance, tail(cause.Error(), 800)))
 	}
 	if fromLabel != o.cfg.StateLabels.Rework {
 		_ = o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Rework)
@@ -510,13 +503,11 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	if err := o.wt.Push(ctx, wtPath, branch); err != nil {
 		return onInfra(err)
 	}
-	url, err := o.gh.CreatePR(ctx, branch,
-		fmt.Sprintf("%s (#%d)", issue.Title, n),
-		fmt.Sprintf("Closes #%d\n\nAutomated by loope (%s flow). Spec and plan, if any, are committed in this branch under docs/.", n, kind))
+	url, err := o.gh.CreatePR(ctx, branch, prTitle(issue.Title, n), prBody(n, kind))
 	if err != nil {
 		return onInfra(err)
 	}
-	_ = o.gh.Comment(ctx, n, "🤖 PR: "+url)
+	_ = o.gh.Comment(ctx, n, prComment(url))
 	recordPR(o.issueLogDir(n), url)
 	if err := o.gh.SwapLabels(ctx, n, fromLabel, o.cfg.StateLabels.Done); err != nil {
 		// PR is up but the Done swap failed. Surface it; leave fromLabel in place
@@ -551,4 +542,40 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 		_ = o.wt.DeleteBranch(cctx, branch)
 	}
 	return cause
+}
+
+func pickupComment(kind, branch string) string {
+	return fmt.Sprintf("🤖 Picked up (%s flow). Branch: `%s`", kind, branch)
+}
+
+func alreadyDoneComment(reason string) string {
+	return fmt.Sprintf("🤖 Already implemented — closing. %s", reason)
+}
+
+func needsInfoComment(score int, label, feedback string) string {
+	return fmt.Sprintf("🤖 Not confident enough to implement (confidence %d/100). Please clarify and remove the `%s` label to re-queue:\n\n%s",
+		score, label, feedback)
+}
+
+func parkComment(n int, guidance, errText string) string {
+	c := fmt.Sprintf("🤖 Parked for rework — run `loop -rework %d -config <cfg>`.", n)
+	if guidance != "" {
+		c += "\n" + guidance
+	}
+	if errText != "" {
+		c += fmt.Sprintf("\nError: %s", errText)
+	}
+	return c
+}
+
+func prComment(url string) string {
+	return "🤖 PR: " + url
+}
+
+func prTitle(title string, n int) string {
+	return fmt.Sprintf("%s (#%d)", title, n)
+}
+
+func prBody(n int, kind string) string {
+	return fmt.Sprintf("Closes #%d\n\nAutomated by loope (%s flow). Spec and plan, if any, are committed in this branch under docs/.", n, kind)
 }
