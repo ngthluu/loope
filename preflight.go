@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -239,6 +240,44 @@ func ReportPreflightFailedCount(results []CheckResult) int {
 		}
 	}
 	return n
+}
+
+func statusMarker(s checkStatus) string {
+	switch s {
+	case statusOK:
+		return "✔"
+	case statusFail:
+		return "✘"
+	case statusWarn:
+		return "!"
+	default:
+		return "-"
+	}
+}
+
+// ReportPreflight writes the human-readable report to w and reports whether
+// any required check failed. Fix hints print only for non-OK checks; the
+// trailing summary line is omitted when nothing required failed.
+func ReportPreflight(w io.Writer, results []CheckResult) (failed bool) {
+	fmt.Fprintf(w, "loope preflight\n\n")
+	for _, c := range results {
+		fmt.Fprintf(w, "  %s %-13s %s\n", statusMarker(c.Status), c.Name, c.Detail)
+		if c.Status != statusOK {
+			for _, f := range c.Fix {
+				fmt.Fprintf(w, "      → %s\n", f)
+			}
+		}
+	}
+	n := ReportPreflightFailedCount(results)
+	if n == 0 {
+		return false
+	}
+	noun := "checks"
+	if n == 1 {
+		noun = "check"
+	}
+	fmt.Fprintf(w, "\n%d required %s failed. Fix them and re-run `loope -doctor` to verify.\n", n, noun)
+	return true
 }
 
 // Preflight runs every check in order and returns the results.

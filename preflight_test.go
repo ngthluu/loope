@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -285,5 +286,51 @@ func TestPreflightSkippedChecksAreNotFailures(t *testing.T) {
 	}
 	if c := resultByName(t, results, "labels"); c.Status != statusSkip {
 		t.Fatalf("labels status = %d, want statusSkip", c.Status)
+	}
+}
+
+func TestReportPreflightRendersAllStatuses(t *testing.T) {
+	results := []CheckResult{
+		{Name: "git", Status: statusOK, Detail: "git version 2.39.5"},
+		{Name: "gh auth", Status: statusFail, Detail: "not authenticated", Fix: []string{"gh auth login"}},
+		{Name: "repo access", Status: statusSkip, Detail: "skipped (gh auth failed)"},
+		{Name: "curl", Status: statusWarn, Detail: "not found — issue image attachments will be skipped"},
+	}
+	var buf bytes.Buffer
+	failed := ReportPreflight(&buf, results)
+	if !failed {
+		t.Fatal("failed = false, want true (gh auth is a required check)")
+	}
+	want := "loope preflight\n\n" +
+		"  ✔ git           git version 2.39.5\n" +
+		"  ✘ gh auth       not authenticated\n" +
+		"      → gh auth login\n" +
+		"  - repo access   skipped (gh auth failed)\n" +
+		"  ! curl          not found — issue image attachments will be skipped\n" +
+		"\n1 required check failed. Fix them and re-run `loope -doctor` to verify.\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("report =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestReportPreflightHealthyOmitsSummary(t *testing.T) {
+	var buf bytes.Buffer
+	failed := ReportPreflight(&buf, []CheckResult{{Name: "git", Status: statusOK, Detail: "git version 2.39.5"}})
+	if failed {
+		t.Fatal("failed = true, want false")
+	}
+	if strings.Contains(buf.String(), "required check") {
+		t.Fatalf("healthy report must omit the summary line, got %q", buf.String())
+	}
+}
+
+func TestReportPreflightPluralSummary(t *testing.T) {
+	var buf bytes.Buffer
+	ReportPreflight(&buf, []CheckResult{
+		{Name: "gh", Status: statusFail, Detail: "not found"},
+		{Name: "claude", Status: statusFail, Detail: "not found"},
+	})
+	if !strings.Contains(buf.String(), "2 required checks failed.") {
+		t.Fatalf("report = %q, want a plural summary line", buf.String())
 	}
 }
