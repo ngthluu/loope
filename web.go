@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
 // webFS carries the dashboard's templates and static assets into the binary, so
@@ -24,8 +25,19 @@ func staticSub() fs.FS {
 	return sub
 }
 
-// staticHandler serves the embedded static assets under /static/. An unknown
-// path 404s, and Content-Type comes from the file extension.
+// staticHandler serves the embedded static assets under /static/. Only regular
+// files resolve: an unknown name and the asset directory itself both 404, so
+// net/http's directory index never becomes an endpoint the dashboard didn't ask
+// for. Content-Type comes from the file extension.
 func staticHandler() http.Handler {
-	return http.StripPrefix("/static/", http.FileServerFS(staticSub()))
+	assets := staticSub()
+	files := http.FileServerFS(assets)
+	return http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info, err := fs.Stat(assets, strings.TrimPrefix(r.URL.Path, "/"))
+		if err != nil || !info.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
 }

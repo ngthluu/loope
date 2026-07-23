@@ -546,6 +546,22 @@ func TestStaticUnknownPath404(t *testing.T) {
 	}
 }
 
+// The asset tree is an implementation detail: net/http's file server would
+// happily render a directory index for it, which is an endpoint the dashboard
+// never had and never wants.
+func TestStaticDirectoryListingIs404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	// "/static/." is not covered here: ServeMux normalizes it to "/static/"
+	// with a 301 before any handler sees it.
+	code, body := get(t, h, "/static/")
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", code)
+	}
+	if strings.Contains(body, "app.js") {
+		t.Errorf("body listed the asset directory: %q", body)
+	}
+}
+
 func TestPageWiresHTMXPolling(t *testing.T) {
 	h := newTestServer(t).Handler()
 	code, body := get(t, h, "/?issue=142")

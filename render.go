@@ -19,7 +19,6 @@ func templateFuncs(cfg *Config) template.FuncMap {
 		"dollars":      dollars,
 		"short":        short,
 		"shortid":      shortid,
-		"hasRunning":   hasRunning,
 		"errCount":     errCount,
 		"statusChip":   statusChip,
 		"nodeClass":    nodeClass,
