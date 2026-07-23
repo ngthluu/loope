@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -69,18 +70,22 @@ type Claude struct {
 	seq       int
 }
 
-// permissionModeAuto is the permission mode every pipeline session runs under.
-// It auto-approves tool calls behind claude's background safety checks instead
-// of disabling the permission system wholesale, as
-// --dangerously-skip-permissions did.
+// permissionModeAuto is the permission mode every session runs under. It
+// auto-approves tool calls behind claude's background safety checks instead of
+// disabling the permission system wholesale, as --dangerously-skip-permissions
+// did. Call applies it unconditionally — see applyUnattendedPolicy.
 const permissionModeAuto = "auto"
 
-// pipelineAllowedTools pre-approves the operations the loop itself depends on.
-// Auto mode escalates to a permission prompt when its safety check flags a
-// call, and a headless (-p) session has nobody to answer that prompt: the run
-// aborts. Pre-approving the git/gh work the pipeline exists to do (commit,
-// push, open the PR) keeps the loop moving without prompting, while everything
-// else still goes through auto mode's checks.
+// pipelineAllowedTools pre-approves the git/gh work the loop exists to do:
+// commit, push, open the PR. Auto mode's safety check can deny a call it
+// dislikes (a force push, a hard reset), which costs the session turns it
+// cannot spare and can leave the run without the commit it was started to
+// produce. Pre-approving these puts the loop's own plumbing out of reach of
+// that verdict; everything else the session does still goes through the check.
+//
+// Only the sessions that actually commit get it, via commits(). Sessions that
+// merely read and judge are left without it, so a confused reviewer cannot
+// reach for `git push --force` unchecked.
 var pipelineAllowedTools = []string{"Bash(git *)", "Bash(gh *)"}
 
 type ClaudeCall struct {
@@ -89,32 +94,40 @@ type ClaudeCall struct {
 	Prompt string
 	Model  ModelConfig
 	Resume string
-	// PermissionMode is claude's --permission-mode. Empty leaves the flag off,
-	// so the session runs under claude's default (prompting) mode.
-	PermissionMode  string
+	// AllowedTools pre-approves tool calls for this session (claude's
+	// --allowedTools). Empty means the session runs on the baseline alone,
+	// which is the right default: forgetting to grant privilege is safe,
+	// forgetting to withhold it is not.
 	AllowedTools    []string
 	DisallowedTools []string
 }
 
-// unattended returns the call with the policy every headless pipeline session
-// shares: auto permission mode, the pipeline allow-list, and AskUserQuestion
-// denied so no session can ever stop waiting on a human.
-func unattended(call ClaudeCall) ClaudeCall {
-	call.PermissionMode = permissionModeAuto
+// commits marks a call as one that writes to the repository, granting it the
+// pipeline allow-list. It is deliberately the only opt-in part of the policy:
+// the baseline that keeps a session from stalling is applied by Call itself and
+// cannot be skipped, while this grant fails safe when omitted.
+func commits(call ClaudeCall) ClaudeCall {
 	call.AllowedTools = pipelineAllowedTools
-	if !contains(call.DisallowedTools, "AskUserQuestion") {
-		call.DisallowedTools = append(call.DisallowedTools, "AskUserQuestion")
-	}
 	return call
 }
 
-func contains(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
+// applyUnattendedPolicy returns the flags for the policy every session shares:
+// auto permission mode and AskUserQuestion denied, so no session can spend its
+// turns on a question nobody is there to answer.
+//
+// This lives in Call rather than in a wrapper at each call site because Call
+// always passes -p: every session it runs is headless by construction, so the
+// policy is a property of this transport, not a per-call choice. A wrapper had
+// to be remembered seven times, and the triage session was already missing it.
+func (call ClaudeCall) applyUnattendedPolicy() (allowed, disallowed []string) {
+	// Copy before appending: an aliased slice would let one call's grant leak
+	// into the shared policy, and into every session that followed it.
+	allowed = slices.Clone(call.AllowedTools)
+	disallowed = slices.Clone(call.DisallowedTools)
+	if !slices.Contains(disallowed, "AskUserQuestion") {
+		disallowed = append(disallowed, "AskUserQuestion")
 	}
-	return false
+	return allowed, disallowed
 }
 
 func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, error) {
@@ -129,14 +142,13 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	if call.Model.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(call.Model.MaxTurns))
 	}
-	if call.PermissionMode != "" {
-		args = append(args, "--permission-mode", call.PermissionMode)
+	allowed, disallowed := call.applyUnattendedPolicy()
+	args = append(args, "--permission-mode", permissionModeAuto)
+	if len(allowed) > 0 {
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	}
-	if len(call.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(call.AllowedTools, ","))
-	}
-	if len(call.DisallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(call.DisallowedTools, ","))
+	if len(disallowed) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(disallowed, ","))
 	}
 	if call.Resume != "" {
 		args = append(args, "--resume", call.Resume)

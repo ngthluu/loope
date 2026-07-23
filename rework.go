@@ -36,7 +36,7 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 	}
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
-	res, err := c.Call(ctx, unattended(ClaudeCall{
+	res, err := c.Call(ctx, commits(ClaudeCall{
 		Dir: wtPath, Label: "rework", Prompt: reworkPrompt(), Resume: si.SessionID,
 		Model: o.cfg.Models.Architect,
 	}))

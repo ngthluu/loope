@@ -18,7 +18,6 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 		Label:           "brainstorm-0",
 		Prompt:          "hello",
 		Model:           ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100},
-		PermissionMode:  permissionModeAuto,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	if err != nil {
@@ -76,7 +75,6 @@ func TestCallFeedsPromptViaStdin(t *testing.T) {
 		Label:           "brainstorm-0",
 		Prompt:          prompt,
 		Model:           ModelConfig{Model: "opus"},
-		PermissionMode:  permissionModeAuto,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	if err != nil {

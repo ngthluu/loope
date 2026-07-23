@@ -6,7 +6,7 @@ import (
 )
 
 func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent string) error {
-	res, err := c.Call(ctx, unattended(ClaudeCall{
+	res, err := c.Call(ctx, commits(ClaudeCall{
 		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent),
 		Model: cfg.Models.Architect,
 	}))
