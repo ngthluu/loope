@@ -109,7 +109,27 @@ HEADLESS: do not ask questions; make reasonable calls and note them in commit me
 	check(t, "executePrompt", executePrompt("docs/plan.md"), want)
 }
 
-func TestGoldenBugPrompt(t *testing.T) {
+func TestGoldenBugPromptWithThreshold(t *testing.T) {
+	want := `/superpowers:systematic-debugging ISSUE BODY
+
+You may read the codebase first to investigate — but do NOT write code, tests,
+or commits yet. Once you understand the failure, assess how confidently this bug
+can be fixed as reported and print CONFIDENCE: <0-100> as the FIRST line of your reply.
+If that score is below 70, the report is too vague or ambiguous to fix
+responsibly: change no file. Instead, list what is missing and the specific
+questions the author must answer, then stop.
+
+Reproduce the bug with a failing test first, then fix it, verify the full test
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
+and note them in commit messages.
+
+If, while reproducing, you find the described bug is already fixed or the
+behavior is already correct, do NOT fabricate a change: print
+PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
+	check(t, "bugPrompt(threshold=70)", bugPrompt("ISSUE BODY", 70), want)
+}
+
+func TestGoldenBugPromptWithoutThreshold(t *testing.T) {
 	want := `/superpowers:systematic-debugging ISSUE BODY
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
@@ -119,7 +139,7 @@ and note them in commit messages.
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print
 PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
-	check(t, "bugPrompt", bugPrompt("ISSUE BODY"), want)
+	check(t, "bugPrompt(threshold=0)", bugPrompt("ISSUE BODY", 0), want)
 }
 
 func TestGoldenReworkPrompt(t *testing.T) {

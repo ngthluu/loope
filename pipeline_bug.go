@@ -6,7 +6,7 @@ import (
 
 func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent string) error {
 	res, err := c.Call(ctx, ClaudeCall{
-		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent),
+		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent, cfg.ConfidenceThreshold),
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
@@ -25,8 +25,9 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 	return nil
 }
 
-func bugPrompt(issue string) string {
+func bugPrompt(issue string, threshold int) string {
 	d := promptData()
 	d["Issue"] = issue
+	d["Threshold"] = threshold
 	return mustRender("debug.md.tmpl", d)
 }
