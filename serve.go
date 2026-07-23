@@ -116,7 +116,7 @@ func (s *Server) issues(ctx context.Context) ([]Issue, error) {
 // load builds the render payload: it re-scans the disk logs on every request so
 // steps and cost stay live, then overlays the once-fetched GitHub titles/labels.
 func (s *Server) load(ctx context.Context, selWanted string) view {
-	tickets, err := scanLogs(s.cfg.WorkDir)
+	tickets, err := scanLogs(s.cfg)
 	if err != nil {
 		log.Printf("serve: scan logs: %v", err)
 	}
