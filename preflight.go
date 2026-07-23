@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -155,6 +156,91 @@ func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth Chec
 	return CheckResult{Name: "repo access", Status: statusOK, Detail: cfg.RepoSlug}
 }
 
+// wantedLabels is every label the loop applies: the eligible label plus all
+// five state labels. Empty names are skipped.
+func wantedLabels(cfg *Config) []string {
+	names := []string{
+		cfg.EligibleLabel,
+		cfg.StateLabels.WIP,
+		cfg.StateLabels.Failed,
+		cfg.StateLabels.Done,
+		cfg.StateLabels.Rework,
+		cfg.StateLabels.NeedsInfo,
+	}
+	out := names[:0:0]
+	for _, n := range names {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// checkLabels warns (never fails) about labels the loop needs but the repo does
+// not have, handing the user the exact `gh label create` commands.
+func checkLabels(ctx context.Context, r Runner, cfg *Config, access CheckResult) CheckResult {
+	if res, skipped := skipIfBlocked("labels", access); skipped {
+		return res
+	}
+	out, err := probe(ctx, r, "", nil, "gh", "label", "list", "--repo", cfg.RepoSlug, "--json", "name")
+	if err != nil {
+		return CheckResult{Name: "labels", Status: statusWarn, Detail: "could not list labels: " + err.Error()}
+	}
+	var got []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		return CheckResult{Name: "labels", Status: statusWarn, Detail: "could not parse gh label list output: " + err.Error()}
+	}
+	have := make(map[string]bool, len(got))
+	for _, l := range got {
+		have[l.Name] = true
+	}
+	var missing, fix []string
+	for _, want := range wantedLabels(cfg) {
+		if !have[want] {
+			missing = append(missing, want)
+			fix = append(fix, fmt.Sprintf("gh label create %s --repo %s", want, cfg.RepoSlug))
+		}
+	}
+	if len(missing) > 0 {
+		return CheckResult{
+			Name:   "labels",
+			Status: statusWarn,
+			Detail: "missing: " + strings.Join(missing, ", "),
+			Fix:    fix,
+		}
+	}
+	return CheckResult{Name: "labels", Status: statusOK, Detail: fmt.Sprintf("all %d configured labels exist", len(wantedLabels(cfg)))}
+}
+
+// checkCurl is a warning: images.go already degrades gracefully, so a missing
+// curl costs issue image attachments and nothing else.
+func checkCurl(ctx context.Context, r Runner) CheckResult {
+	out, err := probe(ctx, r, "", nil, "curl", "--version")
+	if err != nil {
+		return CheckResult{
+			Name:   "curl",
+			Status: statusWarn,
+			Detail: "not found — issue image attachments will be skipped",
+			Fix:    []string{"brew install curl  (macOS)", "apt install curl  (Debian/Ubuntu)"},
+		}
+	}
+	return CheckResult{Name: "curl", Status: statusOK, Detail: firstLine(out)}
+}
+
+// ReportPreflightFailedCount counts required-check failures. Warnings and
+// skipped checks never count: a skipped check's blocker is already counted.
+func ReportPreflightFailedCount(results []CheckResult) int {
+	n := 0
+	for _, c := range results {
+		if c.Status == statusFail {
+			n++
+		}
+	}
+	return n
+}
+
 // Preflight runs every check in order and returns the results.
 func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
 	git := binaryCheck(ctx, r, "git", fixGit, "--version")
@@ -164,5 +250,7 @@ func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
 	superpowers := checkSuperpowers(ctx, r, cfg, claude)
 	repoPath := checkRepoPath(ctx, r, cfg, git)
 	access := checkRepoAccess(ctx, r, cfg, gh, ghAuth)
-	return []CheckResult{git, gh, ghAuth, claude, superpowers, repoPath, access}
+	labels := checkLabels(ctx, r, cfg, access)
+	curl := checkCurl(ctx, r)
+	return []CheckResult{git, gh, ghAuth, claude, superpowers, repoPath, access, labels, curl}
 }

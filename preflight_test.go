@@ -208,3 +208,82 @@ func TestPreflightRepoAccessFails(t *testing.T) {
 		t.Fatalf("repo access detail = %q, want it to name the slug", c.Detail)
 	}
 }
+
+func TestPreflightMissingLabelsWarn(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh label list --repo your-org/your-repo --json name": {stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"}]`},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "labels")
+	if c.Status != statusWarn {
+		t.Fatalf("labels status = %d, want statusWarn", c.Status)
+	}
+	want := []string{
+		"gh label create ai-failed --repo your-org/your-repo",
+		"gh label create ai-rework --repo your-org/your-repo",
+		"gh label create ai-needs-info --repo your-org/your-repo",
+	}
+	if len(c.Fix) != len(want) {
+		t.Fatalf("labels fix = %v, want %v", c.Fix, want)
+	}
+	for i := range want {
+		if c.Fix[i] != want[i] {
+			t.Fatalf("labels fix[%d] = %q, want %q", i, c.Fix[i], want[i])
+		}
+	}
+	if ReportPreflightFailedCount(results) != 0 {
+		t.Fatal("a labels warning must not be fatal")
+	}
+}
+
+func TestPreflightAllLabelsPresent(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	results := Preflight(context.Background(), f, preflightConfig())
+	if c := resultByName(t, results, "labels"); c.Status != statusOK {
+		t.Fatalf("labels status = %d (detail %q), want statusOK", c.Status, c.Detail)
+	}
+}
+
+func TestPreflightMissingCurlWarns(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"curl --version": {err: errors.New("not found")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "curl")
+	if c.Status != statusWarn {
+		t.Fatalf("curl status = %d, want statusWarn", c.Status)
+	}
+	if !strings.Contains(c.Detail, "image attachments") {
+		t.Fatalf("curl detail = %q, want it to explain the degradation", c.Detail)
+	}
+	if ReportPreflightFailedCount(results) != 0 {
+		t.Fatal("a missing curl must not be fatal")
+	}
+}
+
+func TestPreflightHealthyMachineHasNoFailures(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	results := Preflight(context.Background(), f, preflightConfig())
+	if len(results) != 9 {
+		t.Fatalf("got %d checks, want 9", len(results))
+	}
+	for _, c := range results {
+		if c.Status != statusOK {
+			t.Fatalf("%s: status = %d (detail %q), want statusOK", c.Name, c.Status, c.Detail)
+		}
+	}
+}
+
+func TestPreflightSkippedChecksAreNotFailures(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh --version": {err: errors.New("not found")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	// Only `gh` itself is a failure; gh auth / repo access / labels all skip.
+	if n := ReportPreflightFailedCount(results); n != 1 {
+		t.Fatalf("failed count = %d, want 1 (only gh)", n)
+	}
+	if c := resultByName(t, results, "labels"); c.Status != statusSkip {
+		t.Fatalf("labels status = %d, want statusSkip", c.Status)
+	}
+}
