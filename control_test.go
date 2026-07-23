@@ -815,7 +815,7 @@ func TestReleasingAClaimHonoursAStopThatArrivedTooLate(t *testing.T) {
 	o.registry.register(7, logDir, func() {})
 	recordStopRequest(logDir)
 
-	o.releaseRun(context.Background(), 7, logDir)
+	o.releaseClaim(context.Background(), 7, logDir)
 
 	swaps := env.callsMatching("gh", "--remove-label ai-rework")
 	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-stopped") {
@@ -831,7 +831,7 @@ func TestReleasingAClaimWithNoStopPendingLabelsNothing(t *testing.T) {
 	logDir := o.issueLogDir(7)
 	o.registry.register(7, logDir, func() {})
 
-	o.releaseRun(context.Background(), 7, logDir)
+	o.releaseClaim(context.Background(), 7, logDir)
 
 	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
 		t.Fatal("a run that finished with no stop pending must not be relabelled")

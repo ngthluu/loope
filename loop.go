@@ -32,7 +32,13 @@ type Orchestrator struct {
 	// Auto-resume bookkeeping: per-issue backoff between resume attempts and
 	// once-per-process skip logging. In-memory only — a restart retrying
 	// immediately costs at most one extra attempt.
+	//
+	// mu also guards the slot ledger (active): ticketsPerCycle is a live
+	// concurrency budget, not a batch size, so cycles start work and return
+	// while earlier pipelines are still running. See slots.go.
 	mu            sync.Mutex
+	active        map[int]struct{} // issue numbers with a pipeline in flight
+	inFlight      sync.WaitGroup   // one Add per acquired slot; drained on shutdown
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
 	now           func() time.Time // test seam; nil means time.Now
@@ -79,18 +85,29 @@ func (o *Orchestrator) issueLogDir(n int) string {
 	return filepath.Join(o.cfg.WorkDir, "logs", fmt.Sprintf("issue-%d", n))
 }
 
-// ProcessOnce runs one poll cycle: list eligible issues, select up to
-// TicketsPerCycle of them (sequentially, reusing single-pick Triage), then
-// handle them concurrently — each in its own worktree/branch to its own PR.
+// ProcessOnce runs one poll cycle: top the in-flight pipeline set back up to the
+// TicketsPerCycle budget from whatever is eligible right now. It selects
+// sequentially (reusing single-pick Triage), launches each pick in its own
+// goroutine — its own worktree/branch to its own PR — and RETURNS without
+// waiting for them. Pipelines started in earlier cycles keep running alongside.
+// Only listing/selection errors are returned; a pipeline logs its own outcome,
+// because it now finishes long after the cycle that started it has returned.
 func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
+	free := o.freeSlots()
+	if free == 0 {
+		return nil // budget full: don't even ask GitHub for the queue
+	}
 	issues, err := o.gh.ListEligibleIssues(ctx, o.cfg.EligibleLabel)
 	if err != nil {
 		return err
 	}
+	// A listing can still show an issue whose pipeline is running but whose
+	// ai-wip label hasn't landed yet.
+	issues = o.filterInactive(issues)
 	if len(issues) == 0 {
 		return nil
 	}
-	picks, selectErr := o.selectIssues(ctx, issues)
+	picks, selectErr := o.selectIssues(ctx, issues, free)
 	if len(picks) == 0 {
 		return selectErr
 	}
@@ -101,43 +118,44 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 		return errors.Join(selectErr, err)
 	}
 
-	errs := make([]error, len(picks))
-	var wg sync.WaitGroup
 	for i := range picks {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			p := picks[i]
+		if !o.tryAcquire(picks[i].issue.Number) {
+			continue
+		}
+		go func(p pick) {
+			// release is deferred FIRST so it runs LAST: a panicking pipeline
+			// parks the issue in the recover handler below and still returns
+			// its slot.
+			defer o.release(p.issue.Number)
 			// A panic in one pipeline must not kill the daemon or the sibling
 			// pipelines: park the issue with the panic as its (non-resumable)
 			// cause, preserving worktree and logs for a human.
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("issue #%d: pipeline panic: %v\n%s", p.issue.Number, r, debug.Stack())
-					errs[i] = o.park(ctx, p.issue.Number, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
+					_ = o.park(ctx, p.issue.Number, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
 				}
 			}()
 			log.Printf("issue #%d (%s): %s", p.issue.Number, p.kind, p.reason)
-			errs[i] = o.handleIssue(ctx, p.issue, p.kind, base)
-		}(i)
+			if err := o.handleIssue(ctx, p.issue, p.kind, base); err != nil {
+				log.Printf("issue #%d: pipeline failed: %v", p.issue.Number, err)
+			}
+		}(picks[i])
 	}
-	wg.Wait()
-	return errors.Join(append(errs, selectErr)...)
+	return selectErr
 }
 
-// selectIssues picks up to TicketsPerCycle distinct issues by calling the
-// single-pick Triage repeatedly, removing each chosen issue from the candidate
-// set. A triage error stops selection and is returned alongside whatever was
-// already picked, so the cycle can still act on earlier picks.
-func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue) ([]pick, error) {
-	n := o.cfg.TicketsPerCycle
-	if n < 1 {
-		n = 1
-	}
+// selectIssues picks up to limit distinct issues by calling the single-pick
+// Triage repeatedly, removing each chosen issue from the candidate set. The
+// limit is the caller's free-slot count, not the raw config value, so a cycle
+// only asks for what it can actually start. A triage error stops selection and
+// is returned alongside whatever was already picked, so the cycle can still act
+// on earlier picks.
+func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue, limit int) ([]pick, error) {
 	triageClaude := &Claude{runner: o.runner, logDir: filepath.Join(o.cfg.WorkDir, "logs", "triage"), configDir: o.cfg.ClaudeConfigDir}
 	remaining := issues
 	var picks []pick
-	for len(picks) < n && len(remaining) > 0 {
+	for len(picks) < limit && len(remaining) > 0 {
 		dec, err := Triage(ctx, triageClaude, o.cfg.Models.Triage, o.cfg.RepoPath, remaining)
 		if err != nil {
 			return picks, err
@@ -173,7 +191,7 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("issue #%d is already running", n)
 	}
-	defer o.releaseRun(ictx, n, logDir)
+	defer o.releaseClaim(ictx, n, logDir)
 	// The issue was listed as eligible, but that was a triage call ago and a stop
 	// can have landed since — completing entirely, label and all, before this run
 	// had an owner file for it to notice. Re-read the label: it is the only trace
@@ -375,31 +393,58 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 // a transient, resumable cause (usage/rate limit, turn/budget ceiling, network
 // outage). Genuine errors have no resumable park cause and stay parked for a
 // human. Each issue backs off exponentially between attempts (5m doubling to
-// 60m) so a still-active usage limit isn't hammered every poll cycle. Resumes
-// run sequentially: they're expensive Claude sessions.
+// 60m) so a still-active usage limit isn't hammered every poll cycle.
+//
+// Resumes draw from the same TicketsPerCycle budget as new work and run
+// concurrently with it. A cycle runs this BEFORE ProcessOnce so continuing
+// existing work outranks starting new work — otherwise a permanently non-empty
+// eligible queue starves every parked issue. Resumes cannot starve new work in
+// turn: an issue is only eligible here once per backoff window, so a cycle
+// leaves the rest of the budget for ProcessOnce to top up. Only the listing
+// error is returned — each resume logs its own outcome.
 func (o *Orchestrator) ResumeParked(ctx context.Context) error {
+	if o.freeSlots() == 0 {
+		return nil
+	}
 	issues, err := o.gh.ListIssuesWithLabel(ctx, o.cfg.StateLabels.Rework)
 	if err != nil {
 		return err
 	}
-	var errs []error
 	for _, is := range issues {
 		if ctx.Err() != nil {
+			break
+		}
+		if o.freeSlots() == 0 {
 			break
 		}
 		n := is.Number
 		if !o.shouldResume(n) {
 			continue
 		}
-		log.Printf("issue #%d: auto-resuming parked work", n)
-		if err := o.Rework(ctx, n); err != nil {
-			o.noteResumeFailure(n)
-			errs = append(errs, fmt.Errorf("auto-resume #%d: %w", n, err))
+		// park swaps ai-wip->ai-rework before its pipeline goroutine returns, so
+		// an issue can look parked while its worktree is still owned by a live
+		// pipeline. tryAcquire is what refuses that.
+		if !o.tryAcquire(n) {
 			continue
 		}
-		o.clearResumeState(n)
+		go func(n int) {
+			defer o.release(n)
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("issue #%d: resume panic: %v\n%s", n, r, debug.Stack())
+					_ = o.park(ctx, n, o.cfg.StateLabels.Rework, fmt.Errorf("panic: %v", r))
+				}
+			}()
+			log.Printf("issue #%d: auto-resuming parked work", n)
+			if err := o.Rework(ctx, n); err != nil {
+				log.Printf("auto-resume #%d failed: %v", n, err)
+				o.noteResumeFailure(n)
+				return
+			}
+			o.clearResumeState(n)
+		}(n)
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // shouldResume reports whether issue n is auto-resumable right now: parked for
@@ -476,15 +521,19 @@ func (o *Orchestrator) clearResumeState(n int) {
 // reclaim: force-remove the leftover worktree/branch (best-effort — they may
 // already be gone) and strip the WIP label so the normal cycle re-queues the
 // issue from scratch. Only safe while this process holds the workDir lock, which
-// proves no live pipeline can own an ai-wip label. Returns an error (e.g.
-// offline at boot) so runLoop can retry next cycle until one full sweep
-// succeeds.
+// proves no OTHER process can own an ai-wip label. THIS process can: a sweep
+// that failed at boot is retried on later cycles, by which time its own
+// pipelines are running and wearing WIP, so the ledger's in-flight set is
+// filtered out first — parking a live issue would relabel it out from under its
+// own pipeline, and the reclaim path would delete the worktree that pipeline is
+// committing into. Returns an error (e.g. offline at boot) so runLoop can retry
+// next cycle until one full sweep succeeds.
 func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 	issues, err := o.gh.ListIssuesWithLabel(ctx, o.cfg.StateLabels.WIP)
 	if err != nil {
 		return err
 	}
-	for _, is := range issues {
+	for _, is := range o.filterInactive(issues) {
 		n := is.Number
 		logDir := o.issueLogDir(n)
 		// Not every ai-wip issue is an orphan. The lock proves no other DAEMON is

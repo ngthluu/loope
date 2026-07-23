@@ -59,7 +59,7 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("#%d is already running", n)
 	}
-	defer o.releaseRun(ictx, n, logDir)
+	defer o.releaseClaim(ictx, n, logDir)
 	// Claim, then check for a hold — the same order as handleIssue, and for the
 	// same reason (see Stop). A stop that landed while this resume was starting
 	// is honoured before the Claude session, not after it.

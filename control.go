@@ -74,7 +74,7 @@ func (r *runRegistry) release(n int, logDir string) (stopPending bool) {
 
 // cancel halts issue n's pipeline if it is running in this process, reporting
 // whether one was found. The entry is left in place: the pipeline goroutine
-// deregisters as it unwinds.
+// releases its claim as it unwinds.
 func (r *runRegistry) cancel(n int) bool {
 	r.mu.Lock()
 	fn, ok := r.live[n]
@@ -266,10 +266,14 @@ func (o *Orchestrator) settleStopped(n int) {
 	}
 }
 
-// releaseRun ends a pipeline's claim on issue n and finishes a stop that
+// releaseClaim ends a pipeline's claim on issue n and finishes a stop that
 // arrived too late for the run itself to honour — after its last stop check but
-// before it let the claim go. Every path that registers a run defers this
-// instead of deregistering directly.
+// before it let the claim go. Every path that registers a run defers this.
+//
+// Not to be confused with the slot ledger's release (slots.go), which returns
+// the concurrency budget a cycle handed out. This one retracts the "issue #N
+// has a live run behind it" claim that Stop, continue and the orphan sweep all
+// route on. A pipeline holds both, and gives up this one first.
 //
 // The late stop is a real one: the operator asked for the ticket to halt while
 // it was still running, so it is finished here rather than discarded. Whether
@@ -279,7 +283,7 @@ func (o *Orchestrator) settleStopped(n int) {
 //
 // The context is the run's own, which a stop has cancelled by the time we get
 // here; finishStopped works on a cancellation-proof copy of it.
-func (o *Orchestrator) releaseRun(ctx context.Context, n int, logDir string) {
+func (o *Orchestrator) releaseClaim(ctx context.Context, n int, logDir string) {
 	if !o.registry.release(n, logDir) {
 		return
 	}
