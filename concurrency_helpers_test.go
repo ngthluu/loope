@@ -100,6 +100,7 @@ type slotEnv struct {
 	mu       sync.Mutex
 	eligible []int
 	rework   []int
+	wip      []int
 }
 
 func (s *slotEnv) setEligible(nums ...int) {
@@ -112,6 +113,12 @@ func (s *slotEnv) setRework(nums ...int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rework = nums
+}
+
+func (s *slotEnv) setWIP(nums ...int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wip = nums
 }
 
 func (s *slotEnv) listJSON(nums []int, label string) string {
@@ -135,7 +142,9 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 				defer s.mu.Unlock()
 				return s.listJSON(s.rework, "ai-rework"), "", nil
 			case strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip"):
-				return "[]", "", nil
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.listJSON(s.wip, "ai-wip"), "", nil
 			case strings.HasPrefix(joined, "issue list"):
 				s.mu.Lock()
 				defer s.mu.Unlock()

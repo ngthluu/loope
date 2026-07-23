@@ -133,14 +133,10 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 // is returned alongside whatever was already picked, so the cycle can still act
 // on earlier picks.
 func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue, limit int) ([]pick, error) {
-	n := limit
-	if n < 1 {
-		n = 1
-	}
 	triageClaude := &Claude{runner: o.runner, logDir: filepath.Join(o.cfg.WorkDir, "logs", "triage"), configDir: o.cfg.ClaudeConfigDir}
 	remaining := issues
 	var picks []pick
-	for len(picks) < n && len(remaining) > 0 {
+	for len(picks) < limit && len(remaining) > 0 {
 		dec, err := Triage(ctx, triageClaude, o.cfg.Models.Triage, o.cfg.RepoPath, remaining)
 		if err != nil {
 			return picks, err
@@ -330,9 +326,12 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 // 60m) so a still-active usage limit isn't hammered every poll cycle.
 //
 // Resumes draw from the same TicketsPerCycle budget as new work and run
-// concurrently with it. ProcessOnce runs first in a cycle and so gets first
-// claim on free slots; resumes take what's left and, having backoff, come back.
-// Only the listing error is returned — each resume logs its own outcome.
+// concurrently with it. A cycle runs this BEFORE ProcessOnce so continuing
+// existing work outranks starting new work — otherwise a permanently non-empty
+// eligible queue starves every parked issue. Resumes cannot starve new work in
+// turn: an issue is only eligible here once per backoff window, so a cycle
+// leaves the rest of the budget for ProcessOnce to top up. Only the listing
+// error is returned — each resume logs its own outcome.
 func (o *Orchestrator) ResumeParked(ctx context.Context) error {
 	if o.freeSlots() == 0 {
 		return nil
@@ -450,15 +449,19 @@ func (o *Orchestrator) clearResumeState(n int) {
 // reclaim: force-remove the leftover worktree/branch (best-effort — they may
 // already be gone) and strip the WIP label so the normal cycle re-queues the
 // issue from scratch. Only safe while this process holds the workDir lock, which
-// proves no live pipeline can own an ai-wip label. Returns an error (e.g.
-// offline at boot) so runLoop can retry next cycle until one full sweep
-// succeeds.
+// proves no OTHER process can own an ai-wip label. THIS process can: a sweep
+// that failed at boot is retried on later cycles, by which time its own
+// pipelines are running and wearing WIP, so the ledger's in-flight set is
+// filtered out first — parking a live issue would relabel it out from under its
+// own pipeline, and the reclaim path would delete the worktree that pipeline is
+// committing into. Returns an error (e.g. offline at boot) so runLoop can retry
+// next cycle until one full sweep succeeds.
 func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 	issues, err := o.gh.ListIssuesWithLabel(ctx, o.cfg.StateLabels.WIP)
 	if err != nil {
 		return err
 	}
-	for _, is := range issues {
+	for _, is := range o.filterInactive(issues) {
 		n := is.Number
 		logDir := o.issueLogDir(n)
 		// Reuse before reclaim: a surviving worktree plus a recorded session is

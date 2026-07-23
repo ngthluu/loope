@@ -39,6 +39,15 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Shutdown drains in-flight pipelines, which can take as long as the work
+	// they are doing. Unregistering the handlers as soon as the first signal
+	// lands restores default signal behaviour, so a second Ctrl-C (or SIGTERM)
+	// terminates immediately instead of being swallowed by the handler that is
+	// still installed until main returns.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	r := execRunner{}
 	if code, proceed := gate(ctx, os.Stderr, r, cfg, *doctor); !proceed {
@@ -112,8 +121,8 @@ func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) 
 }
 
 // runLoop drives the poll cycle forever: one startup orphan sweep (retried
-// until it succeeds once), then top the in-flight pipeline set up from the
-// eligible queue and auto-resume resumable parked ones, waiting one interval
+// until it succeeds once), then auto-resume resumable parked issues and top the
+// in-flight pipeline set up from the eligible queue, waiting one interval
 // between cycles. Cycles no longer block on the pipelines they start, so both
 // exit paths drain in-flight work with o.Wait() before returning — main's
 // deferred workDir-lock release must not run while a pipeline is live. Every
@@ -129,11 +138,15 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 				sweep = false
 			}
 		}
-		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
-			log.Printf("cycle error: %v", err)
-		}
+		// Resumes run BEFORE new work: they continue an issue that already has a
+		// worktree and session on disk, and they draw from the same slot budget.
+		// With ProcessOnce first, a queue that always has eligible issues would
+		// claim every slot every cycle and no parked issue would ever be resumed.
 		if err := guard("auto-resume", func() error { return o.ResumeParked(ctx) }); err != nil {
 			log.Printf("auto-resume error: %v", err)
+		}
+		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
+			log.Printf("cycle error: %v", err)
 		}
 		if once {
 			// -once fills slots once and drains them; it does not top up as
@@ -143,7 +156,7 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 		}
 		select {
 		case <-ctx.Done():
-			log.Println("shutting down")
+			log.Println("shutting down: draining in-flight pipelines (signal again to force quit)")
 			// Pipelines see the cancelled context and unwind through their
 			// existing context.WithoutCancel cleanup paths, exactly as they did
 			// when a Ctrl-C landed during the old in-cycle wg.Wait().
