@@ -14,6 +14,11 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newTestServerWithController(t, nil)
+}
+
+func newTestServerWithController(t *testing.T, ctl Controller) *Server {
+	t.Helper()
 	work := t.TempDir()
 	dir := filepath.Join(work, "logs", "issue-142")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -23,7 +28,7 @@ func newTestServer(t *testing.T) *Server {
 		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
 	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":142,"title":"Add OAuth login","labels":[{"name":"ai-wip"}]}]`}}}
-	s, err := NewServer(r, cfg)
+	s, err := NewServer(r, cfg, ctl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +73,7 @@ func TestServeRailFragment(t *testing.T) {
 
 func TestDetailRouteRendersFragment(t *testing.T) {
 	cfg := &Config{RepoPath: "/tmp", RepoSlug: "o/r", WorkDir: t.TempDir(), StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
-	s, err := NewServer(&fakeRunner{}, cfg)
+	s, err := NewServer(&fakeRunner{}, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +94,7 @@ func TestDetailRouteRendersFragment(t *testing.T) {
 func TestServeEmptyQueueRenders(t *testing.T) {
 	cfg := &Config{WorkDir: t.TempDir(), RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	r := &fakeRunner{queue: []rresp{{stdout: "[]"}}}
-	s, err := NewServer(r, cfg)
+	s, err := NewServer(r, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func TestServeGitHubUnreachableRenders(t *testing.T) {
 		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
 	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	r := &fakeRunner{queue: []rresp{{err: errors.New("could not connect")}}}
-	s, err := NewServer(r, cfg)
+	s, err := NewServer(r, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +151,7 @@ func newTestServerWithRunner(t *testing.T) (*Server, *fakeRunner) {
 		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
 	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":142,"title":"Add OAuth login","labels":[{"name":"ai-wip"}]}]`}}}
-	s, err := NewServer(r, cfg)
+	s, err := NewServer(r, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +279,7 @@ func newFeatureServer(t *testing.T) *Server {
 		 "cache_read_input_tokens":900,"output_tokens":50}}`)
 	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":142,"title":"Add OAuth login","labels":[{"name":"ai-wip"}]}]`}}}
-	s, err := NewServer(r, cfg)
+	s, err := NewServer(r, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +323,7 @@ func TestServeSingleColumnFallbackNoAnswerer(t *testing.T) {
 // display text.
 func TestDetailShowsGitHubLinksAndSession(t *testing.T) {
 	cfg := &Config{RepoPath: "/tmp", RepoSlug: "o/r", WorkDir: t.TempDir(), StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
-	s, err := NewServer(&fakeRunner{}, cfg)
+	s, err := NewServer(&fakeRunner{}, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +353,7 @@ func TestBackfillPRCachesForSelectedTicket(t *testing.T) {
 	work := t.TempDir()
 	cfg := &Config{RepoPath: "/tmp", RepoSlug: "o/r", WorkDir: work, StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
 	f := &fakeRunner{queue: []rresp{{stdout: `{"url":"https://github.com/o/r/pull/5"}`}}}
-	s, err := NewServer(f, cfg)
+	s, err := NewServer(f, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +397,7 @@ func TestBackfillPRRetriesAfterTransientError(t *testing.T) {
 		{stderr: "could not resolve host github.com", err: errors.New("exit 1")},
 		{stdout: `{"url":"https://github.com/o/r/pull/5"}`},
 	}}
-	s, err := NewServer(f, cfg)
+	s, err := NewServer(f, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +422,7 @@ func TestBackfillPRRetriesAfterTransientError(t *testing.T) {
 func TestBackfillPRSkipsWhenAlreadySet(t *testing.T) {
 	cfg := &Config{RepoPath: "/tmp", RepoSlug: "o/r", WorkDir: t.TempDir(), StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
 	f := &fakeRunner{}
-	s, err := NewServer(f, cfg)
+	s, err := NewServer(f, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +478,7 @@ func TestCtxTokensAndHasUsage(t *testing.T) {
 
 func TestStepcardRendersTranscript(t *testing.T) {
 	cfg := &Config{RepoPath: "/tmp", RepoSlug: "o/r", WorkDir: t.TempDir(), StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
-	s, err := NewServer(&fakeRunner{}, cfg)
+	s, err := NewServer(&fakeRunner{}, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,5 +518,143 @@ func TestTxLineEscapesHTML(t *testing.T) {
 	}
 	if !strings.Contains(toolOut, "a &amp; b") {
 		t.Errorf("tool detail not escaped: %q", toolOut)
+	}
+}
+
+// fakeController records calls and can fail on demand.
+type fakeController struct {
+	stopped   []int
+	continued []int
+	err       error
+}
+
+func (f *fakeController) Stop(n int) error {
+	f.stopped = append(f.stopped, n)
+	return f.err
+}
+
+func (f *fakeController) Continue(n int) error {
+	f.continued = append(f.continued, n)
+	return f.err
+}
+
+func postTo(t *testing.T, h http.Handler, target string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, nil).WithContext(context.Background())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+func TestPostStopCallsController(t *testing.T) {
+	ctl := &fakeController{}
+	s := newTestServerWithController(t, ctl)
+	code, body := postTo(t, s.Handler(), "/stop?issue=142")
+	if code != http.StatusNoContent {
+		t.Fatalf("code = %d body = %q, want 204", code, body)
+	}
+	if len(ctl.stopped) != 1 || ctl.stopped[0] != 142 {
+		t.Fatalf("controller stops = %v, want [142]", ctl.stopped)
+	}
+}
+
+func TestPostContinueCallsController(t *testing.T) {
+	ctl := &fakeController{}
+	s := newTestServerWithController(t, ctl)
+	code, _ := postTo(t, s.Handler(), "/continue?issue=142")
+	if code != http.StatusNoContent {
+		t.Fatalf("code = %d, want 204", code)
+	}
+	if len(ctl.continued) != 1 || ctl.continued[0] != 142 {
+		t.Fatalf("controller continues = %v, want [142]", ctl.continued)
+	}
+}
+
+func TestPostStopControllerErrorIsA4xxWithReason(t *testing.T) {
+	ctl := &fakeController{err: errors.New("#142 is already running")}
+	s := newTestServerWithController(t, ctl)
+	code, body := postTo(t, s.Handler(), "/stop?issue=142")
+	if code != http.StatusConflict {
+		t.Fatalf("code = %d, want 409", code)
+	}
+	if !strings.Contains(body, "#142 is already running") {
+		t.Fatalf("body = %q, want the controller's reason", body)
+	}
+}
+
+func TestPostStopBadIssueIs400(t *testing.T) {
+	s := newTestServerWithController(t, &fakeController{})
+	if code, _ := postTo(t, s.Handler(), "/stop?issue=abc"); code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", code)
+	}
+}
+
+func TestGetStopIsNotRegistered(t *testing.T) {
+	s := newTestServerWithController(t, &fakeController{})
+	if code, _ := get(t, s.Handler(), "/stop?issue=142"); code != http.StatusMethodNotAllowed {
+		t.Fatalf("code = %d, want 405 — a link or crawler must not be able to stop a ticket", code)
+	}
+}
+
+func TestNilControllerRoutesAre503AndButtonsAbsent(t *testing.T) {
+	s := newTestServer(t) // ctl is nil
+	if code, _ := postTo(t, s.Handler(), "/stop?issue=142"); code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d, want 503", code)
+	}
+	_, body := get(t, s.Handler(), "/detail?issue=142")
+	if strings.Contains(body, `data-act="stop"`) {
+		t.Fatal("a dashboard with no daemon behind it must not render action buttons")
+	}
+}
+
+func TestDetailRendersStopButtonForWIP(t *testing.T) {
+	s := newTestServerWithController(t, &fakeController{})
+	_, body := get(t, s.Handler(), "/detail?issue=142") // the fixture issue is ai-wip
+	if !strings.Contains(body, `data-act="stop"`) {
+		t.Fatal("a wip ticket should offer stop")
+	}
+	if strings.Contains(body, `data-act="continue"`) {
+		t.Fatal("a wip ticket must not offer continue")
+	}
+}
+
+func TestDetailRendersContinueButtonForStopped(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-9")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(dir, "ai-stopped")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":9,"title":"Held","labels":[{"name":"ai-stopped"}]}]`}}}
+	s, err := NewServer(r, cfg, &fakeController{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body := get(t, s.Handler(), "/detail?issue=9")
+	if !strings.Contains(body, `data-act="continue"`) {
+		t.Fatal("a stopped ticket should offer continue")
+	}
+	if strings.Contains(body, `data-act="stop"`) {
+		t.Fatal("a stopped ticket must not offer stop")
+	}
+}
+
+func TestDetailRendersNoActionsForDone(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-9")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(dir, "ai-done")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":9,"title":"Shipped","labels":[{"name":"ai-done"}]}]`}}}
+	s, err := NewServer(r, cfg, &fakeController{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body := get(t, s.Handler(), "/detail?issue=9")
+	if strings.Contains(body, `data-act=`) {
+		t.Fatal("a done ticket offers neither stop nor continue")
 	}
 }

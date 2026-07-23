@@ -245,3 +245,34 @@ func (o *Orchestrator) Continue(ctx context.Context, n int) error {
 	}
 	return run(ctx)
 }
+
+// orchestratorController adapts Orchestrator to the dashboard's Controller.
+// The dashboard's requests are short-lived, so the adapter runs work on the
+// daemon's context instead: a continue must survive its HTTP response and die
+// with the daemon, not with the request.
+type orchestratorController struct{ o *Orchestrator }
+
+// controller returns the dashboard-facing mutating surface for this daemon.
+func (o *Orchestrator) controller() Controller { return orchestratorController{o: o} }
+
+// Stop is fast (it writes a marker and cancels or labels), so it runs inline and
+// the UI gets a real error.
+func (c orchestratorController) Stop(n int) error {
+	return c.o.Stop(c.o.base(), n)
+}
+
+// Continue validates and performs the label transition synchronously — so the
+// UI can report "#N is not stopped" or "#N is already running" — then runs the
+// multi-minute resume in the background on the daemon's context.
+func (c orchestratorController) Continue(n int) error {
+	run, err := c.o.prepareContinue(c.o.base(), n)
+	if err != nil || run == nil {
+		return err
+	}
+	go func() {
+		if err := guard("continue", func() error { return run(c.o.base()) }); err != nil {
+			log.Printf("continue #%d: %v", n, err)
+		}
+	}()
+	return nil
+}

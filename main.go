@@ -119,7 +119,7 @@ func main() {
 	}
 
 	if *f.serve {
-		srv, err := NewServer(r, cfg)
+		srv, err := NewServer(r, cfg, o.controller())
 		if err != nil {
 			log.Fatalf("serve: %v", err)
 		}

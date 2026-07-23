@@ -31,9 +31,18 @@ const defaultGHTTL = 3 * time.Second
 // issues appear without a restart. Before the first success (GitHub briefly
 // unreachable) every poll retries; after a success, a transient failure serves
 // the last good list rather than flashing the "unreachable" banner.
+// Controller is the mutating surface the dashboard exposes. Orchestrator
+// implements it (via the adapter in control.go). A nil Controller — a dashboard
+// with no daemon behind it — hides the buttons and makes the routes return 503.
+type Controller interface {
+	Stop(n int) error
+	Continue(n int) error
+}
+
 type Server struct {
 	runner Runner
 	cfg    *Config
+	ctl    Controller
 	gh     *GitHub
 	page   *template.Template
 	rail   *template.Template
@@ -50,8 +59,10 @@ type Server struct {
 }
 
 // NewServer parses the dashboard templates once and returns a Server that
-// renders from the given Runner and Config. It errors if a template fails to parse.
-func NewServer(r Runner, cfg *Config) (*Server, error) {
+// renders from the given Runner and Config. ctl, when non-nil, enables the
+// mutating stop/continue routes and their buttons; pass nil for a strictly
+// read-only dashboard. It errors if a template fails to parse.
+func NewServer(r Runner, cfg *Config, ctl Controller) (*Server, error) {
 	funcs := template.FuncMap{
 		"money":        money,
 		"dollars":      dollars,
@@ -73,6 +84,7 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 		"hasAnswerer":  hasAnswerer,
 		"pipelineRows": pipelineRows,
 		"txLine":       txLine,
+		"canAct":       func() bool { return ctl != nil },
 	}
 	page, err := template.New("page").Funcs(funcs).Parse(pageTmpl + railTmpl + detailTmpl + stepcardTmpl)
 	if err != nil {
@@ -86,17 +98,65 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{runner: r, cfg: cfg, gh: NewGitHub(r, cfg), page: page, rail: rail, detail: detail, ttl: defaultGHTTL, now: time.Now, prTried: map[int]bool{}}, nil
+	return &Server{runner: r, cfg: cfg, ctl: ctl, gh: NewGitHub(r, cfg), page: page, rail: rail, detail: detail, ttl: defaultGHTTL, now: time.Now, prTried: map[int]bool{}}, nil
 }
 
-// Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail
-// (the rail poll fragment), and GET /detail (the detail-pane poll fragment).
+// Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail and
+// GET /detail (the poll fragments), and the mutating /stop and /continue, which
+// accept POST only so a link or a crawler cannot trigger either.
+//
+// The mutating routes are registered method-less and check the method in act:
+// a method-scoped "POST /stop" would leave GET /stop to be swallowed by the
+// GET / catch-all and render the dashboard instead of refusing.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", s.handleIndex)
+	// "GET /{$}" (exact) rather than "GET /" (subtree): the subtree form would
+	// both swallow GET /stop instead of refusing it and conflict with the
+	// method-less /stop registration below.
+	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /rail", s.handleRail)
 	mux.HandleFunc("GET /detail", s.handleDetail)
+	mux.HandleFunc("/stop", s.handleStop)
+	mux.HandleFunc("/continue", s.handleContinue)
 	return mux
+}
+
+// handleStop halts work on ?issue=<N>. Stop is fast, so it runs inline.
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	s.act(w, r, func(n int) error { return s.ctl.Stop(n) })
+}
+
+// handleContinue resumes a stopped ?issue=<N>. The controller validates
+// synchronously and runs the multi-minute resume in the background, so this
+// returns as soon as the transition is real.
+func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
+	s.act(w, r, func(n int) error { return s.ctl.Continue(n) })
+}
+
+// act is the shared shape of the mutating routes: 405 on anything but POST,
+// 503 with no controller, 400
+// on a bad issue number, 409 with the controller's plain-text reason on a
+// refusal, 204 on success.
+func (s *Server) act(w http.ResponseWriter, r *http.Request, fn func(int) error) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.ctl == nil {
+		http.Error(w, "no daemon behind this dashboard", http.StatusServiceUnavailable)
+		return
+	}
+	n, err := strconv.Atoi(r.URL.Query().Get("issue"))
+	if err != nil || n <= 0 {
+		http.Error(w, "issue must be a positive number", http.StatusBadRequest)
+		return
+	}
+	if err := fn(n); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // stats is the fleet-wide telemetry shown in the command bar: how many tickets
@@ -546,6 +606,11 @@ tailwind.config={theme:{extend:{
 <script>
  var railEl=document.getElementById('rail'),ago=document.getElementById('ago'),since=0;
  function copySid(btn){if(btn.dataset.copying)return;var id=btn.getAttribute('data-sid')||'';var orig=btn.textContent;var done=function(){btn.dataset.copying='1';btn.textContent='copied';setTimeout(function(){delete btn.dataset.copying;btn.textContent=orig;},1200);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(id).then(done,done);}else{var ta=document.createElement('textarea');ta.value=id;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);done();}}
+ function act(btn){var a=btn.getAttribute('data-act'),n=btn.getAttribute('data-issue');btn.disabled=true;
+  fetch('/'+a+'?issue='+n,{method:'POST'}).then(function(r){
+   if(r.status===204){lastDetail=null;lastRail=null;poll();return;}
+   return r.text().then(function(t){var e=document.getElementById('acterr');if(e){e.textContent=t.trim()||('could not '+a);e.classList.remove('hidden');}btn.disabled=false;});
+  }).catch(function(){btn.disabled=false;});}
  function setText(id,v){var e=document.getElementById(id);if(e&&v!=null)e.textContent=v;}
  function applyMeta(root){var m=root.querySelector('#railmeta');if(!m)return;setText('stat-tickets',m.dataset.tickets);setText('stat-running',m.dataset.running);setText('stat-spend',m.dataset.spend);}
  setInterval(function(){since++;if(ago)ago.textContent=since+'s';},1000);
@@ -592,7 +657,7 @@ const railTmpl = `{{define "rail"}}
     <div class="min-w-0">
      <div class="flex items-center gap-2">
       <span class="font-mono text-[11px] font-semibold {{if $sel}}text-live{{else}}text-muted{{end}}">#{{.Number}}</span>
-      {{if $k}}<span class="inline-flex items-center gap-1 rounded-sm border px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide {{if eq $k "done"}}border-ok/25 bg-ok/[0.13] text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>{{end}}{{$k}}</span>{{end}}
+      {{if $k}}<span class="inline-flex items-center gap-1 rounded-sm border px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide {{if eq $k "done"}}border-ok/25 bg-ok/[0.13] text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else if eq $k "stopped"}}border-line2 bg-panel2 text-muted{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>{{end}}{{$k}}</span>{{end}}
      </div>
      <div class="mt-1.5 line-clamp-2 min-h-[34px] text-[13px] font-medium leading-[17px] text-text/90">{{if .Title}}{{.Title}}{{else}}#{{.Number}} · awaiting GitHub title{{end}}</div>
      <div class="mt-1.5 font-mono text-[10px] uppercase tracking-wide text-faint">{{if .Kind}}{{.Kind}} · {{end}}{{len .Steps}} step{{if ne (len .Steps) 1}}s{{end}}</div>
@@ -610,14 +675,19 @@ const detailTmpl = `{{define "detail"}}<div class="max-w-[1160px] px-10 py-7">
   <div class="mb-6">
    <div class="mb-2.5 flex flex-wrap items-center gap-2">
     <span class="font-mono text-sm font-semibold text-live">#{{.Number}}</span>
-    {{if $k}}<span class="inline-flex items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-widest {{if eq $k "done"}}border-ok/30 bg-ok/10 text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1.5 w-1.5 rounded-full bg-live"></span>in progress{{else if eq $k "done"}}done{{else}}{{$k}}{{end}}</span>{{end}}
+    {{if $k}}<span class="inline-flex items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-widest {{if eq $k "done"}}border-ok/30 bg-ok/10 text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else if eq $k "stopped"}}border-line2 bg-panel2 text-muted{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1.5 w-1.5 rounded-full bg-live"></span>in progress{{else if eq $k "done"}}done{{else if eq $k "stopped"}}stopped{{else}}{{$k}}{{end}}</span>{{end}}
     {{if .Kind}}<span class="rounded border border-line2 bg-panel2 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-widest text-muted">{{.Kind}}</span>{{end}}
    </div>
    <h1 class="text-[26px] font-semibold leading-tight tracking-tight text-text">{{if .Title}}{{.Title}}{{else}}Issue #{{.Number}}{{end}}</h1>
    <div class="mt-3 flex flex-wrap items-center gap-2 font-mono text-[11px]">
     <a href="{{issueURL .Number}}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded border border-line2 bg-panel px-2 py-0.5 text-muted hover:text-text hover:border-live/40">issue ↗</a>
     {{if .PRURL}}<a href="{{.PRURL}}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded border border-line2 bg-panel px-2 py-0.5 text-muted hover:text-text hover:border-live/40">pull request ↗</a>{{end}}
+    {{if canAct}}
+     {{if or (eq $k "wip") (eq $k "rework") (eq $k "queued")}}<button type="button" data-act="stop" data-issue="{{.Number}}" onclick="act(this)" class="inline-flex items-center gap-1 rounded border border-line2 bg-panel px-2 py-0.5 text-muted hover:text-text hover:border-warn/50">stop</button>{{end}}
+     {{if eq $k "stopped"}}<button type="button" data-act="continue" data-issue="{{.Number}}" onclick="act(this)" class="inline-flex items-center gap-1 rounded border border-line2 bg-panel px-2 py-0.5 text-muted hover:text-text hover:border-live/50">continue</button>{{end}}
+    {{end}}
    </div>
+   <div id="acterr" class="mt-2 hidden font-mono text-[11px] text-err"></div>
    <dl class="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line bg-line sm:grid-cols-5">
     <div class="bg-panel px-4 py-3"><dt class="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">total spend</dt><dd class="mt-1.5 font-mono text-xl font-semibold tabular-nums {{if eq $k "done"}}text-ok{{else}}text-text{{end}}">{{dollars .TotalCost}}</dd></div>
     <div class="bg-panel px-4 py-3"><dt class="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">tokens</dt><dd class="mt-1.5 font-mono text-sm font-semibold tabular-nums text-text" title="context in · output out">&darr;{{tokens .TotalInputTokens}} &middot; &uarr;{{tokens .TotalOutputTokens}}</dd></div>
