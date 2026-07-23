@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 )
 
 func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent string) error {
@@ -27,13 +26,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 }
 
 func bugPrompt(issue string) string {
-	return fmt.Sprintf(`/superpowers:systematic-debugging %s
-
-Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
-
-If, while reproducing, you find the described bug is already fixed or the
-behavior is already correct, do NOT fabricate a change: print
-%s <one-sentence reason> on its own line and stop.`, issue, alreadyDoneSentinel)
+	d := promptData()
+	d["Issue"] = issue
+	return mustRender("debug.md.tmpl", d)
 }

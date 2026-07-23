@@ -54,16 +54,7 @@ func parseTriage(s string) (*TriageDecision, error) {
 }
 
 func triagePrompt(list string) string {
-	return fmt.Sprintf(`You are a triage agent for an automated development pipeline.
-
-Open eligible issues:
-%s
-
-Decide from the issue text alone — do NOT read the repository. Pick the single
-best issue to work on next and classify it:
-- "bug": a small, well-scoped defect that can be fixed by reproducing and debugging
-- "feature": anything that needs design work (new functionality, refactors, unclear scope)
-
-Respond with ONLY a JSON object, no other text:
-{"issueNumber": <int>, "kind": "bug" or "feature", "reason": "<one sentence>"}`, list)
+	d := promptData()
+	d["List"] = list
+	return mustRender("triage.md.tmpl", d)
 }

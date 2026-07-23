@@ -59,11 +59,5 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 }
 
 func reworkPrompt() string {
-	return fmt.Sprintf(`Continue the work on this issue where the previous session left off.
-Complete the remaining implementation, make the full test suite pass, and commit
-all changes. HEADLESS: do not ask questions; make reasonable calls and note them
-in commit messages.
-
-If you find the work is already fully implemented, do not fabricate changes:
-print %s <one-sentence reason> on its own line and stop.`, alreadyDoneSentinel)
+	return mustRender("rework.md.tmpl", promptData())
 }

@@ -1,0 +1,9 @@
+/superpowers:systematic-debugging {{.Issue}}
+
+Reproduce the bug with a failing test first, then fix it, verify the full test
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
+and note them in commit messages.
+
+If, while reproducing, you find the described bug is already fixed or the
+behavior is already correct, do NOT fabricate a change: print
+{{.AlreadyDoneSentinel}} <one-sentence reason> on its own line and stop.
