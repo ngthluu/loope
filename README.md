@@ -58,6 +58,22 @@ Each poll cycle:
    pushed and a PR is opened (`Closes #N`); the PR URL is commented on the
    issue.
 
+A poll cycle does **not** wait for the pipelines it starts. It fills the free
+`ticketsPerCycle` slots, returns, and polls again one interval later — so work
+labelled while other pipelines are running is picked up as soon as a slot frees,
+rather than at the end of a batch. `-once` fills the slots one time, waits for
+them to drain, and exits.
+
+Within a cycle, auto-resumes of parked issues claim slots **before** new
+eligible issues: continuing work that already has a worktree and session on disk
+outranks starting more of it, so a permanently busy queue can't starve a parked
+issue. Resumes are backoff-gated, so they leave the rest of the budget for new
+work.
+
+On shutdown (Ctrl-C / SIGTERM) the daemon stops polling and waits for in-flight
+pipelines to finish, so the `workDir` lock is never released while a pipeline is
+live. Signal a second time to quit immediately without draining.
+
 Label lifecycle (names configurable, see below):
 
 | Label       | Meaning                                              |
@@ -187,7 +203,7 @@ with `~/`.
 | `workDir`         | yes      | —          | Where worktrees and logs are created                    |
 | `eligibleLabel`   | no       | `ai-agent` | Label that marks an issue as available to the loop      |
 | `pollIntervalSec` | no       | `60`       | Seconds between poll cycles                             |
-| `ticketsPerCycle` | no       | `1`        | How many eligible issues to select and work on per poll cycle; selection is sequential by triage priority; selected issues' pipelines run in parallel, each in its own worktree/branch/PR; values below 1 are treated as 1 |
+| `ticketsPerCycle` | no       | `1`        | Maximum number of pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Auto-resumes of parked issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
 | `personaPath`     | no       | —          | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir` | no       | —          | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call (see below) |
 | `maxQARounds`     | no       | `20`       | Max architect↔answerer rounds before a feature fails    |
