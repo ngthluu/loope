@@ -310,6 +310,9 @@ func scanLogs(cfg *Config) ([]Ticket, error) {
 // states that need attention float to the top; done sinks to the bottom. It
 // reuses stateKind (render.go) so renamed StateLabels still tier correctly.
 func statusRank(cfg *Config, label string) int {
+	if label == "" {
+		return 4 // unknown/other — don't let an empty config label alias this to "done"
+	}
 	switch stateKind(cfg, label) {
 	case "failed":
 		return 0
