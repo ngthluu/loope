@@ -34,6 +34,7 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 	if err != nil {
 		return err
 	}
+	recordTitle(logDir, title)
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
 	res, err := c.Call(ctx, ClaudeCall{

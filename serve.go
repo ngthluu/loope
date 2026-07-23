@@ -39,11 +39,12 @@ type Server struct {
 	ttl time.Duration
 	now func() time.Time
 
-	mu        sync.Mutex
-	ghIssues  []Issue      // last good gh result
-	ghReady   bool         // true once a gh fetch has succeeded
-	fetchedAt time.Time    // when ghIssues was last refreshed
-	prTried   map[int]bool // issues whose PR backfill was attempted (guarded by mu)
+	mu         sync.Mutex
+	ghIssues   []Issue      // last good gh result
+	ghReady    bool         // true once a gh fetch has succeeded
+	fetchedAt  time.Time    // when ghIssues was last refreshed
+	prTried    map[int]bool // issues whose PR backfill was attempted (guarded by mu)
+	titleTried map[int]bool // issues whose title backfill was attempted (guarded by mu)
 }
 
 // NewServer parses the dashboard templates from the embedded FS once and
@@ -54,7 +55,8 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{runner: r, cfg: cfg, gh: NewGitHub(r, cfg), tmpl: tmpl, ttl: defaultGHTTL, now: time.Now, prTried: map[int]bool{}}, nil
+	return &Server{runner: r, cfg: cfg, gh: NewGitHub(r, cfg), tmpl: tmpl, ttl: defaultGHTTL, now: time.Now,
+		prTried: map[int]bool{}, titleTried: map[int]bool{}}, nil
 }
 
 // Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail
@@ -114,11 +116,18 @@ func (s *Server) load(ctx context.Context, selWanted string) view {
 	if err != nil {
 		log.Printf("serve: scan logs: %v", err)
 	}
+	// Titles already on disk, so persistTitles below can tell a freshly-fetched
+	// title from one it has already mirrored.
+	onDisk := map[int]string{}
+	for i := range tickets {
+		onDisk[tickets[i].Number] = tickets[i].Title
+	}
 	var ghErr error
 	if issues, e := s.issues(ctx); e != nil {
 		ghErr = e
 	} else {
 		tickets = overlayIssues(tickets, issues, s.cfg)
+		s.persistTitles(tickets, onDisk)
 	}
 	v := view{Tickets: tickets, Stats: summarize(tickets)}
 	if ghErr != nil {
@@ -139,7 +148,69 @@ func (s *Server) load(ctx context.Context, selWanted string) view {
 		}
 	}
 	s.backfillPR(ctx, v.Selected)
+	s.backfillTitle(ctx, v.Selected)
 	return v
+}
+
+// issueLogDir is the log dir for one issue.
+func (s *Server) issueLogDir(n int) string {
+	return filepath.Join(s.cfg.WorkDir, "logs", fmt.Sprintf("issue-%d", n))
+}
+
+// persistTitles mirrors GitHub titles into the log dirs of tickets that came
+// from the disk scan, so a later start finds them without GitHub. Only titles
+// that actually changed are written, so the 3s poll doesn't rewrite the same
+// file forever; label-only tickets (no log dir yet) are skipped — the loop
+// records their title when it picks them up.
+func (s *Server) persistTitles(tickets []Ticket, onDisk map[int]string) {
+	for i := range tickets {
+		tk := &tickets[i]
+		prev, logged := onDisk[tk.Number]
+		if !logged || tk.Title == "" || tk.Title == prev {
+			continue
+		}
+		recordTitle(s.issueLogDir(tk.Number), tk.Title)
+	}
+}
+
+// backfillTitle recovers the title of a ticket the issue-list query no longer
+// returns — the issue's labels were edited after it finished, so it silently
+// dropped out of the label-scoped search and the card is stuck on the
+// "awaiting GitHub title" placeholder (issue #16).
+//
+// It mirrors backfillPR: only the selected ticket, at most once per issue per
+// process for a settled answer (a transient outage is not memoized, so a later
+// poll can retry), and a hit is written to the log dir so the rail — which
+// renders from the disk scan — picks it up on the next poll without a gh call.
+func (s *Server) backfillTitle(ctx context.Context, tk *Ticket) {
+	if tk == nil || tk.Title != "" {
+		return
+	}
+	s.mu.Lock()
+	tried := s.titleTried[tk.Number]
+	s.mu.Unlock()
+	if tried {
+		return
+	}
+
+	title, err := s.gh.IssueTitle(ctx, tk.Number)
+	if err != nil {
+		if isTransientGitHubError(err) {
+			return
+		}
+		s.mu.Lock()
+		s.titleTried[tk.Number] = true
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Lock()
+	s.titleTried[tk.Number] = true
+	s.mu.Unlock()
+	if title == "" {
+		return
+	}
+	tk.Title = title
+	recordTitle(s.issueLogDir(tk.Number), title)
 }
 
 // backfillPR lazily fetches and caches the PR URL for a ticket shipped before
@@ -181,7 +252,7 @@ func (s *Server) backfillPR(ctx context.Context, tk *Ticket) {
 	s.prTried[tk.Number] = true
 	s.mu.Unlock()
 	tk.PRURL = url
-	recordPR(filepath.Join(s.cfg.WorkDir, "logs", fmt.Sprintf("issue-%d", tk.Number)), url)
+	recordPR(s.issueLogDir(tk.Number), url)
 }
 
 // summarize rolls the ticket list up into the command-bar telemetry.

@@ -163,6 +163,9 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		return err
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.WIP)
+	// Mirror the title next to the state marker: the dashboard otherwise knows
+	// it only for as long as the issue keeps matching its label-scoped query.
+	recordTitle(o.issueLogDir(n), issue.Title)
 	_ = o.gh.Comment(ctx, n, pickupComment(kind, branch))
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
