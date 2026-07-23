@@ -62,14 +62,19 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 
 // Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail
 // (the rail poll fragment), GET /detail (the detail-pane poll fragment), and
-// GET /static/ (the embedded JS/CSS assets).
+// GET /static/ (the embedded JS/CSS assets). The POST /stop and POST /continue
+// mutation routes are registered only when an orchestrator is wired (the daemon);
+// a read-only server (orch == nil) never exposes them, so a POST is refused with
+// a clean 405 instead of dereferencing the nil orchestrator and panicking.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /rail", s.handleRail)
 	mux.HandleFunc("GET /detail", s.handleDetail)
-	mux.HandleFunc("POST /stop", s.handleStop)
-	mux.HandleFunc("POST /continue", s.handleContinue)
+	if s.orch != nil {
+		mux.HandleFunc("POST /stop", s.handleStop)
+		mux.HandleFunc("POST /continue", s.handleContinue)
+	}
 	mux.Handle("GET /static/", staticHandler())
 	return mux
 }

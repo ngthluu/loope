@@ -78,13 +78,28 @@ go func() {
     cctx, cancel := context.WithCancel(ctx)
     o.setCancel(n, cancel)      // stores in o.cancels[n] under mu
     defer o.clearCancel(n)      // deletes o.cancels[n] under mu; calls cancel()
-    defer func() { recover -> park }()   // unchanged panic guard
+    // ONE deferred handler owns both panic recovery and the stop outcome, so the
+    // stopping flag is consumed on every exit path — including a panic:
+    defer func() {
+        if r := recover(); r != nil {
+            o.consumeStopping(n)   // consume so the flag can't leak; panic wins
+            o.park(ctx, n, WIP, panicErr)
+            return
+        }
+        if o.consumeStopping(n) {  // true+clears if Stop was requested
+            o.pause(ctx, n)        // NOTE: parent ctx, still live (not cctx)
+        }
+    }()
     o.handleIssue(cctx, issue, kind, base)
-    if o.consumeStopping(n) {   // true+clears if Stop was requested
-        o.pause(ctx, n)         // NOTE: parent ctx, still live (not cctx)
-    }
 }()
 ```
+
+The consume-on-panic matters: if `handleIssue` panics with a Stop already
+flagged, a `consumeStopping` sitting *after* the call (outside the defer) is
+skipped by the unwind and the flag leaks — `clearCancel` only clears cancels, so
+`stopping[n]` stays set forever and spuriously stops the issue's *next* run.
+Folding it into the recover defer closes that. The panic outcome (park,
+non-resumable) wins over the pending stop — a human should look.
 
 `handleIssue` receives the **child** ctx so a Stop kills its `claude`
 subprocess and aborts any in-flight git work. Right after the pipeline call
@@ -133,7 +148,13 @@ would fail):
 ```go
 func (o *Orchestrator) pause(ctx context.Context, n int) {
     logDir := issueLogDir(n)
-    o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped)
+    // The swap is the source of truth. If it fails — GitHub is unreachable, or
+    // the ticket already left ai-wip (a ship/park won the stop's race window) —
+    // bail before recording state or commenting, so local state never claims
+    // ai-stopped while the real label still reads ai-wip.
+    if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped); err != nil {
+        return
+    }
     recordState(logDir, o.cfg.StateLabels.Stopped)
     o.gh.Comment(ctx, n, "⏸ Stopped by user. Worktree, logs and session are "+
         "preserved. Press Continue to resume.")
@@ -143,7 +164,10 @@ func (o *Orchestrator) pause(ctx context.Context, n int) {
 ```
 
 Because it swaps `ai-wip → ai-stopped` and records no park cause, no auto-resume
-path will act on it.
+path will act on it. The swap-failure guard is what keeps local state and the
+GitHub label from diverging: recording `ai-stopped` after a failed swap would
+show the ticket stopped on the dashboard while `SweepOrphans` still sees a live
+`ai-wip` it could act on.
 
 ### 5. `Continue(n)` — Orchestrator method (deferred resume)
 
@@ -188,11 +212,17 @@ decision 5. Continue is label-driven, so it works even after a daemon restart
 
 ### 6. HTTP endpoints and Server→Orchestrator link
 
-- `NewServer` gains an `*Orchestrator` parameter; `main.go` passes the same `o`
-  it drives. Add an `orch *Orchestrator` field to `Server`.
-- Add two routes to `Handler` (Go 1.22 method-prefixed patterns):
+- The `Server` gains an `orch *Orchestrator` field; `main.go` sets it to the same
+  `o` it drives. It stays `nil` for a read-only server.
+- Add two routes to `Handler` (Go 1.22 method-prefixed patterns), **registered
+  only when `orch != nil`**:
   - `POST /stop`   → `handleStop`
   - `POST /continue` → `handleContinue`
+
+  Gating registration on a wired orchestrator means a read-only server never
+  exposes the mutation routes: a POST is refused with a clean `405` instead of
+  dereferencing the nil `orch` and panicking. The daemon always wires it, so the
+  routes are live in normal operation.
 - Handlers parse the issue number from the form/query, call
   `orch.Stop(n)` / `orch.Continue(r.Context(), n)`, and respond with the
   refreshed detail fragment (same rendering path as `handleDetail`) so htmx
@@ -226,7 +256,15 @@ context; the asynchronous `pause` uses the daemon's parent ctx.
   outcome switch, so a Stop observed before shipping cleanly pauses. A Stop that
   lands *mid-`ship`* (after the check) may interrupt a push/PR; this is the same
   "lose in-progress work" tradeoff (decision 7) and is recoverable via Continue
-  → `Rework`. Narrow and accepted.
+  → `Rework`. Narrow and accepted. If instead the outcome fully lands (e.g. ship
+  swaps `ai-wip → ai-done`) before the goroutine's `pause` runs, `pause`'s
+  swap-failure guard makes it a clean no-op: the `ai-wip → ai-stopped` swap fails
+  (the label is gone), so nothing is recorded and no stop notice is posted on the
+  already-finished ticket.
+- **Panic with a Stop flagged:** the launch goroutine's single recover-plus-stop
+  defer consumes the flag before parking, so a pipeline that panics while a Stop
+  is pending parks (panic wins) without leaking `stopping[n]` into the issue's
+  next run.
 - **Daemon crash in the Stop→pause window:** the ticket is briefly still
   `ai-wip` with a live worktree+session, so `SweepOrphans` would park it to
   `ai-rework` and auto-resume — pre-existing orphan behavior, tiny window,
@@ -243,7 +281,11 @@ Following the project's existing table/fake-runner + fake-gh patterns:
 - **`Stop`**: running ticket → `cancel` invoked and `stopping[n]` set;
   not-running ticket → `errNotRunning`.
 - **`pause`**: transitions `ai-wip → ai-stopped`, records stopped state, leaves
-  worktree/branch/logs/session intact, records no park cause.
+  worktree/branch/logs/session intact, records no park cause. When the swap
+  fails, records nothing and posts no notice (local state stays `ai-wip`, no
+  divergence).
+- **panic with a Stop flagged**: a pipeline that panics while `stopping[n]` is
+  set consumes the flag (no leak into the next run) and parks the issue.
 - **`handleIssue` stop path**: when `stopping[n]` is set, the normal
   park/ship/finish outcome is skipped.
 - **`Continue` with session**: `ai-stopped → ai-rework` + resumable park cause;
@@ -255,7 +297,8 @@ Following the project's existing table/fake-runner + fake-gh patterns:
   `ListEligibleIssues` (no re-pickup).
 - **HTTP**: `POST /stop` and `POST /continue` route correctly, call the
   orchestrator, and render the refreshed detail fragment; sentinel errors render
-  an inline message, not a 5xx.
+  an inline message, not a 5xx. On a read-only server (`orch == nil`) the routes
+  are absent, so a POST returns `405` rather than panicking.
 - **Render**: `stateKind` maps `ai-stopped → "stopped"`; Stop button appears for
   wip, Continue button for stopped.
 

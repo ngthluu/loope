@@ -1200,3 +1200,67 @@ func TestContinueWhileRunningReturnsSentinel(t *testing.T) {
 		t.Fatalf("Continue while running = %v, want errAlreadyRunning", err)
 	}
 }
+
+func TestPauseSwapFailureLeavesStateUnchanged(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	// Make the ai-wip->ai-stopped swap fail — either GitHub is unreachable, or the
+	// ticket already left ai-wip (a ship/park won the stop's narrow race window).
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.Contains(joined, "--remove-label ai-wip") && strings.Contains(joined, "--add-label ai-stopped") {
+			return "", "label ai-wip not found", fmt.Errorf("exit 1")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-wip")
+
+	o.pause(context.Background(), 7)
+
+	// The swap failed, so local state must NOT flip to ai-stopped: recording it
+	// would diverge from the real label — the dashboard would show stopped while
+	// GitHub still reads ai-wip, and SweepOrphans could act on the "stopped" ticket.
+	if got := env.readLocalState(7); got != "ai-wip" {
+		t.Fatalf("local state = %q, want unchanged ai-wip after a failed swap", got)
+	}
+	// And no spurious stop notice on a ticket that never actually stopped.
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "Stopped by user") {
+			t.Fatalf("posted a stop notice despite the swap failing: %v", c)
+		}
+	}
+}
+
+func TestStopFlagConsumedWhenPipelinePanics(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	// Blow up while handleIssue applies the ai-wip label, simulating a pipeline
+	// that panics mid-run after a Stop was already flagged for the ticket.
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.Contains(joined, "issue edit") && strings.Contains(joined, "--add-label ai-wip") {
+			panic("boom mid-pipeline")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	o.stopping = map[int]bool{7: true} // a Stop landed just before the panic
+
+	_ = o.ProcessOnce(context.Background())
+	o.Wait()
+
+	// The panic's recover handler must consume the stop flag. A leaked flag would
+	// make isStopping(7) true forever and spuriously stop issue 7's very next run.
+	if o.isStopping(7) {
+		t.Fatal("stopping flag leaked after a panic: issue 7's next run would be wrongly stopped")
+	}
+	// The panic outcome wins over the pending stop: the issue is parked for a human.
+	if got := env.readLocalState(7); got != "ai-rework" {
+		t.Fatalf("local state = %q, want ai-rework (parked after panic)", got)
+	}
+}

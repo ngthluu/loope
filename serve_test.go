@@ -875,6 +875,19 @@ func TestMutateRouteRejectsBadIssue(t *testing.T) {
 	}
 }
 
+func TestMutationRoutesDisabledOnReadOnlyServer(t *testing.T) {
+	// A server built without an orchestrator (orch == nil) is read-only. The
+	// mutation routes must not be exposed at all — POSTing to one has to be refused
+	// cleanly, never dereference the nil orchestrator and panic.
+	h := newTestServer(t).Handler() // no orch wired
+	for _, route := range []string{"/stop?issue=142", "/continue?issue=142"} {
+		code, _ := post(t, h, route)
+		if code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s on a read-only server = %d, want 405 (route not exposed)", route, code)
+		}
+	}
+}
+
 func TestStateKindMapsStopped(t *testing.T) {
 	cfg := &Config{StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
 	if got := stateKind(cfg, "ai-stopped"); got != "stopped" {

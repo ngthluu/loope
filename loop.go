@@ -187,24 +187,33 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 			defer cancel() // release the context's resources when the goroutine ends
 			o.setCancel(n, cancel)
 			defer o.clearCancel(n)
-			// A panic in one pipeline must not kill the daemon or the sibling
-			// pipelines: park the issue with the panic as its (non-resumable) cause,
-			// preserving worktree and logs for a human. Uses the LIVE parent ctx.
+			// One deferred handler owns BOTH panic recovery and the stop outcome, so
+			// the stopping flag is consumed on every exit path. A panic in one
+			// pipeline must not kill the daemon or the sibling pipelines: park the
+			// issue with the panic as its (non-resumable) cause, preserving worktree
+			// and logs for a human. Uses the LIVE parent ctx. Consuming the flag even
+			// on the panic path is what stops it leaking: a flag left set would never
+			// be cleared (clearCancel only clears cancels) and would spuriously stop
+			// the issue's next run.
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("issue #%d: pipeline panic: %v\n%s", n, r, debug.Stack())
+					// The panic outcome wins over a pending stop — a human should look —
+					// so consume the flag (preventing a leak) and park, don't pause.
+					o.consumeStopping(n)
 					_ = o.park(ctx, n, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
+					return
+				}
+				// A Stop observed during the run transitions the ticket to ai-stopped
+				// here, on the live parent ctx (the child ctx is cancelled). handleIssue
+				// already skipped its normal outcome, leaving the ticket ai-wip for this.
+				if o.consumeStopping(n) {
+					o.pause(ctx, n)
 				}
 			}()
 			log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
 			if err := o.handleIssue(cctx, p.issue, p.kind, base); err != nil {
 				log.Printf("issue #%d: pipeline failed: %v", n, err)
-			}
-			// A Stop observed during the run transitions the ticket to ai-stopped
-			// here, on the live parent ctx (the child ctx is cancelled). handleIssue
-			// already skipped its normal outcome, leaving the ticket ai-wip for this.
-			if o.consumeStopping(n) {
-				o.pause(ctx, n)
 			}
 		}(picks[i])
 	}
@@ -412,10 +421,22 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 // deliberately does NOT touch the worktree, branch, logs, or session file, and
 // records NO park cause — so no auto-resume path (SweepOrphans queries ai-wip,
 // ResumeParked queries ai-rework) will ever act on a stopped ticket. It stays
-// put until the user hits Continue.
+// put until the user hits Continue. If the swap fails, it records nothing and
+// does not comment: local state must never claim ai-stopped while the real label
+// still reads ai-wip.
 func (o *Orchestrator) pause(ctx context.Context, n int) {
 	logDir := o.issueLogDir(n)
-	_ = o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped)
+	// The swap is the source of truth. It can fail because GitHub is unreachable,
+	// or because the ticket already left ai-wip (a ship/park won the stop's narrow
+	// race window). Either way, bail before recording state or commenting: writing
+	// ai-stopped locally would diverge from the real label — the dashboard would
+	// show stopped while GitHub still reads ai-wip, and SweepOrphans could act on
+	// the "stopped" ticket — and the notice would falsely annotate a ticket that
+	// never actually stopped.
+	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped); err != nil {
+		log.Printf("issue #%d: stop swap %s->%s failed, leaving state unchanged: %v", n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped, err)
+		return
+	}
 	recordState(logDir, o.cfg.StateLabels.Stopped)
 	_ = o.gh.Comment(ctx, n, stoppedComment())
 }
