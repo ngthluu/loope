@@ -1,0 +1,19 @@
+/superpowers:brainstorming {{.Issue}}
+{{if gt .Threshold 0}}
+Before anything else, assess how confidently this issue can be implemented as
+written and print {{.ConfidenceSentinel}} <0-100> as the FIRST line of your reply. If that score is
+below {{.Threshold}}, the issue is too under-specified or ambiguous to implement
+responsibly: do NOT design or write a spec. Instead, list what is missing and
+the specific questions the author must answer, then stop.
+{{end}}
+HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
+Ask clarifying questions as plain text (AskUserQuestion is disabled).
+Follow the brainstorming flow to a committed spec: clarifying questions, design,
+then write and commit the spec document into this branch. Do NOT invoke the
+writing-plans skill — a separate session writes the implementation plan.
+When the spec file is written and committed, print {{.SpecReadySentinel}} <path> on its own line,
+where <path> is the spec file path relative to the repository root.
+
+If during brainstorming you determine the feature is already fully implemented
+in this codebase, do not invent work: print {{.AlreadyDoneSentinel}} <one-sentence reason> on its own
+line instead of continuing.

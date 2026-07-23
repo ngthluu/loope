@@ -317,6 +317,21 @@ make product decisions (bias to simplicity, testing requirements, PR size
 limits, …). Missing file is fine — the answerer just runs without one.
 `persona.example.md` is a reasonable starting point.
 
+## Prompts
+
+Every prompt loope sends to Claude, and every comment it posts to GitHub, lives
+in [`ai/prompts/`](ai/prompts) as a `text/template` file — no prompt text is in
+the Go source. The directory is embedded into the binary with `go:embed`, so a
+release is still a single self-contained file that reads nothing from disk at
+runtime; editing a prompt means rebuilding.
+
+Sentinel tokens (`CONFIDENCE:`, `SPEC_READY:`, `PIPELINE_READY`,
+`PIPELINE_ALREADY_DONE:`, `DONE_CONFIRMED`) are injected from the Go constants
+rather than written in the templates, so the instruction given to the model and
+the parser reading its reply cannot drift apart. Rewording a prompt is safe;
+adding a placeholder means adding the matching key in the builder, and the
+tests in `prompts_test.go` will fail loudly if you forget.
+
 ## Logs
 
 Every Claude call is saved for postmortems. Each call writes three files to
