@@ -256,29 +256,10 @@ func readPersona(path string) string {
 }
 
 func brainstormPrompt(issue string, threshold int) string {
-	confidence := ""
-	if threshold > 0 {
-		confidence = fmt.Sprintf(`
-
-Before anything else, assess how confidently this issue can be implemented as
-written and print %s <0-100> as the FIRST line of your reply. If that score is
-below %d, the issue is too under-specified or ambiguous to implement
-responsibly: do NOT design or write a spec. Instead, list what is missing and
-the specific questions the author must answer, then stop.`, confidenceSentinel, threshold)
-	}
-	return fmt.Sprintf(`/superpowers:brainstorming %s%s
-
-HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions as plain text (AskUserQuestion is disabled).
-Follow the brainstorming flow to a committed spec: clarifying questions, design,
-then write and commit the spec document into this branch. Do NOT invoke the
-writing-plans skill — a separate session writes the implementation plan.
-When the spec file is written and committed, print %s <path> on its own line,
-where <path> is the spec file path relative to the repository root.
-
-If during brainstorming you determine the feature is already fully implemented
-in this codebase, do not invent work: print %s <one-sentence reason> on its own
-line instead of continuing.`, issue, confidence, specReadySentinel, alreadyDoneSentinel)
+	d := promptData()
+	d["Issue"] = issue
+	d["Threshold"] = threshold
+	return mustRender("brainstorm.md.tmpl", d)
 }
 
 func answererPrompt(issue, persona, architectMsg string) string {
