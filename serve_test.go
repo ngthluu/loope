@@ -515,3 +515,33 @@ func TestTxLineEscapesHTML(t *testing.T) {
 		t.Errorf("tool detail not escaped: %q", toolOut)
 	}
 }
+
+func TestStaticAssetsServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	for _, tc := range []struct{ path, ctPart string }{
+		{"/static/htmx.min.js", "javascript"},
+		{"/static/idiomorph-ext.min.js", "javascript"},
+		{"/static/app.js", "javascript"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", tc.path, rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("%s: empty body", tc.path)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tc.ctPart) {
+			t.Fatalf("%s: content-type = %q, want it to contain %q", tc.path, ct, tc.ctPart)
+		}
+	}
+}
+
+func TestStaticUnknownPath404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, _ := get(t, h, "/static/nope.js")
+	if code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+}

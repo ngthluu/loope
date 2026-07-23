@@ -90,12 +90,14 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 }
 
 // Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail
-// (the rail poll fragment), and GET /detail (the detail-pane poll fragment).
+// (the rail poll fragment), GET /detail (the detail-pane poll fragment), and
+// GET /static/ (the embedded JS/CSS assets).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /rail", s.handleRail)
 	mux.HandleFunc("GET /detail", s.handleDetail)
+	mux.Handle("GET /static/", staticHandler())
 	return mux
 }
 
