@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // errFake is declared in images_test.go and reused here.
@@ -534,5 +536,35 @@ func TestStateKindAndStripeForStopped(t *testing.T) {
 	}
 	if got := stripeClass(cfg, "ai-stopped"); got != "bg-muted/40" {
 		t.Fatalf("stripeClass = %q, want bg-muted/40", got)
+	}
+}
+
+func TestStopMarkerLifecycle(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "issue-7")
+	if stopRequested(dir) {
+		t.Fatal("no marker written yet, stopRequested should be false")
+	}
+	recordStopRequest(dir)
+	if !stopRequested(dir) {
+		t.Fatal("after recordStopRequest, stopRequested should be true")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, stopFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err != nil {
+		t.Fatalf("marker content %q is not an RFC3339 timestamp: %v", b, err)
+	}
+	clearStopRequest(dir)
+	if stopRequested(dir) {
+		t.Fatal("after clearStopRequest, stopRequested should be false")
+	}
+}
+
+func TestStopMarkerEmptyDirIsNoOp(t *testing.T) {
+	recordStopRequest("")
+	clearStopRequest("")
+	if stopRequested("") {
+		t.Fatal("empty logDir must never report a stop")
 	}
 }

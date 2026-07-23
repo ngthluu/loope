@@ -252,6 +252,46 @@ func clearParkCause(logDir string) {
 	_ = os.Remove(filepath.Join(logDir, parkCauseFile))
 }
 
+// stopFile marks an issue as operator-held: work is halted and only an explicit
+// continue resumes it. Unlike the state/park-cause markers, which only mirror a
+// transition, this one is load-bearing in three ways: it tells a running
+// pipeline that its cancelled context was a stop rather than a daemon shutdown;
+// it carries a stop issued from another process to the daemon that owns the
+// run; and it survives a daemon restart so the orphan sweep recovers the issue
+// as stopped instead of parking it for auto-resume. Only the file's EXISTENCE
+// is load-bearing — its RFC3339 content is for human postmortems.
+const stopFile = "stop"
+
+// recordStopRequest writes the stop marker for an issue. Best-effort, like the
+// other log-writers: a no-op on an empty dir and errors are swallowed.
+func recordStopRequest(logDir string) {
+	if logDir == "" {
+		return
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(logDir, stopFile), []byte(time.Now().Format(time.RFC3339)), 0o644)
+}
+
+// stopRequested reports whether the issue is operator-held.
+func stopRequested(logDir string) bool {
+	if logDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(logDir, stopFile))
+	return err == nil
+}
+
+// clearStopRequest removes the stop marker. Called by continue — never by the
+// stop completing, since the marker is the durable record of the hold.
+func clearStopRequest(logDir string) {
+	if logDir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(logDir, stopFile))
+}
+
 // scanLogs reads workDir/logs and returns one Ticket per issue-<N> dir, steps
 // ordered by seq and cost summed, sorted by LastActive descending. A missing
 // logs dir yields an empty slice, not an error.
