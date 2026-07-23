@@ -107,11 +107,11 @@ func TestBugPipelinePromptMentionsAlreadyDoneSentinel(t *testing.T) {
 }
 
 func TestBugPipelineLowConfidenceEscalates(t *testing.T) {
-	count := 0
-	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
-		count++
-		return claudeJSON("CONFIDENCE: 40\nNo stack trace and no repro steps.\nWhich command triggers the crash?", "s1"), "", nil
-	}}
+	// A one-element queue, not a handler: a handler would answer every call with
+	// the same low score, so the call-count assertion below could never catch a
+	// pipeline that kept going.
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON(
+		"CONFIDENCE: 40\nNo stack trace and no repro steps.\nWhich command triggers the crash?", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
 	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "crashes sometimes on startup")
@@ -125,8 +125,8 @@ func TestBugPipelineLowConfidenceEscalates(t *testing.T) {
 	if !strings.Contains(lc.feedback, "repro steps") || strings.Contains(lc.feedback, confidenceSentinel) {
 		t.Errorf("feedback should carry the reasons without the CONFIDENCE line: %q", lc.feedback)
 	}
-	if count != 1 {
-		t.Errorf("low confidence must stop after the debug turn, got %d calls", count)
+	if len(f.calls) != 1 {
+		t.Errorf("low confidence must stop after the debug turn, got %d calls", len(f.calls))
 	}
 }
 
@@ -185,5 +185,10 @@ func TestBugPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
 	var done *alreadyDoneError
 	if errors.As(err, &done) {
 		t.Error("a low-confidence session must not close the issue as already done")
+	}
+	// The feedback is posted verbatim as a public GitHub comment, so the ignored
+	// already-done claim must not leak into it.
+	if strings.Contains(lc.feedback, alreadyDoneSentinel) {
+		t.Errorf("needs-info feedback must not leak the already-done sentinel: %q", lc.feedback)
 	}
 }

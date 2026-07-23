@@ -23,16 +23,24 @@ func TestParseConfidence(t *testing.T) {
 	}
 }
 
-func TestStripConfidenceLine(t *testing.T) {
+func TestSanitizeFeedback(t *testing.T) {
 	in := "CONFIDENCE: 30\nMissing acceptance criteria.\nWhat is the target format?"
-	got := stripConfidenceLine(in)
+	got := sanitizeFeedback(in)
 	want := "Missing acceptance criteria.\nWhat is the target format?"
 	if got != want {
-		t.Errorf("stripConfidenceLine = %q, want %q", got, want)
+		t.Errorf("sanitizeFeedback = %q, want %q", got, want)
 	}
 	// No sentinel: returned trimmed but otherwise unchanged.
-	if got := stripConfidenceLine("  hello  "); got != "hello" {
-		t.Errorf("stripConfidenceLine(no sentinel) = %q", got)
+	if got := sanitizeFeedback("  hello  "); got != "hello" {
+		t.Errorf("sanitizeFeedback(no sentinel) = %q", got)
+	}
+	// A low-confidence reply that also claims already-done: the gate deliberately
+	// ignored that claim, so the sentinel must not reach the public needs-info
+	// comment either.
+	in = "CONFIDENCE: 20\nI cannot tell what behavior is wrong.\nPIPELINE_ALREADY_DONE: looks fine to me"
+	want = "I cannot tell what behavior is wrong."
+	if got := sanitizeFeedback(in); got != want {
+		t.Errorf("sanitizeFeedback = %q, want %q", got, want)
 	}
 }
 

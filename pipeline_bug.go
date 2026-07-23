@@ -27,7 +27,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 	// fixed the bug still ships.
 	if cfg.ConfidenceThreshold > 0 {
 		if score, ok := parseConfidence(res.Result); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: stripConfidenceLine(res.Result)}
+			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(res.Result)}
 		}
 	}
 	if reason, ok := parseAlreadyDone(res.Result); ok {
