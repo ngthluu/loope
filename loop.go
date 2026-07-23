@@ -261,16 +261,16 @@ func classifyCause(msg string) (guidance string, resumable bool) {
 	switch {
 	case strings.Contains(m, "session limit") || strings.Contains(m, "usage limit") ||
 		strings.Contains(m, "rate limit") || strings.Contains(m, "api status 429"):
-		return "Cause: Claude usage/rate limit — the loop auto-resumes it (with backoff) once the limit resets.", true
+		return mustRender("guidance-usage-limit", promptData()), true
 	case strings.Contains(m, "max_turns") || strings.Contains(m, "max turns") ||
 		strings.Contains(m, "max-budget") || strings.Contains(m, "budget"):
-		return "Cause: hit the turn/budget ceiling mid-run — the loop auto-resumes where it stopped (raise the execute maxTurns/maxBudgetUSD if this recurs).", true
+		return mustRender("guidance-budget", promptData()), true
 	case strings.Contains(m, "interrupted mid-run"):
-		return "Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session.", true
+		return mustRender("guidance-interrupted", promptData()), true
 	}
 	for _, sig := range transientSignatures {
 		if strings.Contains(m, sig) {
-			return "Cause: network outage — the loop auto-resumes when connectivity returns.", true
+			return mustRender("guidance-network", promptData()), true
 		}
 	}
 	return "", false
@@ -545,37 +545,50 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 }
 
 func pickupComment(kind, branch string) string {
-	return fmt.Sprintf("🤖 Picked up (%s flow). Branch: `%s`", kind, branch)
+	d := promptData()
+	d["Kind"] = kind
+	d["Branch"] = branch
+	return mustRender("pickup", d)
 }
 
 func alreadyDoneComment(reason string) string {
-	return fmt.Sprintf("🤖 Already implemented — closing. %s", reason)
+	d := promptData()
+	d["Reason"] = reason
+	return mustRender("already-done", d)
 }
 
 func needsInfoComment(score int, label, feedback string) string {
-	return fmt.Sprintf("🤖 Not confident enough to implement (confidence %d/100). Please clarify and remove the `%s` label to re-queue:\n\n%s",
-		score, label, feedback)
+	d := promptData()
+	d["Score"] = score
+	d["Label"] = label
+	d["Feedback"] = feedback
+	return mustRender("needs-info", d)
 }
 
 func parkComment(n int, guidance, errText string) string {
-	c := fmt.Sprintf("🤖 Parked for rework — run `loop -rework %d -config <cfg>`.", n)
-	if guidance != "" {
-		c += "\n" + guidance
-	}
-	if errText != "" {
-		c += fmt.Sprintf("\nError: %s", errText)
-	}
-	return c
+	d := promptData()
+	d["Number"] = n
+	d["Guidance"] = guidance
+	d["Error"] = errText
+	return mustRender("park", d)
 }
 
 func prComment(url string) string {
-	return "🤖 PR: " + url
+	d := promptData()
+	d["URL"] = url
+	return mustRender("pr-comment", d)
 }
 
 func prTitle(title string, n int) string {
-	return fmt.Sprintf("%s (#%d)", title, n)
+	d := promptData()
+	d["Title"] = title
+	d["Number"] = n
+	return mustRender("pr-title", d)
 }
 
 func prBody(n int, kind string) string {
-	return fmt.Sprintf("Closes #%d\n\nAutomated by loope (%s flow). Spec and plan, if any, are committed in this branch under docs/.", n, kind)
+	d := promptData()
+	d["Number"] = n
+	d["Kind"] = kind
+	return mustRender("pr-body", d)
 }
