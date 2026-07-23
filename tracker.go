@@ -196,6 +196,26 @@ func recordState(logDir, label string) {
 	_ = os.WriteFile(filepath.Join(logDir, stateFile), []byte(label), 0o644)
 }
 
+// titleFile holds the issue's GitHub title, mirrored to disk the moment the
+// loop (or the dashboard) learns it. Without it the title lives only in the
+// label-scoped `gh issue list` the dashboard runs, so any issue that drops out
+// of that query — a human editing its labels after it finished, a >100-result
+// repo, GitHub unreachable on a fresh start — renders forever as the
+// "awaiting GitHub title" placeholder even though the run is long done.
+const titleFile = "title"
+
+// recordTitle writes the issue's GitHub title to <logDir>/title. Best-effort,
+// matching the other log-writers.
+func recordTitle(logDir, title string) {
+	if logDir == "" || title == "" {
+		return
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(logDir, titleFile), []byte(title), 0o644)
+}
+
 // recordPR writes the issue's PR URL to <logDir>/pr so the dashboard can link to
 // it without a gh call. Best-effort, matching the other log-writers.
 func recordPR(logDir, url string) {
@@ -337,6 +357,12 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 		if name == stateFile {
 			if data, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
 				tk.StateLabel = strings.TrimSpace(string(data))
+			}
+			continue
+		}
+		if name == titleFile {
+			if data, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
+				tk.Title = strings.TrimSpace(string(data))
 			}
 			continue
 		}
@@ -556,7 +582,12 @@ func overlayIssues(tickets []Ticket, issues []Issue, cfg *Config) []Ticket {
 	for _, is := range issues {
 		state := pickStateLabel(is.Labels, cfg)
 		if idx, ok := byNum[is.Number]; ok {
-			tickets[idx].Title = is.Title
+			// gh is authoritative for the title (the issue may have been
+			// renamed), but a titleless entry must not wipe the one recovered
+			// from the log dir.
+			if is.Title != "" {
+				tickets[idx].Title = is.Title
+			}
 			// A local state marker (written by the loop at the moment it changed
 			// the label) is fresher than the once-fetched gh snapshot, so let it
 			// stand and only fall back to gh's label when there is no local one.

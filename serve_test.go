@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -225,15 +226,17 @@ func TestServeRetriesGitHubUntilSuccess(t *testing.T) {
 	s, r := newTestServerWithRunner(t)
 	now := time.Unix(0, 0)
 	s.now = func() time.Time { return now }
-	// First poll fails, second succeeds, then a fourth response would only be
-	// consumed by an (incorrect) re-fetch. backfillPR runs unconditionally once
-	// per selected ticket regardless of gh success/failure, so it fires on this
-	// very first poll (ticket #142 has no PRURL); the second queued response
-	// answers that lookup ("no PR for this branch") so it doesn't steal the
-	// real issue-list response meant for the second poll.
+	// First poll fails, second succeeds, then a fifth response would only be
+	// consumed by an (incorrect) re-fetch. Two per-ticket backfills also run
+	// once per selected ticket regardless of gh success/failure, and both fire
+	// on this very first poll (ticket #142 has neither a PRURL nor — while the
+	// list is failing — a title): responses 2 and 3 answer them permanently
+	// ("no PR for this branch", "no such issue"), so they are memoized and
+	// don't steal the real issue-list response meant for the second poll.
 	r.queue = []rresp{
 		{err: errors.New("could not connect")},
 		{stdout: `{"url":""}`},
+		{err: errors.New("could not resolve to an issue")},
 		{stdout: `[{"number":142,"title":"Add OAuth login","labels":[{"name":"ai-wip"}]}]`},
 		{stdout: "[]"},
 	}
@@ -248,8 +251,8 @@ func TestServeRetriesGitHubUntilSuccess(t *testing.T) {
 	if _, body := get(t, h, "/?issue=142"); !strings.Contains(body, "Add OAuth login") {
 		t.Fatalf("third poll should reuse the memoized title")
 	}
-	if len(r.calls) != 3 {
-		t.Fatalf("want 3 gh calls (one failed, one succeeded, plus the one-time PR backfill), got %d", len(r.calls))
+	if len(r.calls) != 4 {
+		t.Fatalf("want 4 gh calls (one failed list, one succeeded, plus the one-time PR and title backfills), got %d", len(r.calls))
 	}
 }
 
@@ -325,7 +328,7 @@ func TestDetailShowsGitHubLinksAndSession(t *testing.T) {
 	v := view{Tickets: []Ticket{{Number: 7, Title: "T", SessionID: "abc-123-def", PRURL: "https://github.com/o/r/pull/9", Steps: []Step{{Seq: 1, Label: "execute", Status: StatusRunning}}}}}
 	v.Selected = &v.Tickets[0]
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "detail", v); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "detail", v); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -483,7 +486,7 @@ func TestStepcardRendersTranscript(t *testing.T) {
 		{Kind: "tool_result", IsError: false},
 	}}
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "stepcard", step); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "stepcard", step); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -513,5 +516,287 @@ func TestTxLineEscapesHTML(t *testing.T) {
 	}
 	if !strings.Contains(toolOut, "a &amp; b") {
 		t.Errorf("tool detail not escaped: %q", toolOut)
+	}
+}
+
+// railTitleEnv builds a dashboard over a single issue-<n> log dir (one step, no
+// title file) plus a gh handler that mimics the reported bug: the issue no
+// longer carries the eligible label, so the label-scoped `gh issue list` never
+// returns it — its title is only reachable via a per-issue `gh issue view`.
+func railTitleEnv(t *testing.T, num int, title string) (*Server, *fakeRunner) {
+	t.Helper()
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", fmt.Sprintf("issue-%d", num))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStep(t, dir, 1, "architect", "design the thing", "the design output",
+		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
+	mustWrite(t, filepath.Join(dir, stateFile), "ai-done")
+	cfg := &Config{WorkDir: work, RepoPath: "/clone", RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		switch {
+		case strings.HasPrefix(joined, "issue list"):
+			return "[]", "", nil
+		case strings.HasPrefix(joined, "issue view"):
+			return fmt.Sprintf(`{"title":%q}`, title), "", nil
+		}
+		return "", "", nil
+	}}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, r
+}
+
+// TestServeBackfillsTitleForUnlabeledIssue reproduces issue #16: a finished
+// ticket whose issue lost the eligible label drops out of the label-scoped
+// issue list, leaving the card stuck on the "awaiting GitHub title" placeholder
+// forever. The dashboard must fall back to a per-issue title lookup.
+func TestServeBackfillsTitleForUnlabeledIssue(t *testing.T) {
+	s, _ := railTitleEnv(t, 3, "Enhance: add Stop/Continue")
+	code, body := get(t, s.Handler(), "/?issue=3")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "Enhance: add Stop/Continue") {
+		t.Fatalf("body missing backfilled title: %s", body)
+	}
+	if strings.Contains(body, "awaiting GitHub title") {
+		t.Fatalf("body still shows the placeholder: %s", body)
+	}
+}
+
+// TestServeTitleBackfillPersistsAndIsNotRepeated asserts the backfill is cached
+// like the PR backfill: the title is written to the issue's log dir (so it
+// survives a restart with GitHub unreachable) and `gh issue view` is not
+// re-issued on every 3s poll.
+func TestServeTitleBackfillPersistsAndIsNotRepeated(t *testing.T) {
+	s, r := railTitleEnv(t, 3, "Enhance: add Stop/Continue")
+	for i := 0; i < 3; i++ {
+		get(t, s.Handler(), "/?issue=3")
+	}
+	views := 0
+	for _, c := range r.calls {
+		if c.name == "gh" && strings.HasPrefix(strings.Join(c.args, " "), "issue view") {
+			views++
+		}
+	}
+	if views != 1 {
+		t.Fatalf("gh issue view called %d times, want 1", views)
+	}
+	body, err := os.ReadFile(filepath.Join(s.cfg.WorkDir, "logs", "issue-3", titleFile))
+	if err != nil {
+		t.Fatalf("title not persisted: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "Enhance: add Stop/Continue" {
+		t.Fatalf("persisted title = %q", body)
+	}
+}
+
+// TestServeUsesPersistedTitleWhenGitHubUnreachable is the restart case from the
+// issue: the process comes up with GitHub down, so nothing can be fetched — the
+// title recorded on disk during the run must still render.
+func TestServeUsesPersistedTitleWhenGitHubUnreachable(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-142")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStep(t, dir, 1, "architect", "design the thing", "the design output",
+		`{"result":"the design output","session_id":"a3f9","is_error":false,"total_cost_usd":0.51}`)
+	mustWrite(t, filepath.Join(dir, titleFile), "Add OAuth login")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{handler: func(rcall) (string, string, error) { return "", "", errors.New("could not connect") }}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "Add OAuth login") {
+		t.Fatalf("persisted title missing while gh is down: %s", body)
+	}
+	if strings.Contains(body, "awaiting GitHub title") {
+		t.Fatalf("placeholder shown despite persisted title: %s", body)
+	}
+}
+
+// TestServePersistsFetchedTitles covers the cheap path: when the issue list does
+// return the ticket, its title is mirrored to the log dir so the next restart
+// needs no gh call at all.
+func TestServePersistsFetchedTitles(t *testing.T) {
+	s := newTestServer(t)
+	get(t, s.Handler(), "/?issue=142")
+	body, err := os.ReadFile(filepath.Join(s.cfg.WorkDir, "logs", "issue-142", titleFile))
+	if err != nil {
+		t.Fatalf("fetched title not persisted: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "Add OAuth login" {
+		t.Fatalf("persisted title = %q", body)
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	for _, tc := range []struct{ path, ctPart string }{
+		{"/static/htmx.min.js", "javascript"},
+		{"/static/idiomorph-ext.min.js", "javascript"},
+		{"/static/app.js", "javascript"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", tc.path, rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("%s: empty body", tc.path)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tc.ctPart) {
+			t.Fatalf("%s: content-type = %q, want it to contain %q", tc.path, ct, tc.ctPart)
+		}
+	}
+}
+
+func TestStaticUnknownPath404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, _ := get(t, h, "/static/nope.js")
+	if code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+}
+
+// The asset tree is an implementation detail: net/http's file server would
+// happily render a directory index for it, which is an endpoint the dashboard
+// never had and never wants.
+func TestStaticDirectoryListingIs404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	// "/static/." is not covered here: ServeMux normalizes it to "/static/"
+	// with a 301 before any handler sees it.
+	code, body := get(t, h, "/static/")
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", code)
+	}
+	if strings.Contains(body, "app.js") {
+		t.Errorf("body listed the asset directory: %q", body)
+	}
+}
+
+func TestPageWiresHTMXPolling(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	for _, want := range []string{
+		`src="/static/htmx.min.js"`,
+		`src="/static/idiomorph-ext.min.js"`,
+		`src="/static/app.js"`,
+		`hx-ext="morph"`,
+		`hx-get="/rail?issue=142"`,
+		`hx-get="/detail?issue=142"`,
+		`hx-trigger="every 3s"`,
+		`hx-swap="morph:innerHTML"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page missing %q", want)
+		}
+	}
+}
+
+// The rail's ticket rows and the pipeline's step cards must stay keyed, so
+// idiomorph matches them by identity instead of rebuilding them on every poll.
+// The key has to be `id`: idiomorph builds its match sets from id attributes
+// only, so a bespoke data-* key would look keyed while morphing positionally.
+func TestPollFragmentsAreKeyed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, rail := get(t, h, "/rail?issue=142")
+	if !strings.Contains(rail, `id="t142"`) {
+		t.Fatalf("rail row not keyed: %s", rail)
+	}
+	_, detail := get(t, h, "/detail?issue=142")
+	if !strings.Contains(detail, `id="s1"`) {
+		t.Fatalf("step card not keyed: %s", detail)
+	}
+}
+
+func TestRailFragmentCarriesOOBStatbar(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/rail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-swap-oob="true"`) {
+		t.Fatalf("rail fragment carries no out-of-band statbar: %s", body)
+	}
+	if !strings.Contains(body, `id="statbar"`) {
+		t.Fatalf("out-of-band statbar has no id to swap into: %s", body)
+	}
+	// The stats the header shows must be in the fragment: one ticket, none
+	// running (the seeded step is settled), $0.51 spent.
+	for _, want := range []string{`id="stat-tickets" class="text-base font-semibold tabular-nums text-text">1<`, `id="stat-running">0<`, `>$0.51<`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("statbar missing %q: %s", want, body)
+		}
+	}
+	// The dead patching hook is gone.
+	if strings.Contains(body, "railmeta") {
+		t.Fatalf("rail still emits the obsolete #railmeta element")
+	}
+}
+
+// TestAppCSSCoversBothClassSources is the guard against the manual Tailwind
+// regeneration step being skipped. Half the dashboard's classes exist only in
+// templates and half only in Go helpers, so app.css is checked for one sentinel
+// from each source. A miss means someone changed classes without re-running:
+//
+//	tailwindcss -i web/tailwind.css -o web/static/app.css --minify
+func TestAppCSSCoversBothClassSources(t *testing.T) {
+	css, err := webFS.ReadFile("web/static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(css) < 4096 {
+		t.Fatalf("app.css is only %d bytes — the Tailwind build produced nothing useful", len(css))
+	}
+	for _, want := range []string{
+		`line-clamp-2`, // template-only: web/templates/rail.html
+		`bg-ok\/50`,    // Go-only: stripeClass in render.go
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Fatalf("app.css missing %q — regenerate it: tailwindcss -i web/tailwind.css -o web/static/app.css --minify", want)
+		}
+	}
+}
+
+func TestStaticCSSServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/static/app.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("empty body")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
+		t.Fatalf("content-type = %q, want text/css", ct)
+	}
+}
+
+func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, body := get(t, h, "/")
+	if !strings.Contains(body, `href="/static/app.css"`) {
+		t.Fatalf("page does not link the vendored stylesheet")
+	}
+	if strings.Contains(body, "cdn.tailwindcss.com") {
+		t.Fatalf("page still loads the Tailwind browser CDN")
 	}
 }

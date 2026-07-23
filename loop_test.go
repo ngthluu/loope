@@ -995,3 +995,21 @@ func TestHandleIssuePanicParksIssue(t *testing.T) {
 		t.Errorf("freeSlots after a panicking pipeline = %d, want 1 (slot must be released)", free)
 	}
 }
+
+// TestHandleIssueRecordsTitle asserts pickup mirrors the issue title into the
+// log dir, so the dashboard can name the ticket after a restart without a
+// label-scoped gh query returning it (issue #16).
+func TestHandleIssueRecordsTitle(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(o.issueLogDir(7), titleFile))
+	if err != nil {
+		t.Fatalf("title not recorded: %v", err)
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		t.Fatal("recorded title is empty")
+	}
+}
