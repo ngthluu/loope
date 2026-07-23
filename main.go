@@ -119,6 +119,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("dashboard: %v", err)
 	}
+	srv.orch = o // enable the /stop and /continue mutation endpoints
 	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()

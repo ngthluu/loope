@@ -31,7 +31,9 @@ type Orchestrator struct {
 	inFlight      sync.WaitGroup   // one Add per acquired slot; drained on shutdown
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
-	now           func() time.Time // test seam; nil means time.Now
+	cancels       map[int]context.CancelFunc // per-issue cancel for the in-flight ProcessOnce pipeline
+	stopping      map[int]bool               // issues whose current run was deliberately stopped
+	now           func() time.Time           // test seam; nil means time.Now
 }
 
 type backoffState struct {
@@ -48,6 +50,77 @@ const (
 // restart interrupted mid-pipeline. classifyCause treats it as resumable so the
 // preserved worktree/session is auto-resumed (with backoff) rather than re-run.
 const interruptedCause = "interrupted mid-run by a daemon restart"
+
+// errNotRunning is returned by Stop when no pipeline is in flight for the issue
+// (never started, already finished, or a double Stop) — a no-op, surfaced to the
+// dashboard as an inline message rather than an error.
+var errNotRunning = errors.New("issue is not running")
+
+// errAlreadyRunning is returned by Continue when the issue's pipeline is already
+// in flight, so there is nothing to re-queue.
+var errAlreadyRunning = errors.New("issue is already running")
+
+// setCancel registers the in-flight pipeline's cancel func for issue n so Stop
+// can cancel that one ticket's claude subprocess. Guarded by mu.
+func (o *Orchestrator) setCancel(n int, cancel context.CancelFunc) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.cancels == nil {
+		o.cancels = map[int]context.CancelFunc{}
+	}
+	o.cancels[n] = cancel
+}
+
+// clearCancel forgets issue n's cancel func once its pipeline goroutine returns.
+// Guarded by mu. The context's own resources are released by the goroutine's
+// defer cancel(); this only removes the map entry Stop looks up.
+func (o *Orchestrator) clearCancel(n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.cancels, n)
+}
+
+// isStopping reports whether a Stop was requested for issue n's current run.
+// Guarded by mu.
+func (o *Orchestrator) isStopping(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.stopping[n]
+}
+
+// consumeStopping reports whether a Stop was requested for issue n and clears the
+// flag if so, so the pipeline goroutine transitions to ai-stopped exactly once.
+// Guarded by mu.
+func (o *Orchestrator) consumeStopping(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stopping[n] {
+		delete(o.stopping, n)
+		return true
+	}
+	return false
+}
+
+// Stop cancels the in-flight pipeline for issue n mid-turn and flags the run so
+// its goroutine parks the ticket as ai-stopped (via pause) as it unwinds. It
+// returns immediately — the label transition is eventually consistent, surfacing
+// on the dashboard's 3s poll a moment later. A ticket with no pipeline in flight
+// (never started, already finished, double Stop) returns errNotRunning: a no-op.
+func (o *Orchestrator) Stop(n int) error {
+	o.mu.Lock()
+	cancel, ok := o.cancels[n]
+	if !ok {
+		o.mu.Unlock()
+		return errNotRunning
+	}
+	if o.stopping == nil {
+		o.stopping = map[int]bool{}
+	}
+	o.stopping[n] = true
+	o.mu.Unlock()
+	cancel() // kills the claude subprocess via exec.CommandContext
+	return nil
+}
 
 func (o *Orchestrator) clock() time.Time {
 	if o.now != nil {
@@ -104,22 +177,43 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 			continue
 		}
 		go func(p pick) {
-			// release is deferred FIRST so it runs LAST: a panicking pipeline
-			// parks the issue in the recover handler below and still returns
-			// its slot.
-			defer o.release(p.issue.Number)
-			// A panic in one pipeline must not kill the daemon or the sibling
-			// pipelines: park the issue with the panic as its (non-resumable)
-			// cause, preserving worktree and logs for a human.
+			n := p.issue.Number
+			// release is deferred FIRST so it runs LAST: a panicking pipeline parks
+			// the issue in the recover handler below and still returns its slot.
+			defer o.release(n)
+			// Derive a per-ticket child ctx and register its cancel so Stop can kill
+			// this one pipeline's claude subprocess without touching its siblings.
+			cctx, cancel := context.WithCancel(ctx)
+			defer cancel() // release the context's resources when the goroutine ends
+			o.setCancel(n, cancel)
+			defer o.clearCancel(n)
+			// One deferred handler owns BOTH panic recovery and the stop outcome, so
+			// the stopping flag is consumed on every exit path. A panic in one
+			// pipeline must not kill the daemon or the sibling pipelines: park the
+			// issue with the panic as its (non-resumable) cause, preserving worktree
+			// and logs for a human. Uses the LIVE parent ctx. Consuming the flag even
+			// on the panic path is what stops it leaking: a flag left set would never
+			// be cleared (clearCancel only clears cancels) and would spuriously stop
+			// the issue's next run.
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("issue #%d: pipeline panic: %v\n%s", p.issue.Number, r, debug.Stack())
-					_ = o.park(ctx, p.issue.Number, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
+					log.Printf("issue #%d: pipeline panic: %v\n%s", n, r, debug.Stack())
+					// The panic outcome wins over a pending stop — a human should look —
+					// so consume the flag (preventing a leak) and park, don't pause.
+					o.consumeStopping(n)
+					_ = o.park(ctx, n, o.cfg.StateLabels.WIP, fmt.Errorf("panic: %v", r))
+					return
+				}
+				// A Stop observed during the run transitions the ticket to ai-stopped
+				// here, on the live parent ctx (the child ctx is cancelled). handleIssue
+				// already skipped its normal outcome, leaving the ticket ai-wip for this.
+				if o.consumeStopping(n) {
+					o.pause(ctx, n)
 				}
 			}()
-			log.Printf("issue #%d (%s): %s", p.issue.Number, p.kind, p.reason)
-			if err := o.handleIssue(ctx, p.issue, p.kind, base); err != nil {
-				log.Printf("issue #%d: pipeline failed: %v", p.issue.Number, err)
+			log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
+			if err := o.handleIssue(cctx, p.issue, p.kind, base); err != nil {
+				log.Printf("issue #%d: pipeline failed: %v", n, err)
 			}
 		}(picks[i])
 	}
@@ -184,6 +278,12 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content)
 	} else {
 		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath))
+	}
+	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
+	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
+	// transitions it to ai-stopped on the live parent ctx.
+	if o.isStopping(n) {
+		return nil
 	}
 	var done *alreadyDoneError
 	if errors.As(perr, &done) {
@@ -313,6 +413,73 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Rework)
 	recordParkCause(o.issueLogDir(n), cause.Error())
 	return cause
+}
+
+// pause is the terminal outcome for a user-stopped run: swap ai-wip->ai-stopped,
+// record the state, and comment. It runs on the LIVE parent ctx (the pipeline's
+// child ctx is already cancelled, so its GitHub calls would fail). It
+// deliberately does NOT touch the worktree, branch, logs, or session file, and
+// records NO park cause — so no auto-resume path (SweepOrphans queries ai-wip,
+// ResumeParked queries ai-rework) will ever act on a stopped ticket. It stays
+// put until the user hits Continue. If the swap fails, it records nothing and
+// does not comment: local state must never claim ai-stopped while the real label
+// still reads ai-wip.
+func (o *Orchestrator) pause(ctx context.Context, n int) {
+	logDir := o.issueLogDir(n)
+	// The swap is the source of truth. It can fail because GitHub is unreachable,
+	// or because the ticket already left ai-wip (a ship/park won the stop's narrow
+	// race window). Either way, bail before recording state or commenting: writing
+	// ai-stopped locally would diverge from the real label — the dashboard would
+	// show stopped while GitHub still reads ai-wip, and SweepOrphans could act on
+	// the "stopped" ticket — and the notice would falsely annotate a ticket that
+	// never actually stopped.
+	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped); err != nil {
+		log.Printf("issue #%d: stop swap %s->%s failed, leaving state unchanged: %v", n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped, err)
+		return
+	}
+	recordState(logDir, o.cfg.StateLabels.Stopped)
+	_ = o.gh.Comment(ctx, n, stoppedComment())
+}
+
+// stoppedComment is the fixed notice posted when a run is stopped by the user.
+func stoppedComment() string {
+	return "⏸ Stopped by user. Worktree, logs and session are preserved. Press Continue to resume."
+}
+
+// Continue re-queues a stopped issue for a deferred resume: it only rewrites
+// labels/state on disk, and the next runLoop cycle picks it up when a slot is
+// free (never synchronously, never bypassing the concurrency budget). With a
+// preserved session it hands the issue to the auto-resume path (ai-stopped ->
+// ai-rework + a resumable park cause, so ResumeParked -> Rework resumes from the
+// session id). Without a session it re-queues from scratch (remove ai-stopped,
+// clear state/cause, so the issue is eligible again and ProcessOnce runs a fresh
+// pipeline; the worktree, if any, is reused per the project's continue-not-reset
+// rule). Being label-driven, it survives a daemon restart — the maps are empty
+// but the session file on disk is the source of truth. Returns errAlreadyRunning
+// if the issue's pipeline is somehow already in flight.
+func (o *Orchestrator) Continue(ctx context.Context, n int) error {
+	o.mu.Lock()
+	_, running := o.active[n]
+	o.mu.Unlock()
+	if running {
+		return errAlreadyRunning
+	}
+	logDir := o.issueLogDir(n)
+	si, _ := readSession(logDir)
+	if si.SessionID != "" {
+		if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.Stopped, o.cfg.StateLabels.Rework); err != nil {
+			return err
+		}
+		recordState(logDir, o.cfg.StateLabels.Rework)
+		recordParkCause(logDir, interruptedCause)
+		return nil
+	}
+	if err := o.gh.RemoveLabel(ctx, n, o.cfg.StateLabels.Stopped); err != nil {
+		return err
+	}
+	clearState(logDir)
+	clearParkCause(logDir)
+	return nil
 }
 
 // ResumeParked scans ai-rework issues and re-runs Rework on the ones parked for

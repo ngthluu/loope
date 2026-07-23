@@ -50,6 +50,7 @@ Label names are configurable — see [`stateLabels`](configuration.md#statelabel
 | `ai-done`       | PR created; issue leaves the queue                                |
 | `ai-rework`     | Pipeline hit an error; progress preserved for manual rework       |
 | `ai-needs-info` | Brainstorm wasn't confident enough; awaiting author clarification |
+| `ai-stopped`    | You stopped the run from the dashboard; preserved, awaiting Continue |
 
 On failure the loop comments the error on the issue, swaps `ai-wip` →
 `ai-rework`, and **preserves** the worktree, branch, logs, and the Claude session
@@ -61,6 +62,13 @@ resumable `ai-rework` issues (backoff-gated), continuing the saved Claude sessio
 in the preserved worktree, finishing the work, and shipping the PR (swapping
 `ai-rework` → `ai-done`). If the worktree or session file is gone, remove the
 `ai-rework` label to re-queue the issue from scratch.
+
+You can also **Stop** a running ticket from the dashboard and **Continue** it
+later — see [the dashboard docs](dashboard.md#stop-and-continue-a-ticket). A stop
+swaps `ai-wip` → `ai-stopped` and preserves everything; because `ai-stopped` is
+neither `ai-wip` nor `ai-rework`, no auto-resume or crash-sweep path ever touches
+it, so a stopped ticket stays put (even across a daemon restart) until you hit
+Continue.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing
 > `ai-failed` issues are still recognized and stay out of the queue.

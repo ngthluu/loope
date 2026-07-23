@@ -288,7 +288,7 @@ func TestBuildTicketsGHArgvNoEligibleLabel(t *testing.T) {
 	if _, ghErr := BuildTickets(context.Background(), r, cfg); ghErr != nil {
 		t.Fatalf("unexpected gh error: %v", ghErr)
 	}
-	if got := argAfter(r.calls[0].args, "--search"); got != "label:ai-wip,ai-done,ai-rework" {
+	if got := argAfter(r.calls[0].args, "--search"); got != "label:ai-wip,ai-done,ai-rework,ai-stopped" {
 		t.Fatalf("--search = %q, want the shared state-label fallback", got)
 	}
 }

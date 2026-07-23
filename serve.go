@@ -35,6 +35,7 @@ type Server struct {
 	cfg    *Config
 	gh     *GitHub
 	tmpl   *template.Template
+	orch   *Orchestrator // mutation endpoints (/stop, /continue); nil for read-only servers
 
 	ttl time.Duration
 	now func() time.Time
@@ -61,12 +62,19 @@ func NewServer(r Runner, cfg *Config) (*Server, error) {
 
 // Handler returns the dashboard's HTTP routes: GET / (full page), GET /rail
 // (the rail poll fragment), GET /detail (the detail-pane poll fragment), and
-// GET /static/ (the embedded JS/CSS assets).
+// GET /static/ (the embedded JS/CSS assets). The POST /stop and POST /continue
+// mutation routes are registered only when an orchestrator is wired (the daemon);
+// a read-only server (orch == nil) never exposes them, so a POST is refused with
+// a clean 405 instead of dereferencing the nil orchestrator and panicking.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /rail", s.handleRail)
 	mux.HandleFunc("GET /detail", s.handleDetail)
+	if s.orch != nil {
+		mux.HandleFunc("POST /stop", s.handleStop)
+		mux.HandleFunc("POST /continue", s.handleContinue)
+	}
 	mux.Handle("GET /static/", staticHandler())
 	return mux
 }
@@ -84,6 +92,7 @@ type view struct {
 	Tickets  []Ticket
 	Selected *Ticket
 	GHError  string
+	Notice   string
 	Stats    stats
 }
 
@@ -284,6 +293,50 @@ func (s *Server) handleRail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 	v := s.load(r.Context(), r.URL.Query().Get("issue"))
 	renderHTML(w, s.tmpl, "detail", v)
+}
+
+// handleStop cancels the running pipeline for the posted issue and re-renders the
+// detail fragment. Stop is asynchronous, so the fragment may still show ai-wip;
+// the 3s poll shows the flip to stopped a moment later.
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	s.mutate(w, r, func(n int) error { return s.orch.Stop(n) })
+}
+
+// handleContinue re-queues the posted stopped issue for a deferred resume and
+// re-renders the detail fragment (already showing the new ai-rework/eligible
+// state, since Continue rewrites the labels synchronously).
+func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
+	s.mutate(w, r, func(n int) error { return s.orch.Continue(r.Context(), n) })
+}
+
+// mutate parses the issue number, runs the orchestrator action, and renders the
+// refreshed detail fragment htmx swaps into #main. A sentinel error (the ticket
+// finished between render and click, or is already running) is a non-fatal inline
+// notice, not an HTTP error; only a malformed issue number is a 400.
+func (s *Server) mutate(w http.ResponseWriter, r *http.Request, action func(int) error) {
+	n, err := strconv.Atoi(r.FormValue("issue"))
+	if err != nil {
+		http.Error(w, "invalid issue number", http.StatusBadRequest)
+		return
+	}
+	actErr := action(n)
+	v := s.load(r.Context(), strconv.Itoa(n))
+	if actErr != nil {
+		v.Notice = actionNotice(actErr)
+	}
+	renderHTML(w, s.tmpl, "detail", v)
+}
+
+// actionNotice maps a mutation error to a friendly inline message.
+func actionNotice(err error) string {
+	switch err {
+	case errNotRunning:
+		return "That ticket is not running — it may have already finished."
+	case errAlreadyRunning:
+		return "That ticket is already running."
+	default:
+		return "Action failed: " + err.Error()
+	}
 }
 
 // renderHTML executes a template into a buffer before touching the

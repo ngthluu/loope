@@ -800,3 +800,144 @@ func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
 		t.Fatalf("page still loads the Tailwind browser CDN")
 	}
 }
+
+func post(t *testing.T, h http.Handler, target string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, nil).WithContext(context.Background())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// serverWithOrch builds a Server and a real Orchestrator sharing one fake runner
+// and workDir, with issue 7's log dir seeded to the given state.
+func serverWithOrch(t *testing.T, state string, session bool) (*Server, *fakeEnv) {
+	t.Helper()
+	env := newFakeEnv(t)
+	cfg := &Config{
+		RepoPath: "/clone", RepoSlug: "org/repo", EligibleLabel: "ai-agent",
+		WorkDir: env.wtDir, MaxQARounds: 3, StateLabels: defaultStateLabels(),
+		Models: Models{Architect: ModelConfig{Model: "opus"}, Triage: ModelConfig{Model: "sonnet"}},
+	}
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if session {
+		if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordState(logDir, state)
+	o := &Orchestrator{cfg: cfg, runner: env.f, gh: NewGitHub(env.f, cfg), wt: &Worktree{runner: env.f, repoPath: cfg.RepoPath}}
+	o.gh.retry = testRetry
+	s, err := NewServer(env.f, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.orch = o
+	return s, env
+}
+
+func TestContinueRouteQueuesReworkAndRendersFragment(t *testing.T) {
+	s, env := serverWithOrch(t, "ai-stopped", true /* session */)
+	code, body := post(t, s.Handler(), "/continue?issue=7")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if strings.Contains(body, "<html") {
+		t.Fatal("continue should return the detail fragment, not a full page")
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
+		t.Fatalf("continue did not queue rework, got %v", swap)
+	}
+}
+
+func TestStopRouteInvokesOrchestratorAndRenders(t *testing.T) {
+	s, _ := serverWithOrch(t, "ai-wip", true)
+	// Nothing is in flight, so Stop returns errNotRunning and we render an inline
+	// notice — not a 5xx.
+	code, body := post(t, s.Handler(), "/stop?issue=7")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (sentinel is non-fatal)", code)
+	}
+	if !strings.Contains(body, "not running") {
+		t.Fatalf("expected an inline not-running notice, got: %s", body)
+	}
+}
+
+func TestMutateRouteRejectsBadIssue(t *testing.T) {
+	s, _ := serverWithOrch(t, "ai-wip", true)
+	code, _ := post(t, s.Handler(), "/stop?issue=abc")
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a non-numeric issue", code)
+	}
+}
+
+func TestMutationRoutesDisabledOnReadOnlyServer(t *testing.T) {
+	// A server built without an orchestrator (orch == nil) is read-only. The
+	// mutation routes must not be exposed at all — POSTing to one has to be refused
+	// cleanly, never dereference the nil orchestrator and panic.
+	h := newTestServer(t).Handler() // no orch wired
+	for _, route := range []string{"/stop?issue=142", "/continue?issue=142"} {
+		code, _ := post(t, h, route)
+		if code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s on a read-only server = %d, want 405 (route not exposed)", route, code)
+		}
+	}
+}
+
+func TestStateKindMapsStopped(t *testing.T) {
+	cfg := &Config{StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
+	if got := stateKind(cfg, "ai-stopped"); got != "stopped" {
+		t.Fatalf("stateKind(ai-stopped) = %q, want stopped", got)
+	}
+	if got := stripeClass(cfg, "ai-stopped"); got == "bg-line2" || got == "" {
+		t.Fatalf("stripeClass(ai-stopped) = %q, want a distinct stopped tone", got)
+	}
+}
+
+func TestPickStateLabelPrefersStoppedOverEligible(t *testing.T) {
+	cfg := &Config{StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
+	labels := []Label{{Name: "ai-agent"}, {Name: "ai-stopped"}}
+	if got := pickStateLabel(labels, cfg); got != "ai-stopped" {
+		t.Fatalf("pickStateLabel = %q, want ai-stopped (not the eligible label)", got)
+	}
+}
+
+func TestDetailRendersStopButtonForWip(t *testing.T) {
+	// newTestServer seeds issue 142 labeled ai-wip.
+	code, body := get(t, newTestServer(t).Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-post="/stop?issue=142"`) {
+		t.Fatalf("wip detail should render a Stop button, got: %s", body)
+	}
+	if strings.Contains(body, `hx-post="/continue?issue=142"`) {
+		t.Fatal("wip detail must not render a Continue button")
+	}
+}
+
+func TestDetailRendersContinueButtonForStopped(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-142")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(dir, "ai-stopped")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":142,"title":"Add OAuth","labels":[{"name":"ai-agent"},{"name":"ai-stopped"}]}]`}}}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-post="/continue?issue=142"`) {
+		t.Fatalf("stopped detail should render a Continue button, got: %s", body)
+	}
+}

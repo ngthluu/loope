@@ -1013,3 +1013,254 @@ func TestHandleIssueRecordsTitle(t *testing.T) {
 		t.Fatal("recorded title is empty")
 	}
 }
+
+func TestCancellationHelpers(t *testing.T) {
+	o := &Orchestrator{}
+	called := false
+	o.setCancel(7, func() { called = true })
+
+	// isStopping is false until a stop is flagged.
+	if o.isStopping(7) {
+		t.Fatal("isStopping(7) = true before any stop")
+	}
+	// consumeStopping is false when nothing is flagged.
+	if o.consumeStopping(7) {
+		t.Fatal("consumeStopping(7) = true with no flag set")
+	}
+
+	o.stopping = map[int]bool{7: true}
+	if !o.isStopping(7) {
+		t.Fatal("isStopping(7) = false after flag set")
+	}
+	if !o.consumeStopping(7) {
+		t.Fatal("consumeStopping(7) = false after flag set")
+	}
+	// consume cleared it.
+	if o.isStopping(7) {
+		t.Fatal("consumeStopping did not clear the flag")
+	}
+
+	o.clearCancel(7)
+	if _, ok := o.cancels[7]; ok {
+		t.Fatal("clearCancel did not remove the cancel func")
+	}
+	_ = called
+}
+
+func TestStopFlagsAndCancelsRunningTicket(t *testing.T) {
+	o := &Orchestrator{}
+	cancelled := false
+	o.setCancel(7, func() { cancelled = true })
+
+	if err := o.Stop(7); err != nil {
+		t.Fatalf("Stop(7) on a running ticket: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("Stop did not invoke the registered cancel func")
+	}
+	if !o.isStopping(7) {
+		t.Fatal("Stop did not set the stopping flag")
+	}
+}
+
+func TestStopNotRunningReturnsSentinel(t *testing.T) {
+	o := &Orchestrator{}
+	if err := o.Stop(99); err != errNotRunning {
+		t.Fatalf("Stop(99) with nothing in flight = %v, want errNotRunning", err)
+	}
+}
+
+func TestPauseTransitionsToStoppedAndPreservesState(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A recorded session that pause must leave untouched.
+	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-wip")
+
+	o.pause(context.Background(), 7)
+
+	// ai-wip -> ai-stopped as one atomic swap.
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-stopped") {
+		t.Fatalf("want single ai-wip->ai-stopped swap, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-stopped" {
+		t.Fatalf("local state = %q, want ai-stopped", got)
+	}
+	// Session preserved.
+	if si, err := readSession(logDir); err != nil || si.SessionID != "s1" {
+		t.Fatalf("session not preserved: %+v err=%v", si, err)
+	}
+	// No park cause recorded — nothing auto-resumes a stopped ticket.
+	if c := readParkCause(logDir); c != "" {
+		t.Fatalf("pause recorded a park cause %q, want none", c)
+	}
+	// A stop comment was posted.
+	var commented bool
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "Stopped by user") {
+			commented = true
+		}
+	}
+	if !commented {
+		t.Fatal("pause did not comment the stop notice")
+	}
+}
+
+func TestStopDuringPipelineParksAsStopped(t *testing.T) {
+	env := newFakeEnv(t) // issue 7 eligible; pipeline succeeds unless stopped
+	o := env.orchestrator()
+	started, release := gatePipelines(o, env.f)
+
+	go func() { _ = o.ProcessOnce(context.Background()) }()
+	n := awaitStarted(t, started, 1)[0]
+
+	if err := o.Stop(n); err != nil {
+		t.Fatalf("Stop(%d): %v", n, err)
+	}
+	close(release) // let the gated claude call return
+	o.Wait()
+
+	// The run ends in ai-stopped, not shipped.
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-stopped") {
+		t.Fatalf("want ai-wip->ai-stopped swap, got %v", swap)
+	}
+	if got := env.readLocalState(n); got != "ai-stopped" {
+		t.Fatalf("local state = %q, want ai-stopped", got)
+	}
+	// Ship was skipped: no PR created.
+	if pr := env.callsMatching("gh", "pr create"); len(pr) != 0 {
+		t.Fatalf("a stopped run must not ship a PR, got %v", pr)
+	}
+}
+
+func TestContinueWithSessionQueuesRework(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-stopped")
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
+		t.Fatalf("want ai-stopped->ai-rework swap, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-rework" {
+		t.Fatalf("local state = %q, want ai-rework", got)
+	}
+	if c := readParkCause(logDir); c != interruptedCause {
+		t.Fatalf("park cause = %q, want %q (resumable)", c, interruptedCause)
+	}
+}
+
+func TestContinueWithoutSessionRequeuesEligible(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-stopped")
+	recordParkCause(logDir, "whatever")
+
+	if err := o.Continue(context.Background(), 7); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	// ai-stopped removed (not swapped) so the ticket falls back to eligible.
+	rm := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
+		t.Fatalf("want a bare ai-stopped removal, got %v", rm)
+	}
+	if got := env.readLocalState(7); got != "" {
+		t.Fatalf("local state = %q, want cleared", got)
+	}
+	if c := readParkCause(logDir); c != "" {
+		t.Fatalf("park cause = %q, want cleared", c)
+	}
+}
+
+func TestContinueWhileRunningReturnsSentinel(t *testing.T) {
+	o := &Orchestrator{active: map[int]struct{}{7: {}}}
+	if err := o.Continue(context.Background(), 7); err != errAlreadyRunning {
+		t.Fatalf("Continue while running = %v, want errAlreadyRunning", err)
+	}
+}
+
+func TestPauseSwapFailureLeavesStateUnchanged(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	// Make the ai-wip->ai-stopped swap fail — either GitHub is unreachable, or the
+	// ticket already left ai-wip (a ship/park won the stop's narrow race window).
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.Contains(joined, "--remove-label ai-wip") && strings.Contains(joined, "--add-label ai-stopped") {
+			return "", "label ai-wip not found", fmt.Errorf("exit 1")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-wip")
+
+	o.pause(context.Background(), 7)
+
+	// The swap failed, so local state must NOT flip to ai-stopped: recording it
+	// would diverge from the real label — the dashboard would show stopped while
+	// GitHub still reads ai-wip, and SweepOrphans could act on the "stopped" ticket.
+	if got := env.readLocalState(7); got != "ai-wip" {
+		t.Fatalf("local state = %q, want unchanged ai-wip after a failed swap", got)
+	}
+	// And no spurious stop notice on a ticket that never actually stopped.
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "Stopped by user") {
+			t.Fatalf("posted a stop notice despite the swap failing: %v", c)
+		}
+	}
+}
+
+func TestStopFlagConsumedWhenPipelinePanics(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	// Blow up while handleIssue applies the ai-wip label, simulating a pipeline
+	// that panics mid-run after a Stop was already flagged for the ticket.
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.Contains(joined, "issue edit") && strings.Contains(joined, "--add-label ai-wip") {
+			panic("boom mid-pipeline")
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	o.stopping = map[int]bool{7: true} // a Stop landed just before the panic
+
+	_ = o.ProcessOnce(context.Background())
+	o.Wait()
+
+	// The panic's recover handler must consume the stop flag. A leaked flag would
+	// make isStopping(7) true forever and spuriously stop issue 7's very next run.
+	if o.isStopping(7) {
+		t.Fatal("stopping flag leaked after a panic: issue 7's next run would be wrongly stopped")
+	}
+	// The panic outcome wins over the pending stop: the issue is parked for a human.
+	if got := env.readLocalState(7); got != "ai-rework" {
+		t.Fatalf("local state = %q, want ai-rework (parked after panic)", got)
+	}
+}
