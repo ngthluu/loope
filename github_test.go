@@ -11,6 +11,14 @@ func testGitHub(f *fakeRunner) *GitHub {
 	return NewGitHub(f, &Config{RepoPath: "/clone", RepoSlug: "org/repo", StateLabels: defaultStateLabels()})
 }
 
+func TestHasStateLabelExcludesStopped(t *testing.T) {
+	g := NewGitHub(&fakeRunner{}, &Config{RepoSlug: "o/r", StateLabels: defaultStateLabels()})
+	is := Issue{Number: 5, Labels: []Label{{Name: "ai-agent"}, {Name: "ai-stopped"}}}
+	if !g.hasStateLabel(is) {
+		t.Fatal("an issue carrying ai-stopped must count as having a state label (dropped from the eligible queue)")
+	}
+}
+
 func TestHasStateLabelIncludesNeedsInfo(t *testing.T) {
 	g := &GitHub{state: defaultStateLabels()}
 	is := Issue{Labels: []Label{{Name: "ai-agent"}, {Name: "ai-needs-info"}}}

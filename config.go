@@ -15,6 +15,7 @@ const (
 	labelDone      = "ai-done"
 	labelRework    = "ai-rework"
 	labelNeedsInfo = "ai-needs-info"
+	labelStopped   = "ai-stopped"
 )
 
 type ModelConfig struct {
@@ -65,10 +66,11 @@ type StateLabels struct {
 	Done      string `json:"done"`
 	Rework    string `json:"rework"`
 	NeedsInfo string `json:"needsInfo"`
+	Stopped   string `json:"stopped"`
 }
 
 func defaultStateLabels() StateLabels {
-	return StateLabels{WIP: labelWIP, Failed: labelFailed, Done: labelDone, Rework: labelRework, NeedsInfo: labelNeedsInfo}
+	return StateLabels{WIP: labelWIP, Failed: labelFailed, Done: labelDone, Rework: labelRework, NeedsInfo: labelNeedsInfo, Stopped: labelStopped}
 }
 
 // RetryConfig is the JSON-facing form of RetryPolicy: durations in seconds.

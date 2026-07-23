@@ -97,7 +97,7 @@ func (g *GitHub) ListIssuesWithLabel(ctx context.Context, label string) ([]Issue
 func (g *GitHub) hasStateLabel(is Issue) bool {
 	for _, l := range is.Labels {
 		if l.Name == g.state.WIP || l.Name == g.state.Failed || l.Name == g.state.Done ||
-			l.Name == g.state.Rework || l.Name == g.state.NeedsInfo {
+			l.Name == g.state.Rework || l.Name == g.state.NeedsInfo || l.Name == g.state.Stopped {
 			return true
 		}
 	}

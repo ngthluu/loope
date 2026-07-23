@@ -79,13 +79,19 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultStateLabelsIncludesStopped(t *testing.T) {
+	if got := defaultStateLabels().Stopped; got != "ai-stopped" {
+		t.Fatalf("defaultStateLabels().Stopped = %q, want ai-stopped", got)
+	}
+}
+
 func TestLoadConfigStateLabelDefaults(t *testing.T) {
 	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w"}`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := StateLabels{WIP: "ai-wip", Failed: "ai-failed", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info"}
+	want := StateLabels{WIP: "ai-wip", Failed: "ai-failed", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info", Stopped: "ai-stopped"}
 	if cfg.StateLabels != want {
 		t.Errorf("StateLabels = %+v, want %+v", cfg.StateLabels, want)
 	}
@@ -100,7 +106,7 @@ func TestLoadConfigStateLabelPartialOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := StateLabels{WIP: "bot-wip", Failed: "ai-failed", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info"}
+	want := StateLabels{WIP: "bot-wip", Failed: "ai-failed", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info", Stopped: "ai-stopped"}
 	if cfg.StateLabels != want {
 		t.Errorf("StateLabels = %+v, want %+v", cfg.StateLabels, want)
 	}
