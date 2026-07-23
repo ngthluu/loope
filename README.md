@@ -98,14 +98,22 @@ all preserved.
 ```
 
 `-stop` works on a running (`ai-wip`), queued (`ai-agent`), or parked
-(`ai-rework`) ticket, and it is safe to run in a second shell: it writes a
-durable marker under `logs/issue-<N>/stop`, returns immediately, and whichever
-process owns the run — the daemon, a `-rework`, or a `-continue` — halts the
-live session within a couple of seconds (the `claude` process gets a `SIGTERM`
-so it can flush its transcript). Wherever the stop lands in the pipeline, the
-ticket ends up in `ai-stopped` with everything preserved: it is never aborted
-back into the queue and never parked for rework. A stopped ticket is **never**
-auto-resumed — that is the whole point of it being its own state rather than
+(`ai-rework`) ticket, and it is safe to run in a second shell: it records the
+request under `logs/issue-<N>/stop`, returns immediately, and whichever process
+owns the run — the daemon, a `-rework`, or a `-continue` — halts the live
+session within a couple of seconds (the `claude` process gets a `SIGTERM` so it
+can flush its transcript). It finds that process through the run's own
+`logs/issue-<N>/owner` file, so a ticket left in `ai-wip` by a crashed run is
+stopped on the spot rather than handed to a daemon that has no such run to
+halt. The request file is retired once the `ai-stopped` label lands; until then
+it is what survives a crash, so the next daemon start recovers the ticket as
+stopped rather than resuming it.
+
+Wherever the stop lands in the pipeline, the ticket ends up in `ai-stopped` with
+everything preserved: it is never aborted back into the queue and never parked
+for rework. A stopped ticket is **never** auto-resumed, and `-rework` refuses it
+— `-continue` is the only way back, because it is the only verb that lifts the
+hold. That is the whole point of it being its own state rather than
 `ai-rework`.
 
 `-continue` resumes the persisted Claude session in the preserved worktree and

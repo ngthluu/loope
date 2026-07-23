@@ -36,10 +36,8 @@ func acquireLock(workDir string) (release func(), err error) {
 	}
 
 	// File already exists: decide whether it's a live owner or a stale lock.
-	if b, rerr := os.ReadFile(path); rerr == nil {
-		if pid, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && pid > 0 && pidAlive(pid) {
-			return nil, fmt.Errorf("another loop instance (pid %d) owns %s — stop it first or use a different workDir", pid, workDir)
-		}
+	if pid, ok := readPIDFile(path); ok && pidAlive(pid) {
+		return nil, fmt.Errorf("another loop instance (pid %d) owns %s — stop it first or use a different workDir", pid, workDir)
 	}
 
 	// Stale (dead pid or garbage content): remove and retry the atomic claim
@@ -76,17 +74,87 @@ func pidAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// lockOwnerAlive reports whether a live process currently holds workDir's daemon
-// lock. Stop uses it to tell "a daemon is running this issue and will react to
-// the marker" from "nothing is running, so I must do the labeling myself".
-func lockOwnerAlive(workDir string) bool {
-	b, err := os.ReadFile(lockPath(workDir))
+// runOwnerFile records the pid of the process driving one issue's pipeline, in
+// that issue's log dir. It is the cross-process half of runRegistry: the
+// registry answers "is this issue running in THIS process", which is all a
+// daemon needs for itself, but only this file can answer "is it running in ANY
+// process" — the question `loope -stop <N>` in a second shell has to get right
+// before deciding whether to leave the labeling to the process that owns the
+// run or do it itself.
+//
+// It is deliberately per-issue rather than per-workDir. The workDir lock says
+// only that a daemon is up — it proves no other process may claim FRESH work
+// here, which is what makes the startup orphan sweep safe, and nothing at all
+// about whether a given issue has a pipeline behind it right now. An issue can
+// equally be driven by a process holding no lock (-once, -rework, -continue).
+const runOwnerFile = "owner"
+
+func runOwnerPath(logDir string) string { return filepath.Join(logDir, runOwnerFile) }
+
+// recordRunOwner claims issue ownership for this process. Best-effort like the
+// other markers: losing it costs Stop precision (it labels the issue itself
+// instead of deferring), never the correctness of the run.
+func recordRunOwner(logDir string) {
+	if logDir == "" {
+		return
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(runOwnerPath(logDir), []byte(strconv.Itoa(os.Getpid())), 0o644)
+}
+
+// clearRunOwner releases this process's claim on an issue. A file left behind
+// by a crash is self-healing rather than sticky: every reader checks liveness,
+// so a dead pid reads as "nobody is running this".
+func clearRunOwner(logDir string) {
+	if logDir == "" {
+		return
+	}
+	_ = os.Remove(runOwnerPath(logDir))
+}
+
+// runOwnerAlive reports whether a live process is driving this issue's pipeline,
+// and whether that process is this one. A dead or missing pid means no run.
+func runOwnerAlive(logDir string) (alive, isSelf bool) {
+	if logDir == "" {
+		return false, false
+	}
+	pid, ok := readPIDFile(runOwnerPath(logDir))
+	if !ok || !pidAlive(pid) {
+		return false, false
+	}
+	return true, pid == os.Getpid()
+}
+
+// otherProcessRunning reports whether a live process OTHER than this one is
+// driving this issue's pipeline. That process has a stop watcher on the marker,
+// so it — and only it — can halt the run and do the labeling as it unwinds.
+//
+// Ownership by this process is excluded because runRegistry already answers
+// that exactly: if the run were live here it would be registered, so a file
+// naming our own pid without a registry entry is a leftover, not a run.
+func otherProcessRunning(logDir string) bool {
+	alive, isSelf := runOwnerAlive(logDir)
+	return alive && !isSelf
+}
+
+// pidFileAlive reports whether path holds the pid of a live process.
+func pidFileAlive(path string) bool {
+	pid, ok := readPIDFile(path)
+	return ok && pidAlive(pid)
+}
+
+// readPIDFile reads a pid from a one-line pid file, reporting whether it held a
+// plausible one. Missing files and garbage content both read as absent.
+func readPIDFile(path string) (int, bool) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil || pid <= 0 {
-		return false
+		return 0, false
 	}
-	return pidAlive(pid)
+	return pid, true
 }

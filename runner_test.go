@@ -121,6 +121,34 @@ func TestExecRunnerStreamSucceedsWhenDescendantOutlivesACleanExit(t *testing.T) 
 	}
 }
 
+// The allowance is scoped to an UNCANCELLED run as well. Both of its
+// conditions can hold on a stopped session — claude traps SIGTERM, flushes its
+// transcript and exits 0, while a tool-call descendant still holds the pipe —
+// and pardoning that would report a run the operator halted as a completed
+// step, letting the pipeline march on to ship the ticket. (os/exec returns the
+// context's error rather than ErrWaitDelay here, so this asserts the property
+// rather than the mechanism.)
+func TestExecRunnerCancelledRunNeverReadsAsSuccess(t *testing.T) {
+	shortWaitDelay(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := execRunner{}.Run(ctx, "", nil, "", "sh", "-c",
+			`trap 'exit 0' TERM; sleep 30 & wait`)
+		done <- err
+	}()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled run that exited 0 with a lingering descendant must still report the cancellation")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("cancelled command did not exit")
+	}
+}
+
 // The ErrWaitDelay allowance is scoped to a CLEAN exit: a non-zero exit with a
 // lingering descendant is still a failure.
 func TestExecRunnerStillFailsWhenExitIsNonZeroWithLingeringDescendant(t *testing.T) {

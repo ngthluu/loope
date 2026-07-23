@@ -165,16 +165,36 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	// below.
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// A marker left over from an earlier life of this issue — stopped, then
-	// re-queued by a human removing the label rather than by continue — would
-	// make this fresh run finish as stopped the instant it reached ship or park.
-	// The issue being eligible at all is the decision to run it, so the hold is
-	// stale by definition. Clearing it as part of the claim (rather than after)
-	// is what lets a racing Stop know its own marker is safe; see register.
-	if !o.registry.register(n, cancel, func() { clearStopRequest(o.issueLogDir(n)) }) {
+	logDir := o.issueLogDir(n)
+	// Claim first, then look for a hold — the mirror image of Stop, which writes
+	// its marker and only then looks for an owner. Two opposite orders cannot
+	// both miss: a stop landing anywhere around this pickup is seen either here
+	// or by Stop's owner check, never by neither.
+	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("issue #%d is already running", n)
 	}
-	defer o.registry.deregister(n)
+	defer o.registry.deregister(n, logDir)
+	// The issue was listed as eligible, but that was a triage call ago and a stop
+	// can have landed since — completing entirely, label and all, before this run
+	// had an owner file for it to notice. Re-read the label: it is the only trace
+	// such a stop leaves, and one read is nothing against the pipeline it guards.
+	// (A read failure falls through to a normal run, exactly as before, with ""
+	// standing in for the unknown state below.)
+	state, _ := o.currentStateLabel(ictx, n)
+	// state != "" also keeps a config that leaves the stopped label unset from
+	// matching every issue that carries no state label at all.
+	if state != "" && state == o.cfg.StateLabels.Stopped {
+		log.Printf("issue #%d: stopped between selection and pickup — not starting", n)
+		return nil
+	}
+	// A marker means a stop was requested and has NOT completed; a completed one
+	// retires its own marker (see settleStopped), so nothing found here is left
+	// over from an earlier life of the issue. Honour it before spending a Claude
+	// session, finishing the stop the other process could not.
+	if stopRequested(logDir) {
+		log.Printf("issue #%d: stopped before the run started", n)
+		return o.finishStopped(ictx, n, state)
+	}
 	if err := o.gh.AddLabel(ictx, n, o.cfg.StateLabels.WIP); err != nil {
 		return err
 	}
@@ -208,11 +228,9 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	}
 	if perr != nil {
 		// A stop and a daemon shutdown both surface as a cancelled claude call.
-		// The marker is what tells them apart: only a stop leaves one, so a
-		// SIGTERM to the daemon still parks its in-flight issues as before.
-		if stopRequested(o.issueLogDir(n)) {
-			return o.finishStopped(ictx, n, o.cfg.StateLabels.WIP)
-		}
+		// The marker is what tells them apart, and park makes that call for every
+		// caller: only a stop leaves a marker, so a SIGTERM to the daemon still
+		// parks its in-flight issues as before.
 		return o.park(ictx, n, o.cfg.StateLabels.WIP, perr)
 	}
 	return o.ship(ictx, issue, wtPath, branch, base, kind, o.cfg.StateLabels.WIP)
@@ -321,12 +339,13 @@ func failureGuidance(cause error) string {
 // file are left untouched. Uses a cancellation-proof context so a Ctrl-C
 // mid-pipeline still records the state.
 func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause error) error {
-	// An operator hold outranks a park, and this is the backstop that guarantees
-	// it for every caller (a ship failure, a panic) — not just the pipeline paths
-	// that check the marker themselves. Parking with a stop pending would leave
-	// the issue in rework WITH a marker: shouldResume refuses it ("stopped by
-	// request") and continue refuses it ("not stopped"), so nothing but a human
-	// deleting the file could ever move it again.
+	// An operator hold outranks a park, and this is the ONE place that decision
+	// is made — a pipeline failure, a resume failure, a mid-ship failure and a
+	// panic all arrive here, so none of them re-checks the marker itself.
+	// Parking with a stop pending would leave the issue in rework WITH a marker:
+	// shouldResume refuses it ("stopped by request") and continue refuses it
+	// ("not stopped"), so nothing but a human deleting the file could ever move
+	// it again.
 	if stopRequested(o.issueLogDir(n)) {
 		return o.finishStopped(ctx, n, fromLabel)
 	}
@@ -497,6 +516,9 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		clearState(logDir)
 		clearParkCause(logDir)
 		clearStopRequest(logDir)
+		// The crashed run's owner file names a dead pid, so it already reads as
+		// "nobody is running this"; removing it just keeps the log dir honest.
+		clearRunOwner(logDir)
 	}
 	return nil
 }
@@ -512,11 +534,13 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // commits also parks. Returns nil only when fully shipped.
 func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, base, kind, fromLabel string) error {
 	n := issue.Number
+	// One of only two checks outside park, and for the same reason as
+	// stopOrAbort's: what follows cannot be undone by unwinding into park later.
 	// A stop that lands between the pipeline succeeding and the push is still a
-	// stop: honour the hold before touching git or gh, rather than pushing and
-	// opening a PR on a ticket the operator just halted. (park is the backstop
-	// for a stop that lands mid-ship, once these calls start failing on the
-	// cancelled context.)
+	// stop, so honour the hold before touching git or gh, rather than pushing and
+	// opening a PR on a ticket the operator just halted. (A stop landing after
+	// this point still lands: these calls start failing on the cancelled context
+	// and park makes the same decision.)
 	if stopRequested(o.issueLogDir(n)) {
 		return o.finishStopped(ctx, n, fromLabel)
 	}
@@ -584,7 +608,8 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 // re-queues the ticket), which is the exact opposite of what a stop promised.
 // The marker is what tells the two apart, so check it before backing anything
 // out: an operator hold finishes as stopped, preserving whatever setup got as
-// far as creating.
+// far as creating. This is the other check outside park (see ship): the abort it
+// guards destroys state, so park cannot be the backstop for it.
 func (o *Orchestrator) stopOrAbort(ctx context.Context, n int, wtPath, branch string, cause error) error {
 	if stopRequested(o.issueLogDir(n)) {
 		return o.finishStopped(ctx, n, o.cfg.StateLabels.WIP)

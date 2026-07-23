@@ -11,8 +11,22 @@ import (
 // "finish the job" prompt, then runs the shared ship step (swapping
 // ai-rework->ai-done on success). Idempotent: a failure re-parks as ai-rework
 // with the worktree intact, so it can be run again. It is the entry point for
-// `-rework` and for ResumeParked's auto-resume; behaviour is unchanged.
+// `-rework` and for ResumeParked's auto-resume.
+//
+// It refuses an issue under an operator hold. Without this check `loope -rework
+// <N>` would drive a stopped ticket: resume honours the marker, but only once
+// the multi-minute session it was meant to prevent has already been spent, and
+// the ship/park that follows would swap from ai-rework — a label a stopped issue
+// does not carry. Continue is the way back from stopped, and it is the one that
+// lifts the hold.
 func (o *Orchestrator) Rework(ctx context.Context, n int) error {
+	state, err := o.currentStateLabel(ctx, n)
+	if err != nil {
+		return err
+	}
+	if state == o.cfg.StateLabels.Stopped {
+		return fmt.Errorf("#%d is stopped — resume it with `loope -continue %d`", n, n)
+	}
 	return o.resume(ctx, n, o.cfg.StateLabels.Rework)
 }
 
@@ -39,13 +53,16 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// No stale-marker clear here, unlike handleIssue: a resume continues an
-	// existing life of the issue rather than starting a fresh one, and continue
-	// has already lifted the hold it was resuming from.
-	if !o.registry.register(n, cancel, nil) {
+	if !o.registry.register(n, logDir, cancel) {
 		return fmt.Errorf("#%d is already running", n)
 	}
-	defer o.registry.deregister(n)
+	defer o.registry.deregister(n, logDir)
+	// Claim, then check for a hold — the same order as handleIssue, and for the
+	// same reason (see Stop). A stop that landed while this resume was starting
+	// is honoured before the Claude session, not after it.
+	if stopRequested(logDir) {
+		return o.finishStopped(ictx, n, fromLabel)
+	}
 
 	base, err := o.wt.DefaultBranch(ictx)
 	if err != nil {
@@ -70,9 +87,8 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 		c.RecordSession(res.SessionID, si.Kind)
 	}
 	if err != nil {
-		if stopRequested(logDir) {
-			return o.finishStopped(ictx, n, fromLabel)
-		}
+		// park honours a pending stop for every caller, so a cancelled resume
+		// finishes as stopped rather than parked without re-checking here.
 		return o.park(ictx, n, fromLabel, err)
 	}
 

@@ -540,23 +540,27 @@ func hasLabel(labels []Label, name string) bool {
 	return false
 }
 
-// pickStateLabel returns the first tracked label present on the issue, in
-// priority order WIP > Stopped > Rework > Done > eligible, or "" if none.
-func pickStateLabel(labels []Label, cfg *Config) string {
-	has := func(name string) bool {
-		for _, l := range labels {
-			if l.Name == name {
-				return true
-			}
-		}
-		return false
-	}
-	for _, name := range []string{cfg.StateLabels.WIP, cfg.StateLabels.Stopped, cfg.StateLabels.Rework, cfg.StateLabels.Done, cfg.EligibleLabel} {
-		if name != "" && has(name) {
+// firstLabel returns the first of names present on the issue, or "" if none is.
+// Empty names never match, so a state left unconfigured is skipped rather than
+// matching everything. It is the one implementation of "highest-priority label
+// wins" — callers supply the priority order, which differs by what they need it
+// for (see pickStateLabel and currentStateLabel).
+func firstLabel(labels []Label, names ...string) string {
+	for _, name := range names {
+		if hasLabel(labels, name) {
 			return name
 		}
 	}
 	return ""
+}
+
+// pickStateLabel returns the label the dashboard should show the issue under, in
+// priority order WIP > Stopped > Rework > Done > eligible. Unlike
+// currentStateLabel it falls back to the eligible label — a queued ticket is a
+// column on the board — and it stops at the four board states.
+func pickStateLabel(labels []Label, cfg *Config) string {
+	sl := cfg.StateLabels
+	return firstLabel(labels, sl.WIP, sl.Stopped, sl.Rework, sl.Done, cfg.EligibleLabel)
 }
 
 // listTrackedIssues shells `gh issue list` (through Runner) for this instance's

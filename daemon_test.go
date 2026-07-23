@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -63,20 +64,21 @@ func TestAcquireLockTakesOverStaleLock(t *testing.T) {
 	release2()
 }
 
-func TestLockOwnerAlive(t *testing.T) {
-	work := t.TempDir()
-	if lockOwnerAlive(work) {
-		t.Fatal("no lock file: owner cannot be alive")
+func TestPIDFileAlive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pid")
+	if pidFileAlive(path) {
+		t.Fatal("no file: no live owner")
 	}
-	release, err := acquireLock(work)
-	if err != nil {
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !lockOwnerAlive(work) {
-		t.Fatal("we hold the lock, so its owner (us) is alive")
+	if !pidFileAlive(path) {
+		t.Fatal("our own pid must read as alive")
 	}
-	release()
-	if lockOwnerAlive(work) {
-		t.Fatal("lock released: owner must not be reported alive")
+	if err := os.WriteFile(path, []byte("not-a-pid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pidFileAlive(path) {
+		t.Fatal("garbage content must read as no live owner")
 	}
 }

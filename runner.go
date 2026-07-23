@@ -50,9 +50,18 @@ func gracefulCancel(cmd *exec.Cmd) {
 // reports it as ErrWaitDelay on an otherwise clean run. That is a stray
 // file-descriptor report, not a failed command: the process exited 0 and its
 // output was fully drained before Wait gave up, so passing the error through
-// would throw away a good result and park the issue for rework. Anything else,
-// a cancellation included, is returned untouched.
-func settle(cmd *exec.Cmd, err error) error {
+// would throw away a good result and park the issue for rework.
+//
+// The pardon is confined to an uncancelled run. Once ctx is done the delay is
+// the FIRST case — the process was signalled and exec force-closed the pipes on
+// its way out — and a process that handles SIGTERM by exiting 0 would otherwise
+// read as a clean success: a stopped claude session reported as a completed
+// step, with the pipeline marching on to ship a ticket the operator halted.
+// Anything else is returned untouched.
+func settle(ctx context.Context, cmd *exec.Cmd, err error) error {
+	if ctx.Err() != nil {
+		return err
+	}
 	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
 		return nil
 	}
@@ -73,7 +82,7 @@ func (execRunner) Run(ctx context.Context, dir string, env []string, stdin, name
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return out.String(), errBuf.String(), settle(cmd, err)
+	return out.String(), errBuf.String(), settle(ctx, cmd, err)
 }
 
 func (execRunner) RunStream(ctx context.Context, dir string, env []string, stdin string, w io.Writer, name string, args ...string) (string, error) {
@@ -90,5 +99,5 @@ func (execRunner) RunStream(ctx context.Context, dir string, env []string, stdin
 	cmd.Stdout = w
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return errBuf.String(), settle(cmd, err)
+	return errBuf.String(), settle(ctx, cmd, err)
 }

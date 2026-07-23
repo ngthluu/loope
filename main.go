@@ -75,15 +75,15 @@ func main() {
 	o := &Orchestrator{cfg: cfg, runner: r, gh: NewGitHub(r, cfg), baseCtx: ctx,
 		wt: &Worktree{runner: r, repoPath: cfg.RepoPath, retry: cfg.GitHubRetry.policy()}}
 
-	// -rework and -continue drive a live pipeline in THIS process, exactly as the
-	// daemon does, so they need the daemon's stop watcher too. Without it a
-	// `loope -stop <N>` from another shell has no way to reach this run: that
-	// process can only write the marker, and nothing here would ever read it — the
-	// stop would either silently do nothing or relabel the issue underneath a
-	// claude session that keeps running to completion.
-	if *f.rework > 0 || *f.continueIssue > 0 {
-		go o.watchStops(ctx, stopWatchInterval)
-	}
+	// Every mode that can drive a pipeline needs the stop watcher, so it is
+	// started for all of them rather than for a list of modes someone has to
+	// remember to extend — -once was exactly that oversight. Without it a
+	// `loope -stop <N>` from another shell has no way to reach a run in this
+	// process: that process can only write the marker, and nothing here would
+	// ever read it, so the stop would relabel the issue underneath a claude
+	// session that keeps running to completion. On a mode that runs no pipelines
+	// the watcher iterates an empty registry and costs one wakeup every 2s.
+	go o.watchStops(ctx, stopWatchInterval)
 
 	if *f.rework > 0 {
 		if err := o.Rework(ctx, *f.rework); err != nil {
@@ -103,21 +103,13 @@ func main() {
 	}
 
 	// -continue runs the resume synchronously and exits when the ticket ships or
-	// parks, matching -rework. It refuses when a live daemon holds the lock and
-	// the issue is WIP, since that would put two claude sessions in one worktree.
+	// parks, matching -rework. Two claude sessions in one worktree are prevented
+	// by prepareContinue, which refuses an issue that is not stopped or that any
+	// process already has a run on — a sharper test than "is a daemon up", and
+	// one the dashboard's continue goes through as well.
 	if *f.continueIssue > 0 {
-		n := *f.continueIssue
-		if lockOwnerAlive(cfg.WorkDir) {
-			state, err := o.currentStateLabel(ctx, n)
-			if err != nil {
-				log.Fatalf("continue #%d: %v", n, err)
-			}
-			if state == cfg.StateLabels.WIP {
-				log.Fatalf("continue #%d: a daemon owns this workDir and #%d is %s — stop the daemon or use the dashboard", n, n, state)
-			}
-		}
-		if err := o.Continue(ctx, n); err != nil {
-			log.Fatalf("continue #%d: %v", n, err)
+		if err := o.Continue(ctx, *f.continueIssue); err != nil {
+			log.Fatalf("continue #%d: %v", *f.continueIssue, err)
 		}
 		return
 	}
