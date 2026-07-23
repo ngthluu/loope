@@ -35,22 +35,19 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 // ship swaps to Done and park swaps to Rework — ai-rework for a rework, ai-wip
 // for a continue. Like handleIssue it registers the run so a stop can cancel it,
 // and finishes as stopped rather than parked when a stop marker is present.
+//
+// The claim is taken FIRST, before the worktree and session are even looked at,
+// so that everything which can fail from here on is inside it — and so every
+// such failure can go through park. That matters because a continue has already
+// swapped the ticket to ai-wip by the time it calls this: a raw error left it
+// wearing ai-wip with no run behind it, which the eligible listing skips (it has
+// a state label), auto-resume skips (it is not ai-rework) and the orphan sweep
+// only revisits at startup. Parking puts it back somewhere the daemon can find.
+//
+// The one failure that must NOT park is losing the claim: the issue belongs to
+// whoever won it, and relabelling it would be relabelling their run.
 func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) error {
-	wtPath := worktreePath(o.cfg.WorkDir, n)
-	if _, err := os.Stat(wtPath); err != nil {
-		return fmt.Errorf("issue #%d: no preserved worktree at %s to resume (remove the %s label to re-queue from scratch): %w",
-			n, wtPath, o.cfg.StateLabels.Rework, err)
-	}
 	logDir := o.issueLogDir(n)
-	si, err := readSession(logDir)
-	if err != nil {
-		return fmt.Errorf("issue #%d: no saved session to resume (remove the %s label to re-queue from scratch): %w",
-			n, o.cfg.StateLabels.Rework, err)
-	}
-	if si.SessionID == "" {
-		return fmt.Errorf("issue #%d: saved session file has no session id", n)
-	}
-
 	ictx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// The claim spans processes, so this also refuses a worktree a daemon (or
@@ -67,13 +64,27 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 		return o.finishStopped(ictx, n, fromLabel)
 	}
 
+	wtPath := worktreePath(o.cfg.WorkDir, n)
+	if _, err := os.Stat(wtPath); err != nil {
+		return o.park(ictx, n, fromLabel, fmt.Errorf("no preserved worktree at %s to resume (remove the %s label to re-queue from scratch): %w",
+			wtPath, o.cfg.StateLabels.Rework, err))
+	}
+	si, err := readSession(logDir)
+	if err != nil {
+		return o.park(ictx, n, fromLabel, fmt.Errorf("no saved session to resume (remove the %s label to re-queue from scratch): %w",
+			o.cfg.StateLabels.Rework, err))
+	}
+	if si.SessionID == "" {
+		return o.park(ictx, n, fromLabel, fmt.Errorf("saved session file has no session id"))
+	}
+
 	base, err := o.wt.DefaultBranch(ictx)
 	if err != nil {
-		return err
+		return o.park(ictx, n, fromLabel, err)
 	}
 	title, err := o.gh.IssueTitle(ictx, n)
 	if err != nil {
-		return err
+		return o.park(ictx, n, fromLabel, err)
 	}
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}

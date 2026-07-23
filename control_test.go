@@ -486,6 +486,50 @@ func TestContinueKeepsTheHoldWhenTheTransitionFails(t *testing.T) {
 	}
 }
 
+// A continue swaps the ticket to ai-wip before the resume runs, so every way a
+// resume can fail before its session has to leave the ticket somewhere the
+// daemon will find again. Returning the raw error left it wearing ai-wip with no
+// run behind it: the eligible listing skips it (it has a state label),
+// auto-resume skips it (it is not ai-rework) and the orphan sweep only runs at
+// startup — so it stayed wedged until a human restarted the daemon.
+func TestAResumeThatFailsBeforeItsSessionParksTheTicket(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(rcall) bool
+	}{
+		{"reading the default branch", func(c rcall) bool {
+			return c.name == "git" && strings.Contains(strings.Join(c.args, " "), "symbolic-ref")
+		}},
+		{"reading the issue title", func(c rcall) bool {
+			joined := strings.Join(c.args, " ")
+			return c.name == "gh" && strings.HasPrefix(joined, "issue view") && strings.Contains(joined, "title")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, o := stopEnv(t, "ai-agent", "ai-stopped")
+			seedResumable(t, o, 7, "sess-42")
+			base := env.f.handler
+			env.f.handler = func(c rcall) (string, string, error) {
+				if tc.fail(c) {
+					return "", "503", errors.New("exit 1")
+				}
+				return base(c)
+			}
+
+			if err := o.Continue(context.Background(), 7); err == nil {
+				t.Fatal("a resume that could not start must report the failure")
+			}
+			swaps := env.callsMatching("gh", "--remove-label ai-wip")
+			if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-rework") {
+				t.Fatalf("a ticket that could not be resumed must be parked where the daemon finds it again, got %v", swaps)
+			}
+			if readParkCause(o.issueLogDir(7)) == "" {
+				t.Fatal("a park with no cause is one both auto-resume and -rework skip")
+			}
+		})
+	}
+}
+
 func TestContinueRefusesNonStoppedIssue(t *testing.T) {
 	_, o := stopEnv(t, "ai-agent", "ai-rework")
 	err := o.Continue(context.Background(), 7)
