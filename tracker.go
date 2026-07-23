@@ -475,11 +475,12 @@ func pipelineRows(steps []Step) []PipeRow {
 	return rows
 }
 
-// trackedStateLabels returns the loop's board states (wip/rework/done). It is
-// only the fallback search set for a config with no eligible label; the normal
-// path scopes the fetch to the eligible label instead (see listTrackedIssues).
+// trackedStateLabels returns the loop's board states (wip/stopped/rework/done).
+// It is only the fallback search set for a config with no eligible label; the
+// normal path scopes the fetch to the eligible label instead (see
+// listTrackedIssues).
 func trackedStateLabels(cfg *Config) []string {
-	return []string{cfg.StateLabels.WIP, cfg.StateLabels.Done, cfg.StateLabels.Rework}
+	return []string{cfg.StateLabels.WIP, cfg.StateLabels.Done, cfg.StateLabels.Rework, cfg.StateLabels.Stopped}
 }
 
 // hasLabel reports whether labels contains name (name == "" is never a match).
@@ -496,7 +497,7 @@ func hasLabel(labels []Label, name string) bool {
 }
 
 // pickStateLabel returns the first tracked label present on the issue, in
-// priority order WIP > Rework > Done > eligible, or "" if none.
+// priority order WIP > Stopped > Rework > Done > eligible, or "" if none.
 func pickStateLabel(labels []Label, cfg *Config) string {
 	has := func(name string) bool {
 		for _, l := range labels {
@@ -506,7 +507,7 @@ func pickStateLabel(labels []Label, cfg *Config) string {
 		}
 		return false
 	}
-	for _, name := range []string{cfg.StateLabels.WIP, cfg.StateLabels.Rework, cfg.StateLabels.Done, cfg.EligibleLabel} {
+	for _, name := range []string{cfg.StateLabels.WIP, cfg.StateLabels.Stopped, cfg.StateLabels.Rework, cfg.StateLabels.Done, cfg.EligibleLabel} {
 		if name != "" && has(name) {
 			return name
 		}

@@ -410,6 +410,8 @@ func stateKind(cfg *Config, label string) string {
 		return "wip"
 	case cfg.StateLabels.Rework:
 		return "rework"
+	case cfg.StateLabels.Stopped:
+		return "stopped"
 	case cfg.StateLabels.Failed:
 		return "failed"
 	case cfg.EligibleLabel:
@@ -430,6 +432,8 @@ func stripeClass(cfg *Config, label string) string {
 		return "bg-warn/80"
 	case "failed":
 		return "bg-err/70"
+	case "stopped":
+		return "bg-muted/40"
 	default:
 		return "bg-line2"
 	}

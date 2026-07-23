@@ -288,7 +288,7 @@ func TestBuildTicketsGHArgvNoEligibleLabel(t *testing.T) {
 	if _, ghErr := BuildTickets(context.Background(), r, cfg); ghErr != nil {
 		t.Fatalf("unexpected gh error: %v", ghErr)
 	}
-	if got := argAfter(r.calls[0].args, "--search"); got != "label:ai-wip,ai-done,ai-rework" {
+	if got := argAfter(r.calls[0].args, "--search"); got != "label:ai-wip,ai-done,ai-rework,ai-stopped" {
 		t.Fatalf("--search = %q, want the shared state-label fallback", got)
 	}
 }
@@ -495,5 +495,44 @@ func TestParseTranscript(t *testing.T) {
 		if events[i] != want[i] {
 			t.Errorf("event[%d] = %+v, want %+v", i, events[i], want[i])
 		}
+	}
+}
+
+func TestPickStateLabelStoppedBeatsReworkAndDone(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	labels := []Label{{Name: "ai-agent"}, {Name: "ai-rework"}, {Name: "ai-stopped"}}
+	if got := pickStateLabel(labels, cfg); got != "ai-stopped" {
+		t.Fatalf("pickStateLabel = %q, want ai-stopped", got)
+	}
+}
+
+func TestPickStateLabelWIPBeatsStopped(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	labels := []Label{{Name: "ai-stopped"}, {Name: "ai-wip"}}
+	if got := pickStateLabel(labels, cfg); got != "ai-wip" {
+		t.Fatalf("pickStateLabel = %q, want ai-wip", got)
+	}
+}
+
+func TestTrackedStateLabelsIncludesStopped(t *testing.T) {
+	cfg := &Config{StateLabels: defaultStateLabels()}
+	found := false
+	for _, l := range trackedStateLabels(cfg) {
+		if l == "ai-stopped" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("trackedStateLabels = %v, want it to include ai-stopped", trackedStateLabels(cfg))
+	}
+}
+
+func TestStateKindAndStripeForStopped(t *testing.T) {
+	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	if got := stateKind(cfg, "ai-stopped"); got != "stopped" {
+		t.Fatalf("stateKind = %q, want stopped", got)
+	}
+	if got := stripeClass(cfg, "ai-stopped"); got != "bg-muted/40" {
+		t.Fatalf("stripeClass = %q, want bg-muted/40", got)
 	}
 }

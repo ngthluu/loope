@@ -241,3 +241,34 @@ func TestRetryConfigPolicy(t *testing.T) {
 		t.Errorf("policy = %+v, want %+v", got, want)
 	}
 }
+
+func TestDefaultStateLabelsIncludesStopped(t *testing.T) {
+	if got := defaultStateLabels().Stopped; got != "ai-stopped" {
+		t.Fatalf("default stopped label = %q, want ai-stopped", got)
+	}
+}
+
+func TestLoadConfigStoppedLabelOverridable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "loope.json")
+	body := `{"repoPath":"/r","repoSlug":"o/r","workDir":"` + dir + `","stateLabels":{"stopped":"held"}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StateLabels.Stopped != "held" {
+		t.Fatalf("stopped = %q, want held", cfg.StateLabels.Stopped)
+	}
+}
+
+func TestHasStateLabelTreatsStoppedAsState(t *testing.T) {
+	cfg := &Config{RepoSlug: "o/r", StateLabels: defaultStateLabels()}
+	g := NewGitHub(&fakeRunner{}, cfg)
+	is := Issue{Number: 7, Labels: []Label{{Name: "ai-agent"}, {Name: "ai-stopped"}}}
+	if !g.hasStateLabel(is) {
+		t.Fatal("ai-stopped must count as a state label so a stopped issue leaves the eligible queue")
+	}
+}
