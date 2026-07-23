@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 // runRegistry tracks the cancel func of every pipeline running in this process,
@@ -156,4 +157,30 @@ func (o *Orchestrator) finishStopped(ctx context.Context, n int, fromLabel strin
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Stopped)
 	clearParkCause(o.issueLogDir(n))
 	return nil
+}
+
+// watchStops cancels any locally running pipeline whose stop marker has
+// appeared. It is what lets `loope -stop <N>` in another shell halt a run this
+// daemon owns: that process can only write the marker file, not reach into this
+// process's goroutines.
+//
+// It iterates only over registered issue numbers, so a quiet daemon does one
+// os.Stat per live pipeline per tick and nothing else. Returns when ctx is done.
+func (o *Orchestrator) watchStops(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, n := range o.registry.numbers() {
+				if stopRequested(o.issueLogDir(n)) {
+					if o.registry.cancel(n) {
+						log.Printf("issue #%d: stop requested — halting the running session", n)
+					}
+				}
+			}
+		}
+	}
 }

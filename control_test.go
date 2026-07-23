@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunRegistryRegisterCancelDeregister(t *testing.T) {
@@ -159,5 +160,40 @@ func TestFinishStoppedPreservesEverything(t *testing.T) {
 	comments := env.callsMatching("gh", "issue comment")
 	if len(comments) == 0 || !strings.Contains(strings.Join(comments, "\n"), "Stopped by request") {
 		t.Fatalf("want a stop comment, got %v", comments)
+	}
+}
+
+func TestWatchStopsCancelsWhenMarkerAppearsOutOfBand(t *testing.T) {
+	_, o := stopEnv(t, "ai-agent", "ai-wip")
+	cancelled := make(chan struct{})
+	o.registry.register(7, func() { close(cancelled) })
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go o.watchStops(ctx, time.Millisecond)
+
+	// Simulate `loope -stop 7` in a second process: it can only write the file.
+	recordStopRequest(o.issueLogDir(7))
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchStops should cancel a registered run once its marker appears")
+	}
+}
+
+func TestWatchStopsIgnoresUnmarkedRuns(t *testing.T) {
+	_, o := stopEnv(t, "ai-agent", "ai-wip")
+	cancelled := make(chan struct{})
+	o.registry.register(7, func() { close(cancelled) })
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go o.watchStops(ctx, time.Millisecond)
+
+	select {
+	case <-cancelled:
+		t.Fatal("watchStops must not cancel a run with no stop marker")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
