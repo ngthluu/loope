@@ -505,7 +505,7 @@ func pipelineRows(steps []Step) []PipeRow {
 // only the fallback search set for a config with no eligible label; the normal
 // path scopes the fetch to the eligible label instead (see listTrackedIssues).
 func trackedStateLabels(cfg *Config) []string {
-	return []string{cfg.StateLabels.WIP, cfg.StateLabels.Done, cfg.StateLabels.Rework}
+	return []string{cfg.StateLabels.WIP, cfg.StateLabels.Done, cfg.StateLabels.Rework, cfg.StateLabels.Stopped}
 }
 
 // hasLabel reports whether labels contains name (name == "" is never a match).
@@ -532,7 +532,7 @@ func pickStateLabel(labels []Label, cfg *Config) string {
 		}
 		return false
 	}
-	for _, name := range []string{cfg.StateLabels.WIP, cfg.StateLabels.Rework, cfg.StateLabels.Done, cfg.EligibleLabel} {
+	for _, name := range []string{cfg.StateLabels.WIP, cfg.StateLabels.Rework, cfg.StateLabels.Stopped, cfg.StateLabels.Done, cfg.EligibleLabel} {
 		if name != "" && has(name) {
 			return name
 		}

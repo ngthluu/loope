@@ -874,3 +874,57 @@ func TestMutateRouteRejectsBadIssue(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for a non-numeric issue", code)
 	}
 }
+
+func TestStateKindMapsStopped(t *testing.T) {
+	cfg := &Config{StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
+	if got := stateKind(cfg, "ai-stopped"); got != "stopped" {
+		t.Fatalf("stateKind(ai-stopped) = %q, want stopped", got)
+	}
+	if got := stripeClass(cfg, "ai-stopped"); got == "bg-line2" || got == "" {
+		t.Fatalf("stripeClass(ai-stopped) = %q, want a distinct stopped tone", got)
+	}
+}
+
+func TestPickStateLabelPrefersStoppedOverEligible(t *testing.T) {
+	cfg := &Config{StateLabels: defaultStateLabels(), EligibleLabel: "ai-agent"}
+	labels := []Label{{Name: "ai-agent"}, {Name: "ai-stopped"}}
+	if got := pickStateLabel(labels, cfg); got != "ai-stopped" {
+		t.Fatalf("pickStateLabel = %q, want ai-stopped (not the eligible label)", got)
+	}
+}
+
+func TestDetailRendersStopButtonForWip(t *testing.T) {
+	// newTestServer seeds issue 142 labeled ai-wip.
+	code, body := get(t, newTestServer(t).Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-post="/stop?issue=142"`) {
+		t.Fatalf("wip detail should render a Stop button, got: %s", body)
+	}
+	if strings.Contains(body, `hx-post="/continue?issue=142"`) {
+		t.Fatal("wip detail must not render a Continue button")
+	}
+}
+
+func TestDetailRendersContinueButtonForStopped(t *testing.T) {
+	work := t.TempDir()
+	dir := filepath.Join(work, "logs", "issue-142")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordState(dir, "ai-stopped")
+	cfg := &Config{WorkDir: work, RepoSlug: "o/r", EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
+	r := &fakeRunner{queue: []rresp{{stdout: `[{"number":142,"title":"Add OAuth","labels":[{"name":"ai-agent"},{"name":"ai-stopped"}]}]`}}}
+	s, err := NewServer(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-post="/continue?issue=142"`) {
+		t.Fatalf("stopped detail should render a Continue button, got: %s", body)
+	}
+}

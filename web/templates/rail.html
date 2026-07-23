@@ -13,7 +13,7 @@
     <div class="min-w-0">
      <div class="flex items-center gap-2">
       <span class="font-mono text-[11px] font-semibold {{if $sel}}text-live{{else}}text-muted{{end}}">#{{.Number}}</span>
-      {{if $k}}<span class="inline-flex items-center gap-1 rounded-sm border px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide {{if eq $k "done"}}border-ok/25 bg-ok/[0.13] text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>{{end}}{{$k}}</span>{{end}}
+      {{if $k}}<span class="inline-flex items-center gap-1 rounded-sm border px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide {{if eq $k "done"}}border-ok/25 bg-ok/[0.13] text-ok{{else if eq $k "wip"}}border-live/30 bg-live/10 text-live{{else if eq $k "rework"}}border-warn/30 bg-warn/10 text-warn{{else if eq $k "failed"}}border-err/30 bg-err/10 text-err{{else if eq $k "stopped"}}border-muted/30 bg-muted/10 text-muted{{else}}border-line2 bg-panel2 text-muted{{end}}">{{if eq $k "wip"}}<span class="hb inline-block h-1 w-1 rounded-full bg-live"></span>{{end}}{{$k}}</span>{{end}}
      </div>
      <div class="mt-1.5 line-clamp-2 min-h-[34px] text-[13px] font-medium leading-[17px] text-text/90">{{if .Title}}{{.Title}}{{else}}#{{.Number}} · awaiting GitHub title{{end}}</div>
      <div class="mt-1.5 font-mono text-[10px] uppercase tracking-wide text-faint">{{if .Kind}}{{.Kind}} · {{end}}{{len .Steps}} step{{if ne (len .Steps) 1}}s{{end}}</div>
