@@ -124,6 +124,37 @@ func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckRe
 	return CheckResult{Name: "superpowers", Status: statusOK, Detail: "installed"}
 }
 
+func checkRepoPath(ctx context.Context, r Runner, cfg *Config, git CheckResult) CheckResult {
+	if res, skipped := skipIfBlocked("repoPath", git); skipped {
+		return res
+	}
+	out, err := probe(ctx, r, cfg.RepoPath, nil, "git", "rev-parse", "--is-inside-work-tree")
+	if err != nil || out != "true" {
+		return CheckResult{
+			Name:   "repoPath",
+			Status: statusFail,
+			Detail: fmt.Sprintf("%s is not a git worktree", cfg.RepoPath),
+			Fix:    []string{"git clone <your-repo> " + cfg.RepoPath, "or point repoPath at an existing clone in your config"},
+		}
+	}
+	return CheckResult{Name: "repoPath", Status: statusOK, Detail: cfg.RepoPath}
+}
+
+func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth CheckResult) CheckResult {
+	if res, skipped := skipIfBlocked("repo access", gh, ghAuth); skipped {
+		return res
+	}
+	if _, err := probe(ctx, r, "", nil, "gh", "repo", "view", cfg.RepoSlug, "--json", "name"); err != nil {
+		return CheckResult{
+			Name:   "repo access",
+			Status: statusFail,
+			Detail: fmt.Sprintf("cannot access %s: %v", cfg.RepoSlug, err),
+			Fix:    []string{"gh auth refresh -h github.com -s repo", "or fix repoSlug in your config"},
+		}
+	}
+	return CheckResult{Name: "repo access", Status: statusOK, Detail: cfg.RepoSlug}
+}
+
 // Preflight runs every check in order and returns the results.
 func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
 	git := binaryCheck(ctx, r, "git", fixGit, "--version")
@@ -131,5 +162,7 @@ func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
 	ghAuth := checkGHAuth(ctx, r, gh)
 	claude := binaryCheck(ctx, r, "claude", fixClaude, "--version")
 	superpowers := checkSuperpowers(ctx, r, cfg, claude)
-	return []CheckResult{git, gh, ghAuth, claude, superpowers}
+	repoPath := checkRepoPath(ctx, r, cfg, git)
+	access := checkRepoAccess(ctx, r, cfg, gh, ghAuth)
+	return []CheckResult{git, gh, ghAuth, claude, superpowers, repoPath, access}
 }

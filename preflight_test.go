@@ -149,3 +149,62 @@ func TestPreflightSuperpowersUsesClaudeConfigDir(t *testing.T) {
 		}
 	}
 }
+
+func TestPreflightRepoPathNotAWorktree(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"git rev-parse --is-inside-work-tree": {stderr: "fatal: not a git repository", err: errors.New("exit status 128")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "repoPath")
+	if c.Status != statusFail {
+		t.Fatalf("repoPath status = %d, want statusFail", c.Status)
+	}
+	if !strings.Contains(c.Detail, "/tmp/repo") {
+		t.Fatalf("repoPath detail = %q, want it to name the configured path", c.Detail)
+	}
+}
+
+func TestPreflightRepoPathRunsInRepoDir(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	Preflight(context.Background(), f, preflightConfig())
+	found := false
+	for _, c := range f.calls {
+		if c.name == "git" && hasArg(c.args, "rev-parse") {
+			found = true
+			if c.dir != "/tmp/repo" {
+				t.Fatalf("rev-parse dir = %q, want /tmp/repo", c.dir)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("git rev-parse was never run")
+	}
+}
+
+func TestPreflightRepoAccessSkippedWhenAuthFails(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh auth status": {err: errors.New("exit status 1")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "repo access")
+	if c.Status != statusSkip {
+		t.Fatalf("repo access status = %d, want statusSkip", c.Status)
+	}
+	if !strings.Contains(c.Detail, "gh auth") {
+		t.Fatalf("repo access detail = %q, want it to name the blocker", c.Detail)
+	}
+}
+
+func TestPreflightRepoAccessFails(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh repo view your-org/your-repo --json name": {stderr: "GraphQL: Could not resolve to a Repository", err: errors.New("exit status 1")},
+	})}
+	results := Preflight(context.Background(), f, preflightConfig())
+	c := resultByName(t, results, "repo access")
+	if c.Status != statusFail {
+		t.Fatalf("repo access status = %d, want statusFail", c.Status)
+	}
+	if !strings.Contains(c.Detail, "your-org/your-repo") {
+		t.Fatalf("repo access detail = %q, want it to name the slug", c.Detail)
+	}
+}
