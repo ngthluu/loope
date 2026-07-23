@@ -41,7 +41,10 @@ Each poll cycle:
    don't yet have a state label.
 2. **Triage** — a Claude agent picks the single best issue and classifies it:
    - `bug`: small, well-scoped defect → one systematic-debugging session that
-     reproduces with a failing test, fixes, and commits.
+     investigates, scores how confidently the bug can be fixed as reported and,
+     below `confidenceThreshold`, escalates it to `ai-needs-info` instead of
+     guessing (see below); otherwise it reproduces with a failing test, fixes,
+     and commits.
    - `feature`: anything needing design → three sessions. An architect
      brainstorm session scores how confidently the issue can be implemented
      and, below `confidenceThreshold`, escalates it to `ai-needs-info` instead
@@ -207,7 +210,7 @@ with `~/`.
 | `personaPath`     | no       | —          | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir` | no       | —          | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call (see below) |
 | `maxQARounds`     | no       | `20`       | Max architect↔answerer rounds before a feature fails    |
-| `confidenceThreshold` | no       | `70`       | Brainstorm confidence (0–100) below which an issue is escalated to `needsInfo` instead of implemented; `0` disables the gate |
+| `confidenceThreshold` | no       | `70`       | Confidence score (0–100) below which an issue is escalated to `needsInfo` instead of implemented, on both the bug and feature routes; `0` disables the gate |
 | `stateLabels`     | no       | see below  | Names of the state labels (including `needsInfo`)       |
 | `githubRetry`     | no       | see below  | Retry policy for transient GitHub failures              |
 | `models`          | no       | —          | Per-role model settings (see below)                     |
@@ -227,15 +230,20 @@ a stale label is treated as eligible again.
 
 ### Confidence gate
 
-Before designing anything, the feature pipeline's brainstorm session scores how
-confidently the issue can be implemented as written (0–100). When that score is
-below `confidenceThreshold` (default `70`), the loop does **not** guess: it
-comments the score and the architect's specific questions on the issue, applies
-the `ai-needs-info` label, removes the worktree, and stops. The issue leaves the
-queue and is **not** auto-resumed — a human answers the questions and removes the
-`ai-needs-info` label, which re-queues the issue from scratch. Set
-`confidenceThreshold` to `0` to disable the gate and always attempt an
-implementation.
+Both routes score how confidently the issue can be implemented as written
+(0–100) before committing to an implementation. The feature pipeline's
+brainstorm session scores from the issue text, before designing anything. The
+bug pipeline's debug session may read the codebase first — a terse bug report
+can still be trivially fixable once you open the file — but writes nothing
+until after it has scored.
+
+When that score is below `confidenceThreshold` (default `70`), the loop does
+**not** guess: it comments the score and the session's specific questions on the
+issue, applies the `ai-needs-info` label, removes the worktree, and stops. The
+issue leaves the queue and is **not** auto-resumed — a human answers the
+questions and removes the `ai-needs-info` label, which re-queues the issue from
+scratch. Set `confidenceThreshold` to `0` to disable the gate on both routes and
+always attempt an implementation.
 
 ### `githubRetry`
 

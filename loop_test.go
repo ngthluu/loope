@@ -137,6 +137,47 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	}
 }
 
+// The gate is route-agnostic: a bug whose debug session scores low must reach the
+// same ai-needs-info outcome as an under-specified feature, with no PR and the
+// issue left open.
+func TestProcessOnceBugLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "small defect"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "systematic-debugging") {
+			return claudeJSON("CONFIDENCE: 25\nNo stack trace — which command reproduces the crash?", "dbg-1"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	o.cfg.ConfidenceThreshold = 70
+	if err := runCycle(o); err != nil {
+		t.Fatalf("needs-info is a clean outcome, want nil error, got %v", err)
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-needs-info") {
+		t.Errorf("want single ai-wip->ai-needs-info swap, got: %v", swap)
+	}
+	var commented bool
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "stack trace") {
+			commented = true
+		}
+	}
+	if !commented {
+		t.Error("needs-info path should comment the debug session's questions on the issue")
+	}
+	if len(env.callsMatching("gh", "pr create")) != 0 {
+		t.Error("needs-info must not create a PR")
+	}
+	if len(env.callsMatching("gh", "issue close")) != 0 {
+		t.Error("needs-info must not close the issue")
+	}
+}
+
 func TestProcessOnceNoIssuesIsNoop(t *testing.T) {
 	env := newFakeEnv(t)
 	env.f.handler = func(c rcall) (string, string, error) { return "[]", "", nil }
