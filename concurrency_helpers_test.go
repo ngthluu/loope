@@ -101,6 +101,35 @@ type slotEnv struct {
 	eligible []int
 	rework   []int
 	wip      []int
+	state    map[int]string // issue -> state label `issue view --json labels` reports
+}
+
+// stateLabels sets what `gh issue view <n> --json labels` reports for one issue,
+// which is what Stop and continue route on.
+func (s *slotEnv) stateLabels(n int, label string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == nil {
+		s.state = map[int]string{}
+	}
+	s.state[n] = label
+}
+
+// labelsJSON renders the `--json labels` reply for the issue named in args.
+func (s *slotEnv) labelsJSON(args []string) string {
+	n := 0
+	for _, a := range args {
+		if v, err := strconv.Atoi(a); err == nil {
+			n = v
+			break
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if label := s.state[n]; label != "" {
+		return fmt.Sprintf(`{"labels":[{"name":%q}]}`, label)
+	}
+	return `{"labels":[]}`
 }
 
 func (s *slotEnv) setEligible(nums ...int) {
@@ -149,6 +178,8 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 				s.mu.Lock()
 				defer s.mu.Unlock()
 				return s.listJSON(s.eligible, "ai-agent"), "", nil
+			case strings.HasPrefix(joined, "issue view") && strings.Contains(joined, "--json labels"):
+				return s.labelsJSON(c.args), "", nil
 			case strings.HasPrefix(joined, "issue view"):
 				return `{"title": "T", "body": "b", "comments": []}`, "", nil
 			case strings.HasPrefix(joined, "pr create"):

@@ -36,6 +36,62 @@ func TestProcessOnceReturnsBeforePipelinesFinish(t *testing.T) {
 	}
 }
 
+// A continue started from the dashboard runs a full pipeline — the same
+// multi-minute Claude session as any other — so it has to be part of the same
+// two accountings every pipeline is part of. It used to be part of neither: it
+// spawned a bare goroutine, so a budget of one ran two concurrent sessions, and
+// shutdown drained only the cycle's pipelines and then exited out from under it,
+// killing the session mid-flight with none of its labeling done.
+func TestDashboardContinueRunsOnTheSlotBudget(t *testing.T) {
+	env := newSlotEnv(t, 7)
+	o := env.orchestrator()
+	o.cfg.TicketsPerCycle = 1
+	env.stateLabels(9, "ai-stopped")
+	seedResumable(t, o, 9, "sess-9")
+	started, release := gatePipelines(o, env.f)
+	ctl := o.controller()
+
+	// One pipeline holds the only slot.
+	if err := o.ProcessOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitStarted(t, started, 1)
+
+	if err := ctl.Continue(9); err == nil {
+		t.Fatal("a continue that would exceed the ticket budget must be refused, not run anyway")
+	}
+	assertNoStart(t, started, 200*time.Millisecond)
+	if len(env.callsMatching("gh", "--add-label ai-wip")) != 1 {
+		t.Fatal("a refused continue must not move the ticket out of the operator hold")
+	}
+
+	// The slot frees up; now the continue runs — and shutdown must wait for it.
+	close(release)
+	o.Wait()
+
+	started2, release2 := gatePipelines(o, env.f)
+	if err := ctl.Continue(9); err != nil {
+		t.Fatalf("a continue with a free slot must start: %v", err)
+	}
+	awaitStarted(t, started2, 1)
+	if free := o.freeSlots(); free != 0 {
+		t.Fatalf("freeSlots = %d, want 0 while the continue is running", free)
+	}
+	drained := make(chan struct{})
+	go func() { o.Wait(); close(drained) }()
+	select {
+	case <-drained:
+		t.Fatal("shutdown drained while the continue was still mid-session")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release2)
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the continue never released its slot")
+	}
+}
+
 // The reported scenario: budget 3, two pipelines already in flight from an
 // earlier cycle, a third issue labelled while they run. The next cycle must
 // start exactly that third issue without waiting for the first two.

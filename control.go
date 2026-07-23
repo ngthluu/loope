@@ -442,14 +442,35 @@ func (c orchestratorController) Stop(n int) error {
 }
 
 // Continue validates and performs the label transition synchronously — so the
-// UI can report "#N is not stopped" or "#N is already running" — then runs the
-// multi-minute resume in the background on the daemon's context.
+// UI can report "#N is not stopped", "#N is already running" or a full budget —
+// then runs the multi-minute resume in the background on the daemon's context.
+//
+// The resume is a full pipeline, so it takes a slot before anything else and
+// holds it until it finishes. That is two things at once, and it used to be
+// neither: the slot is the TicketsPerCycle budget, which a bare goroutine
+// escaped (a budget of one ran two concurrent Claude sessions), and it is the
+// in-flight registration shutdown drains, which a bare goroutine also escaped —
+// so a SIGTERM returned from Wait, released the workDir lock and exited out from
+// under a live session, with none of its labeling done.
+//
+// The slot is taken BEFORE prepareContinue, so a refused continue leaves the
+// ticket in the operator hold rather than swapping it to ai-wip for a run that
+// never starts. Every path that does not reach the goroutine hands it straight
+// back.
+//
+// The CLI's -continue needs none of this: it is the whole process, drives one
+// pipeline, and returns before main does.
 func (c orchestratorController) Continue(n int) error {
+	if !c.o.tryAcquire(n) {
+		return c.o.slotRefusal(n)
+	}
 	run, err := c.o.prepareContinue(c.o.base(), n)
 	if err != nil || run == nil {
+		c.o.release(n)
 		return err
 	}
 	go func() {
+		defer c.o.release(n)
 		if err := guard("continue", func() error { return run(c.o.base()) }); err != nil {
 			log.Printf("continue #%d: %v", n, err)
 		}

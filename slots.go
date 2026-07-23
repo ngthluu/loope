@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // The slot ledger turns ticketsPerCycle into a live concurrency budget. A cycle
 // tops the in-flight set back up to the budget and returns; pipelines started in
 // different cycles run side by side. The in-process ledger is authoritative —
@@ -42,6 +44,19 @@ func (o *Orchestrator) tryAcquire(n int) bool {
 	o.active[n] = struct{}{}
 	o.inFlight.Add(1)
 	return true
+}
+
+// slotRefusal explains why tryAcquire turned issue n away, for a caller that has
+// a human waiting on the answer (the dashboard). It re-reads the ledger, so it
+// can in principle name a reason that has just stopped being true — this is an
+// error message, not a decision.
+func (o *Orchestrator) slotRefusal(n int) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, busy := o.active[n]; busy {
+		return fmt.Errorf("#%d is already running", n)
+	}
+	return fmt.Errorf("#%d cannot start yet: all %d ticket slots are busy — try again when one finishes", n, o.slots())
 }
 
 // release returns issue n's slot. Every successful tryAcquire must be paired
