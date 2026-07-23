@@ -567,6 +567,56 @@ func TestAResumeThatFailsBeforeItsSessionParksTheTicket(t *testing.T) {
 	}
 }
 
+// The other side of that coin: a ticket that is ALREADY parked must keep the
+// cause it was parked for. shouldResume reads that file, so recording a git or
+// gh failure that never reached the session over "usage limit" retires the
+// ticket from auto-resume permanently — for something that had nothing to do
+// with the ticket. It is not stranded either way: it still carries ai-rework.
+func TestAFailedResumeKeepsTheCauseAParkedTicketWasParkedFor(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-rework")
+	seedResumable(t, o, 7, "sess-42")
+	recordParkCause(o.issueLogDir(7), "terminated: session limit reached")
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "git" && strings.Contains(strings.Join(c.args, " "), "symbolic-ref") {
+			return "", "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref", errors.New("exit 1")
+		}
+		return base(c)
+	}
+
+	if err := o.Rework(context.Background(), 7); err == nil {
+		t.Fatal("a resume that could not start must report the failure")
+	}
+	cause := readParkCause(o.issueLogDir(7))
+	if _, resumable := classifyCause(cause); !resumable {
+		t.Fatalf("the ticket is no longer auto-resumable: park cause = %q", cause)
+	}
+}
+
+// A park that could not relabel the issue must not record itself locally: the
+// dashboard reads the local state first, so it would show a parked ticket while
+// ResumeParked, which lists ai-rework on GitHub, never sees one. Left untouched,
+// an ai-wip ticket with no run is what the orphan sweep recognises.
+func TestAParkThatCouldNotRelabelRecordsNothingLocally(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "gh" && strings.Contains(strings.Join(c.args, " "), "--remove-label ai-wip") {
+			return "", "gh: 503", errors.New("exit 1")
+		}
+		return base(c)
+	}
+
+	_ = o.park(context.Background(), 7, "ai-wip", errors.New("boom"))
+
+	if got := env.readLocalState(7); got == "ai-rework" {
+		t.Fatal("the park did not land on GitHub, so recording it locally makes the two disagree for good")
+	}
+	if cause := readParkCause(o.issueLogDir(7)); cause != "" {
+		t.Fatalf("a park that did not land must record no cause, got %q", cause)
+	}
+}
+
 func TestContinueRefusesNonStoppedIssue(t *testing.T) {
 	_, o := stopEnv(t, "ai-agent", "ai-rework")
 	err := o.Continue(context.Background(), 7)

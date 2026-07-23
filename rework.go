@@ -41,11 +41,14 @@ func (o *Orchestrator) Rework(ctx context.Context, n int) error {
 // such failure can go through park. That matters because a continue has already
 // swapped the ticket to ai-wip by the time it calls this: a raw error left it
 // wearing ai-wip with no run behind it, which the eligible listing skips (it has
-// a state label), auto-resume skips (it is not ai-rework) and the orphan sweep
-// only revisits at startup. Parking puts it back somewhere the daemon can find.
+// a state label) and auto-resume skips (it is not ai-rework). Parking puts it
+// back somewhere the daemon can find.
 //
-// The one failure that must NOT park is losing the claim: the issue belongs to
-// whoever won it, and relabelling it would be relabelling their run.
+// Failures BEFORE the session go through parkStart rather than park, so that a
+// ticket that is already parked keeps the cause it was parked FOR — see there.
+//
+// The one failure that must not park at all is losing the claim: the issue
+// belongs to whoever won it, and relabelling it would be relabelling their run.
 func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) error {
 	logDir := o.issueLogDir(n)
 	ictx, cancel := context.WithCancel(ctx)
@@ -66,25 +69,25 @@ func (o *Orchestrator) resume(ctx context.Context, n int, fromLabel string) erro
 
 	wtPath := worktreePath(o.cfg.WorkDir, n)
 	if _, err := os.Stat(wtPath); err != nil {
-		return o.park(ictx, n, fromLabel, fmt.Errorf("no preserved worktree at %s to resume (remove the %s label to re-queue from scratch): %w",
+		return o.parkStart(ictx, n, fromLabel, fmt.Errorf("no preserved worktree at %s to resume (remove the %s label to re-queue from scratch): %w",
 			wtPath, o.cfg.StateLabels.Rework, err))
 	}
 	si, err := readSession(logDir)
 	if err != nil {
-		return o.park(ictx, n, fromLabel, fmt.Errorf("no saved session to resume (remove the %s label to re-queue from scratch): %w",
+		return o.parkStart(ictx, n, fromLabel, fmt.Errorf("no saved session to resume (remove the %s label to re-queue from scratch): %w",
 			o.cfg.StateLabels.Rework, err))
 	}
 	if si.SessionID == "" {
-		return o.park(ictx, n, fromLabel, fmt.Errorf("saved session file has no session id"))
+		return o.parkStart(ictx, n, fromLabel, fmt.Errorf("saved session file has no session id"))
 	}
 
 	base, err := o.wt.DefaultBranch(ictx)
 	if err != nil {
-		return o.park(ictx, n, fromLabel, err)
+		return o.parkStart(ictx, n, fromLabel, err)
 	}
 	title, err := o.gh.IssueTitle(ictx, n)
 	if err != nil {
-		return o.park(ictx, n, fromLabel, err)
+		return o.parkStart(ictx, n, fromLabel, err)
 	}
 
 	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}

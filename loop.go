@@ -381,11 +381,39 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 		_ = o.gh.Comment(cctx, n, comment)
 	}
 	if fromLabel != o.cfg.StateLabels.Rework {
-		_ = o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Rework)
+		if err := o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Rework); err != nil {
+			// The park did not land: the issue still carries fromLabel. Recording
+			// it locally anyway would make the two disagree permanently — the
+			// dashboard reads the local state first, so it would show a parked
+			// ticket, while ResumeParked lists ai-rework on GitHub and would never
+			// see it. Left alone, an ai-wip ticket with no run behind it is exactly
+			// what the orphan sweep recognises and recovers.
+			log.Printf("issue #%d: parking failed, the ticket keeps %s: %v", n, fromLabel, err)
+			return cause
+		}
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Rework)
 	recordParkCause(o.issueLogDir(n), cause.Error())
 	return cause
+}
+
+// parkStart backs a resume out of a failure that hit BEFORE its Claude session —
+// the run was claimed, but no work was attempted.
+//
+// A ticket that is already parked is left exactly as it is. It is not stranded
+// (it carries ai-rework, which both a human and ResumeParked can see) and
+// rewriting its park cause is how a resumable park becomes a permanent one:
+// shouldResume reads that file, so recording a git failure over "usage limit"
+// retires the ticket from auto-resume for good, over something that had nothing
+// to do with the ticket.
+//
+// A ticket a continue has swapped to ai-wip is the opposite case: there is no
+// run behind it and nothing lists it, so it must be parked. See resume.
+func (o *Orchestrator) parkStart(ctx context.Context, n int, fromLabel string, cause error) error {
+	if fromLabel == o.cfg.StateLabels.Rework {
+		return cause
+	}
+	return o.park(ctx, n, fromLabel, cause)
 }
 
 // ResumeParked scans ai-rework issues and re-runs Rework on the ones parked for
