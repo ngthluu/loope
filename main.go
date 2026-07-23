@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ type cliFlags struct {
 	rework        *int
 	stopIssue     *int
 	continueIssue *int
+	doctor        *bool
 }
 
 func registerFlags(fs *flag.FlagSet) cliFlags {
@@ -40,6 +42,7 @@ func registerFlags(fs *flag.FlagSet) cliFlags {
 		serve:         fs.Bool("serve", false, "run the read-only progress dashboard and exit on signal"),
 		addr:          fs.String("addr", "localhost:8080", "address for -serve to listen on"),
 		showVersion:   fs.Bool("version", false, "print the loope version and exit"),
+		doctor:        fs.Bool("doctor", false, "run the preflight checks, print the report, and exit"),
 	}
 }
 
@@ -60,6 +63,10 @@ func main() {
 	defer stop()
 
 	r := execRunner{}
+	if code, proceed := gate(ctx, os.Stderr, r, cfg, *f.doctor); !proceed {
+		os.Exit(code)
+	}
+
 	o := &Orchestrator{cfg: cfg, runner: r, gh: NewGitHub(r, cfg), baseCtx: ctx,
 		wt: &Worktree{runner: r, repoPath: cfg.RepoPath, retry: cfg.GitHubRetry.policy()}}
 
@@ -139,6 +146,25 @@ func main() {
 	}
 
 	runLoop(ctx, o, cfg, *f.once, sweep)
+}
+
+// gate runs the preflight checks before any mode starts. It returns the process
+// exit code and whether the caller should continue. The report is printed only
+// when a required check failed or when -doctor asked for it, so a healthy
+// daemon run adds no output.
+func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) (exitCode int, proceed bool) {
+	results := Preflight(ctx, r, cfg)
+	failed := ReportPreflightFailedCount(results) > 0
+	if doctor || failed {
+		ReportPreflight(w, results)
+	}
+	if failed {
+		return 1, false
+	}
+	if doctor {
+		return 0, false
+	}
+	return 0, true
 }
 
 // runLoop drives the poll cycle forever: one startup orphan sweep (retried
