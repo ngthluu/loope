@@ -15,8 +15,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/ABSOLUTE/PATH/TO/loope</string>
-		<string>-serve</string>
-		<string>-config</string>
+		<string>--config</string>
 		<string>/ABSOLUTE/PATH/TO/loope.json</string>
 	</array>
 	<key>RunAtLoad</key>
