@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,19 +65,36 @@ func TestEveryTemplateRenders(t *testing.T) {
 	}
 }
 
-// Every .md.tmpl file on disk must have made it into the binary.
-func TestEveryPromptFileIsEmbedded(t *testing.T) {
-	entries, err := promptFS.ReadDir("ai/prompts")
+// Every .md.tmpl file on disk must have made it into the binary and been
+// parsed. This walks the real directory, not promptFS: reading the embedded FS
+// could only confirm what embed already put there, so it could never catch a
+// file the //go:embed pattern or the ParseFS glob missed — which is exactly the
+// failure worth catching, since it surfaces at runtime as a mustRender panic.
+func TestEveryPromptFileOnDiskIsParsed(t *testing.T) {
+	const dir = "ai/prompts"
+	found := 0
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md.tmpl") {
+			return nil
+		}
+		found++
+		if filepath.Dir(path) != filepath.Clean(dir) {
+			t.Errorf("%s is nested; %s must stay flat (neither the embed pattern nor the ParseFS glob descends)", path, dir)
+			return nil
+		}
+		if prompts.Lookup(d.Name()) == nil {
+			t.Errorf("%s is on disk but was not parsed into the binary", path)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) == 0 {
-		t.Fatal("ai/prompts embedded empty")
-	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".md.tmpl") {
-			t.Errorf("unexpected file in ai/prompts: %s (only .md.tmpl files are parsed)", e.Name())
-		}
+	if found == 0 {
+		t.Fatalf("no .md.tmpl files found under %s", dir)
 	}
 }
 

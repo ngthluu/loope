@@ -12,11 +12,14 @@ import (
 // and are compiled into the binary, so a release is still one self-contained
 // file that reads nothing from disk at runtime.
 //
-// The directory is flat on purpose: template.ParseFS names each template by its
-// base filename, so two files with the same name in different subdirectories
-// would silently shadow one another.
+// The embed pattern deliberately mirrors ParseFS's glob below. Neither one
+// descends, and the directory is flat on purpose: template.ParseFS names each
+// template by its base filename, so two files with the same name in different
+// subdirectories would silently shadow one another. A nested file would ship
+// unparsed and fail only as a runtime panic, so TestEveryPromptFileOnDiskIsParsed
+// enforces flatness against the real directory at build time.
 //
-//go:embed ai/prompts
+//go:embed ai/prompts/*.md.tmpl
 var promptFS embed.FS
 
 // missingkey=error is load-bearing, not incidental: without it a typo'd
