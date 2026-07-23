@@ -195,6 +195,10 @@ binary stays self-contained and `go build` remains the only build command —
 there is no Node, npm, or asset pipeline in CI. Editing a template or script
 needs a rebuild, which takes about a second.
 
+The one exception is webfonts: the page links IBM Plex from Google Fonts, so an
+offline or air-gapped host falls back to system fonts. Everything else — markup,
+behavior, styling — is served from the binary.
+
 Styling is Tailwind CSS v4, compiled ahead of time with the [standalone
 CLI](https://tailwindcss.com/blog/standalone-cli) (a single binary — no npm)
 and **committed** as `web/static/app.css`. The source is `web/tailwind.css`.

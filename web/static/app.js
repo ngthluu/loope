@@ -40,7 +40,11 @@ setInterval(function () {
   if (el) el.textContent = since + 's';
 }, 1000);
 
-document.body.addEventListener('htmx:afterRequest', function () {
+// Only a request that actually came back resets the clock: htmx fires
+// afterRequest for failures too, and a ticker that resets on those would keep
+// reading "0s ago" against a server that stopped answering.
+document.body.addEventListener('htmx:afterRequest', function (e) {
+  if (!e.detail.successful) return;
   since = 0;
   var el = document.getElementById('ago');
   if (el) el.textContent = '0s';
