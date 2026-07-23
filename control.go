@@ -17,10 +17,12 @@ type runRegistry struct {
 	mu   sync.Mutex
 	live map[int]liveRun
 
-	// claim takes the on-disk half of a register. A seam for tests, which need
-	// to hold one open to observe what the rest of the registry can do while it
-	// is in flight. nil means claimRunOwner.
-	claim func(logDir string) (*pidLock, bool)
+	// claim and stopPending are the two filesystem halves of a register and a
+	// release. Seams for tests, which need to hold one open to observe what the
+	// rest of the registry can do while it is in flight — the whole point of
+	// doing them outside the mutex. nil means claimRunOwner / stopRequested.
+	claim       func(logDir string) (*pidLock, bool)
+	stopPending func(logDir string) bool
 }
 
 // liveRun is one registered pipeline: the cancel func a stop pulls, and the
@@ -86,26 +88,41 @@ func (r *runRegistry) register(n int, logDir string, cancel context.CancelFunc) 
 // marker was pending as it did so — a stop that landed too late for the run to
 // act on, which the caller must now finish.
 //
-// The report and the release happen under one lock, and Stop's cancel takes the
-// same lock, which is what makes the two possible orders exhaustive: either
-// Stop finds the claim (and the stop it just recorded is seen here) or it does
-// not (and Stop finishes the stop itself). Without that, a marker written in
-// the instant between a run's last stop check and its release was consumed by
-// nobody and left behind to be read as a fresh hold by the issue's next life.
+// Retracting the claim BEFORE reading the marker is what makes a stop from
+// another process impossible to lose. Stop's order is the mirror: write the
+// marker, then look for an owner. Suppose it finds one — that probe ran before
+// this retraction, so its write ran before it too, and the read below sees it.
+// Suppose it does not — the retraction already happened, and Stop finishes the
+// stop itself. Both may fire, and finishStopped is idempotent for exactly that
+// reason; neither can miss. Read first and there is a schedule where both do:
+// read(nothing) < write < probe(owner still here) < retract, which left the
+// marker for the issue's next life to read as a fresh hold.
+//
+// The in-process half of the same handshake is the map, which Stop's cancel
+// takes the mutex for: a stop that finds the entry cancels a live run, and one
+// that does not finds no owner either, because the entry outlives the claim.
+//
+// The filesystem work is deliberately outside the mutex, for the reason
+// register's is: workDir can be a network mount, and one issue's release must
+// not be able to block Stop for every other issue.
 //
 // Only a claim we actually hold is retracted: a refused register must never
-// delete the owner file of the process that beat us to it.
+// release the claim of the process that beat us to it.
 func (r *runRegistry) release(n int, logDir string) (stopPending bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	run, ok := r.live[n]
+	if ok {
+		delete(r.live, n)
+	}
+	r.mu.Unlock()
 	if !ok {
 		return false
 	}
-	delete(r.live, n)
-	pending := stopRequested(logDir)
 	run.lock.release()
-	return pending
+	if r.stopPending != nil {
+		return r.stopPending(logDir)
+	}
+	return stopRequested(logDir)
 }
 
 // cancel halts issue n's pipeline if it is running in this process, reporting

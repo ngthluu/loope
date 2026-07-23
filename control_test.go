@@ -149,6 +149,43 @@ func TestRegisterDoesNotHoldTheRegistryAcrossTheOnDiskClaim(t *testing.T) {
 	}
 }
 
+// The mirror of the register case: one issue's release must not be able to hold
+// the registry while the filesystem hangs, and the entry must be gone before the
+// filesystem work starts — a stop arriving in that window belongs to the release
+// that is already under way, not to a run Stop can still find and cancel.
+func TestReleaseDoesNotHoldTheRegistryAcrossItsFilesystemWork(t *testing.T) {
+	var reg runRegistry
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	reg.stopPending = func(string) bool {
+		close(entered)
+		<-unblock
+		return true
+	}
+	if !reg.register(7, "", func() {}) {
+		t.Fatal("register should succeed")
+	}
+
+	released := make(chan bool, 1)
+	go func() { released <- reg.release(7, "") }()
+	<-entered
+
+	answered := make(chan bool, 1)
+	go func() { answered <- reg.running(7) }()
+	select {
+	case running := <-answered:
+		if running {
+			t.Fatal("the entry must be dropped before the release touches the filesystem")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the registry blocked behind an in-flight release")
+	}
+
+	close(unblock)
+	if !<-released {
+		t.Fatal("a pending stop must be reported to the caller")
+	}
+}
+
 // The reservation a register makes before it reaches the filesystem must not
 // outlive a claim it then loses: the issue belongs to whoever won it, and a
 // leftover entry would make this process report a run it is not doing.

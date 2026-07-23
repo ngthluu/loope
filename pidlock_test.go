@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -75,6 +76,40 @@ func TestPIDLockTakesOverAFileWhosePidWasReused(t *testing.T) {
 	defer l.release()
 	if pid, _ := readPIDFile(path); pid != os.Getpid() {
 		t.Errorf("taking over must republish our pid, got %d", pid)
+	}
+}
+
+// Probing is a read, and two readers must not invent a holder for each other.
+// An exclusive probe did: whoever lost the race reported the pid lying in the
+// file — a crashed run's, since nothing deletes those — as a live owner. Stop
+// then left the labeling to a process that did not exist, and settleStopped left
+// a marker behind on a ticket it had just stopped.
+func TestConcurrentProbesDoNotInventAHolder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claim")
+	// The residue of a crashed run: a file naming a pid nobody holds.
+	if err := os.WriteFile(path, []byte("2147483646"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const probes = 16
+	var wg sync.WaitGroup
+	held := make(chan int, probes)
+	for i := 0; i < probes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if pid, ok := pidLockHeld(path); ok {
+					held <- pid
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(held)
+	if pid, ok := <-held; ok {
+		t.Fatalf("a probe reported pid %d as holding a claim nobody holds", pid)
 	}
 }
 

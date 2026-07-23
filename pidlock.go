@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 )
 
@@ -30,6 +31,13 @@ type pidLock struct {
 	f *os.File
 }
 
+// pidLockGuard serialises this process's claims and probes. flock conflicts are
+// between open file descriptions, not processes, so two goroutines here race
+// each other exactly as two processes would — and a probe that lost such a race
+// used to report a phantom holder. Held only across an acquisition, never for
+// the life of a claim.
+var pidLockGuard sync.Mutex
+
 // lockHeldError reports that a live process already holds the path. It is the
 // only failure worth refusing over: every other error (an unwritable directory,
 // a filesystem that cannot flock) leaves the caller to decide, and both callers
@@ -46,6 +54,8 @@ func (e lockHeldError) Error() string { return fmt.Sprintf("held by pid %d", e.p
 // stale-lock takeover protocol to get right — the two things the previous
 // O_EXCL implementations each had their own copy of.
 func claimPIDLock(path string) (*pidLock, error) {
+	pidLockGuard.Lock()
+	defer pidLockGuard.Unlock()
 	// A departing holder unlinks the file while still holding the lock, so a
 	// claimant that opened it a moment earlier can win an flock on an inode that
 	// is no longer at the path — a claim nobody else could see. Detect that by
@@ -94,17 +104,29 @@ func (l *pidLock) release() {
 // pidLockHeld reports whether a live process holds the claim on path, and which
 // pid it published. A missing file, or one whose owner is gone, reads as free.
 //
-// The probe takes the lock and immediately drops it, which is safe: acquiring it
-// at all proves nobody held it. A claim taken in the instant afterwards is not
-// missed by anything that matters — both callers re-check under the claim they
-// then take, and the claim itself is atomic.
+// The probe is SHARED, and that is load-bearing. A shared lock still conflicts
+// with the exclusive one a real holder took, which is the question being asked —
+// but it does not conflict with another probe, so two readers cannot invent a
+// holder for each other. An exclusive probe did exactly that: whoever lost the
+// race read the pid lying in the file (a crashed run's, since nothing deletes
+// those) and reported it as a live owner. Stop then left the labeling to a
+// process that did not exist, settleStopped left a marker on a stopped ticket,
+// and register refused a claim nobody held.
+//
+// Probing at all is still an acquisition, so it is serialised with this
+// process's claims (see pidLockGuard) and can still, very rarely, make a
+// claimant in ANOTHER process see a phantom holder. Every caller of a refused
+// claim treats it as "someone else is running this", which is recoverable —
+// the cycle retries — where a phantom read as a real owner was not.
 func pidLockHeld(path string) (pid int, held bool) {
+	pidLockGuard.Lock()
+	defer pidLockGuard.Unlock()
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return 0, false
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		if err == syscall.EWOULDBLOCK {
 			pid, _ = readPIDFile(path)
 			return pid, true
