@@ -101,6 +101,27 @@ func (o *Orchestrator) consumeStopping(n int) bool {
 	return false
 }
 
+// Stop cancels the in-flight pipeline for issue n mid-turn and flags the run so
+// its goroutine parks the ticket as ai-stopped (via pause) as it unwinds. It
+// returns immediately — the label transition is eventually consistent, surfacing
+// on the dashboard's 3s poll a moment later. A ticket with no pipeline in flight
+// (never started, already finished, double Stop) returns errNotRunning: a no-op.
+func (o *Orchestrator) Stop(n int) error {
+	o.mu.Lock()
+	cancel, ok := o.cancels[n]
+	if !ok {
+		o.mu.Unlock()
+		return errNotRunning
+	}
+	if o.stopping == nil {
+		o.stopping = map[int]bool{}
+	}
+	o.stopping[n] = true
+	o.mu.Unlock()
+	cancel() // kills the claude subprocess via exec.CommandContext
+	return nil
+}
+
 func (o *Orchestrator) clock() time.Time {
 	if o.now != nil {
 		return o.now()

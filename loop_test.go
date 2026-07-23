@@ -1046,3 +1046,26 @@ func TestCancellationHelpers(t *testing.T) {
 	}
 	_ = called
 }
+
+func TestStopFlagsAndCancelsRunningTicket(t *testing.T) {
+	o := &Orchestrator{}
+	cancelled := false
+	o.setCancel(7, func() { cancelled = true })
+
+	if err := o.Stop(7); err != nil {
+		t.Fatalf("Stop(7) on a running ticket: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("Stop did not invoke the registered cancel func")
+	}
+	if !o.isStopping(7) {
+		t.Fatal("Stop did not set the stopping flag")
+	}
+}
+
+func TestStopNotRunningReturnsSentinel(t *testing.T) {
+	o := &Orchestrator{}
+	if err := o.Stop(99); err != errNotRunning {
+		t.Fatalf("Stop(99) with nothing in flight = %v, want errNotRunning", err)
+	}
+}
