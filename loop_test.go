@@ -103,7 +103,7 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	}
 	o := env.orchestrator()
 	o.cfg.ConfidenceThreshold = 70
-	if err := o.ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(o); err != nil {
 		t.Fatalf("needs-info is a clean outcome, want nil error, got %v", err)
 	}
 	// Label swap ai-wip -> ai-needs-info (single atomic call).
@@ -140,7 +140,7 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 func TestProcessOnceNoIssuesIsNoop(t *testing.T) {
 	env := newFakeEnv(t)
 	env.f.handler = func(c rcall) (string, string, error) { return "[]", "", nil }
-	if err := env.orchestrator().ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	if len(env.f.calls) != 1 {
@@ -150,7 +150,7 @@ func TestProcessOnceNoIssuesIsNoop(t *testing.T) {
 
 func TestProcessOnceHappyPathBug(t *testing.T) {
 	env := newFakeEnv(t)
-	if err := env.orchestrator().ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []struct{ name, substr string }{
@@ -189,7 +189,7 @@ func TestProcessOnceHappyPathBug(t *testing.T) {
 func TestProcessOnceUsesConfiguredStateLabels(t *testing.T) {
 	env := newFakeEnv(t)
 	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Failed: "bot-failed", Done: "bot-done"})
-	if err := o.ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(o); err != nil {
 		t.Fatal(err)
 	}
 	if len(env.callsMatching("gh", "--add-label bot-wip")) == 0 {
@@ -209,8 +209,8 @@ func TestProcessOnceUsesConfiguredStateLabels(t *testing.T) {
 func TestProcessOnceFailurePathParksForRework(t *testing.T) {
 	env := newFakeEnv(t)
 	env.failClaude = true
-	if err := env.orchestrator().ProcessOnce(context.Background()); err == nil {
-		t.Fatal("want error from failed pipeline")
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("a failing pipeline must not be returned from the cycle, got %v", err)
 	}
 	// Parked as ai-rework, not ai-failed.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
@@ -238,8 +238,8 @@ func TestProcessOnceFailurePathParksForRework(t *testing.T) {
 func TestParkWritesCauseAndShipClearsIt(t *testing.T) {
 	env := newFakeEnv(t)
 	env.failClaude = true
-	if err := env.orchestrator().ProcessOnce(context.Background()); err == nil {
-		t.Fatal("want pipeline error")
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
 	}
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	if got := readParkCause(logDir); got == "" {
@@ -250,7 +250,7 @@ func TestParkWritesCauseAndShipClearsIt(t *testing.T) {
 	env2 := newFakeEnv(t)
 	logDir2 := filepath.Join(env2.wtDir, "logs", "issue-7")
 	recordParkCause(logDir2, "old cause")
-	if err := env2.orchestrator().ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(env2.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	if got := readParkCause(logDir2); got != "" {
@@ -273,7 +273,7 @@ func (e *fakeEnv) readLocalState(n int) string {
 // re-polling gh.
 func TestProcessOnceRecordsLocalStateDone(t *testing.T) {
 	env := newFakeEnv(t)
-	if err := env.orchestrator().ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	if got := env.readLocalState(7); got != "ai-done" {
@@ -286,8 +286,8 @@ func TestProcessOnceRecordsLocalStateDone(t *testing.T) {
 func TestProcessOnceRecordsLocalStateRework(t *testing.T) {
 	env := newFakeEnv(t)
 	env.failClaude = true
-	if err := env.orchestrator().ProcessOnce(context.Background()); err == nil {
-		t.Fatal("want error from failed pipeline")
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
 	}
 	if got := env.readLocalState(7); got != "ai-rework" {
 		t.Fatalf("local state marker = %q, want ai-rework", got)
@@ -308,8 +308,8 @@ func TestToolingFailureDoesNotMarkFailed(t *testing.T) {
 		}
 		return base(c)
 	}
-	if err := env.orchestrator().ProcessOnce(context.Background()); err == nil {
-		t.Fatal("want error surfaced from tooling failure")
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
 	}
 	// It must not have swapped to a terminal state label.
 	for _, term := range []string{"--add-label ai-failed", "--add-label ai-done"} {
@@ -333,7 +333,8 @@ func TestToolingFailureDoesNotMarkFailed(t *testing.T) {
 
 // If the terminal WIP->Done swap fails, the error must be surfaced, not
 // swallowed: the PR was created but the issue would otherwise silently look
-// unfinished.
+// unfinished. The cycle no longer returns pipeline errors (the pipeline outlives
+// it), so the surface is the daemon log the goroutine writes.
 func TestDoneSwapFailureIsSurfaced(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.handler
@@ -344,12 +345,13 @@ func TestDoneSwapFailureIsSurfaced(t *testing.T) {
 		}
 		return base(c)
 	}
-	err := env.orchestrator().ProcessOnce(context.Background())
-	if err == nil {
-		t.Fatal("want error when the Done swap fails")
+	logged := captureLog(t)
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "done") && !strings.Contains(err.Error(), "Done") {
-		t.Errorf("error should explain the Done swap failed, got: %v", err)
+	out := logged()
+	if !strings.Contains(out, "done") && !strings.Contains(out, "Done") {
+		t.Errorf("the daemon log should explain the Done swap failed, got: %s", out)
 	}
 	// The PR was still created — a Done-swap failure must not mark it ai-failed.
 	if len(env.callsMatching("gh", "--add-label ai-failed")) != 0 {
@@ -370,7 +372,7 @@ func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 		}
 		return base(c)
 	}
-	if err := env.orchestrator().ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	// Terminal done actions.
@@ -410,7 +412,7 @@ func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
 		return base(c)
 	}
 	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Failed: "bot-failed", Done: "bot-done"})
-	if err := o.ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(o); err != nil {
 		t.Fatal(err)
 	}
 	swap := env.callsMatching("gh", "--remove-label bot-wip")
@@ -428,8 +430,8 @@ func TestHandleIssueZeroCommitsParksForRework(t *testing.T) {
 		}
 		return base(c)
 	}
-	if err := env.orchestrator().ProcessOnce(context.Background()); err == nil {
-		t.Fatal("want error when pipeline produced no commits")
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v, want nil (the park is the observable outcome)", err)
 	}
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
 	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
@@ -485,7 +487,7 @@ func TestProcessOnceHandlesMultipleTickets(t *testing.T) {
 	o.wt.retry = testRetry
 	o.cfg.TicketsPerCycle = 2
 
-	if err := o.ProcessOnce(context.Background()); err != nil {
+	if err := runCycle(o); err != nil {
 		t.Fatal(err)
 	}
 
@@ -926,8 +928,7 @@ func TestReworkAlreadyDoneCloses(t *testing.T) {
 
 // A panic anywhere inside a single issue's pipeline must not take down the
 // daemon or its sibling pipelines: the goroutine recovers, parks the issue
-// (panic text is non-resumable, so it waits for a human), and ProcessOnce
-// still returns the error to the caller for logging.
+// (panic text is non-resumable, so it waits for a human), and releases its slot.
 func TestHandleIssuePanicParksIssue(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.handler
@@ -938,11 +939,18 @@ func TestHandleIssuePanicParksIssue(t *testing.T) {
 		}
 		return base(c)
 	}
-	err := env.orchestrator().ProcessOnce(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "panic") {
-		t.Fatalf("err = %v, want the recovered panic", err)
+	o := env.orchestrator()
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil (the panic is handled in the pipeline)", err)
 	}
 	if len(env.callsMatching("gh", "--add-label ai-rework")) == 0 {
 		t.Error("a panicking pipeline must park the issue for rework")
+	}
+	cause := readParkCause(filepath.Join(env.wtDir, "logs", "issue-7"))
+	if !strings.Contains(cause, "panic") {
+		t.Errorf("park cause = %q, want it to record the panic", cause)
+	}
+	if free := o.freeSlots(); free != 1 {
+		t.Errorf("freeSlots after a panicking pipeline = %d, want 1 (slot must be released)", free)
 	}
 }

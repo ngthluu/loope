@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -179,6 +181,37 @@ func prepParkedIn(t *testing.T, env *fakeEnv, n int, cause string) {
 		t.Fatal(err)
 	}
 	recordParkCause(logDir, cause)
+}
+
+// lockedBuf is an io.Writer safe for the concurrent pipeline goroutines that
+// now do their own logging.
+type lockedBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog redirects the standard logger for the duration of the test and
+// returns an accessor for what was written. Pipeline outcomes are logged by the
+// goroutine that runs them, so the daemon log is where a failed pipeline now
+// surfaces.
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var b lockedBuf
+	log.SetOutput(&b)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return b.String
 }
 
 // runCycle runs one ProcessOnce and drains the pipelines it started, so tests
