@@ -274,7 +274,6 @@ func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, fr
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
 	clearParkCause(o.issueLogDir(n))
-	clearStopRequest(o.issueLogDir(n))
 	return o.gh.CloseIssue(cctx, n)
 }
 
@@ -303,7 +302,6 @@ func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, wtPath, branc
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.NeedsInfo)
 	clearParkCause(o.issueLogDir(n))
-	clearStopRequest(o.issueLogDir(n))
 	return nil
 }
 
@@ -574,8 +572,13 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		}
 		clearState(logDir)
 		clearParkCause(logDir)
-		clearStopRequest(logDir)
-		// The crashed run's owner file is left where it is. It already reads as
+		// A stop that landed since the check above is left where it is. The sweep
+		// holds no claim, so nothing else would ever consume that marker; the next
+		// pickup honours it and parks the ticket as stopped, which is what the
+		// operator asked for. Deleting it would discard a stop Stop has already
+		// reported as succeeded.
+		//
+		// The crashed run's owner file is left where it is too. It already reads as
 		// "nobody is running this" — the kernel dropped its lock when the process
 		// died — and deleting a claim file we do not hold is how a live claim
 		// becomes invisible to everyone else: the next claimant creates a fresh
@@ -635,7 +638,6 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
 	clearParkCause(o.issueLogDir(n))
-	clearStopRequest(o.issueLogDir(n))
 	_ = o.wt.Remove(ctx, wtPath)
 	return nil
 }
@@ -653,7 +655,6 @@ func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, 
 	_ = o.gh.RemoveLabel(cctx, n, o.cfg.StateLabels.WIP)
 	clearState(o.issueLogDir(n))
 	clearParkCause(o.issueLogDir(n))
-	clearStopRequest(o.issueLogDir(n))
 	if wtPath != "" {
 		_ = o.wt.Remove(cctx, wtPath)
 	}

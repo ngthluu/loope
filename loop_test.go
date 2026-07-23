@@ -844,6 +844,36 @@ func TestSweepOrphansRequeuesStaleWIP(t *testing.T) {
 	}
 }
 
+// The sweep checks for a hold before it reclaims, but a `loope -stop` in another
+// shell can land in the window between that check and the end of the reclaim.
+// Nothing else will consume that marker — the sweep holds no claim — so deleting
+// it discards a stop the operator has already been told succeeded. Left where it
+// is, the next pickup honours it.
+func TestSweepOrphansKeepsAStopThatLandsMidReclaim(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
+			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
+		}
+		// The stop lands as the sweep is re-queueing the ticket.
+		if c.name == "gh" && strings.Contains(joined, "--remove-label ai-wip") {
+			recordStopRequest(logDir)
+		}
+		return base(c)
+	}
+	recordState(logDir, "ai-wip")
+
+	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !stopRequested(logDir) {
+		t.Fatal("a stop the sweep raced must survive it: nothing else is left to consume the marker")
+	}
+}
+
 // A crashed run that left a worktree AND a recorded session behind is resumable:
 // SweepOrphans must preserve it (park for rework, worktree intact) rather than
 // force-removing it and re-running the whole pipeline from zero.

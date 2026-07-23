@@ -727,32 +727,64 @@ func TestStopDefersToARunInAnotherProcess(t *testing.T) {
 	}
 }
 
-// The terminal states clear the marker too, so a hold can never outlive the run
-// it described and be read by the next one.
-func TestTerminalOutcomesClearTheStopMarker(t *testing.T) {
+// A stop can land while a run is in its final moments — after its last stop
+// check, before it lets its claim go. Stop finds the claim, cancels, and reports
+// "halting the running session"; the terminal path it is racing runs on a
+// cancellation-proof context and finishes regardless.
+//
+// The terminal paths used to delete the marker themselves, which erased that
+// stop: the claim's release found nothing pending, no ai-stopped label was ever
+// applied and nothing was logged, so an operator was told a ticket had been
+// stopped while it in fact shipped and closed. A run holding a claim therefore
+// never retires a marker — releaseClaim is the single consumer, and it re-reads
+// the issue to decide what the stop still means.
+func TestARunNeverDiscardsAStopThatLandedOnIt(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		run  func(*Orchestrator) error
+		name  string
+		state string // what the issue carries once the terminal path has run
+		run   func(*Orchestrator) error
 	}{
-		{"done", func(o *Orchestrator) error {
+		{"done", "ai-done", func(o *Orchestrator) error {
 			return o.finishDone(context.Background(), 7, "", "", "ai-wip", "already implemented")
 		}},
-		{"needs-info", func(o *Orchestrator) error {
+		{"needs-info", "ai-needs-info", func(o *Orchestrator) error {
 			return o.finishNeedsInfo(context.Background(), 7, "", "", "ai-wip", &lowConfidenceError{score: 20, feedback: "unclear"})
 		}},
-		{"abort", func(o *Orchestrator) error {
+		{"abort", "", func(o *Orchestrator) error {
 			_ = o.abort(context.Background(), 7, "", "", errors.New("boom"))
 			return nil
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, o := stopEnv(t, "ai-agent", "ai-wip")
-			recordStopRequest(o.issueLogDir(7))
+			labels := []string{"ai-agent"}
+			if tc.state != "" {
+				labels = append(labels, tc.state)
+			}
+			env, o := stopEnv(t, labels...)
+			logDir := o.issueLogDir(7)
+			o.registry.register(7, logDir, func() {})
+			recordStopRequest(logDir)
+
 			if err := tc.run(o); err != nil {
 				t.Fatal(err)
 			}
-			if stopRequested(o.issueLogDir(7)) {
-				t.Fatalf("%s is terminal: the stop marker must not survive it", tc.name)
+			if !stopRequested(logDir) {
+				t.Fatal("the run still holds its claim, so the stop is still pending: only its release may retire it")
+			}
+
+			o.releaseClaim(context.Background(), 7, logDir)
+
+			if stopRequested(logDir) {
+				t.Fatal("releasing the claim settles the stop one way or the other; no marker may outlive it")
+			}
+			stopped := len(env.callsMatching("gh", "ai-stopped")) != 0
+			if tc.state == "" && !stopped {
+				// abort re-queued the ticket. The operator asked for it to halt, so
+				// it lands in the hold rather than being picked up again next cycle.
+				t.Fatal("a stop that outlived the run must still park the ticket as stopped")
+			}
+			if tc.state != "" && stopped {
+				t.Fatalf("the run reached %s before the stop: it must not be relabelled out of it", tc.state)
 			}
 		})
 	}

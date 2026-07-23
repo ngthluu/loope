@@ -283,12 +283,18 @@ func stopRequested(logDir string) bool {
 	return err == nil
 }
 
-// clearStopRequest removes the stop marker. Never called by the stop
-// completing: the marker is the durable record of the hold, and finishStopped
-// deliberately leaves it. It is cleared by continue (the hold is lifted) and by
-// every transition into a terminal non-stopped state — done, needs-info, or
-// re-queued — where the hold no longer describes anything. A marker left behind
-// by one of those would outlive its run and misread the NEXT one as stopped.
+// clearStopRequest removes the stop marker, which exactly two things may do:
+// continue, which lifts the hold, and settleStopped, which retires a stop that
+// has LANDED (see control.go).
+//
+// A run holding a claim is not one of them, however it ends. It used to be — the
+// done, needs-info and re-queued paths each deleted the marker as they finished,
+// on the reasoning that a hold no longer describes a terminal state. But a stop
+// can land while a run is finishing, and Stop has already told the operator it
+// took effect; deleting the marker there erased it, so the claim's release found
+// nothing pending and the ticket shipped and closed with no ai-stopped label and
+// nothing logged. releaseClaim is the single consumer instead: it re-reads the
+// issue and either parks it as stopped or retires the request out loud.
 func clearStopRequest(logDir string) {
 	if logDir == "" {
 		return
