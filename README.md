@@ -122,8 +122,8 @@ can flush its transcript). It finds that process through the run's own
 `logs/issue-<N>/owner` file, so a ticket left in `ai-wip` by a crashed run is
 stopped on the spot rather than handed to a daemon that has no such run to
 halt. The request file is retired once the `ai-stopped` label lands; until then
-it is what survives a crash, so the next daemon start recovers the ticket as
-stopped rather than resuming it.
+it is what survives a crash, so the ticket is recovered as stopped rather than
+resumed — by the daemon's sweep on a later cycle, or by the next start.
 
 Wherever the stop lands in the pipeline, the ticket ends up in `ai-stopped` with
 everything preserved: it is never aborted back into the queue and never parked
@@ -371,12 +371,18 @@ The daemon is designed to run until you stop it:
   retried automatically each poll cycle, with per-issue exponential backoff
   (5 min doubling to 60 min). Only genuine errors — anything else — stay parked
   for a human `loope -rework <N>`.
-- **Crashes self-heal on restart.** On startup the daemon sweeps issues left in
-  `ai-wip` by a crashed run. If the worktree and a recorded Claude session
+- **Stranded tickets self-heal, every cycle.** Each poll cycle the daemon
+  sweeps issues left in `ai-wip` with nothing running them — a crashed run, or a
+  transition that failed halfway. If the worktree and a recorded Claude session
   survived, the run is resumable: the issue is parked as `ai-rework` with its
-  worktree intact and auto-resumed, so the crash costs no pipeline work. Only
-  when nothing resumable remains are the leftover worktree/branch removed and
-  the label stripped to re-queue the issue from scratch. No manual cleanup.
+  worktree intact and auto-resumed, so the interruption costs no pipeline work.
+  Only when nothing resumable remains are the leftover worktree/branch removed
+  and the label stripped to re-queue the issue from scratch. A ticket whose PR
+  was already opened is never re-queued — it is left for you, with a log line
+  saying so. No manual cleanup, and no waiting for a restart.
+  A second sweep does the same for stop requests: one that nobody could
+  complete (GitHub was down when you made it) is finished on a later cycle
+  rather than sitting on disk until the issue's next life reads it.
 - **One daemon per workDir.** A lock at `<workDir>/logs/daemon.lock` refuses a
   second instance while one is alive. It is held with `flock(2)`, which the
   kernel releases when the holder dies however it dies, so a crashed instance
@@ -387,9 +393,10 @@ The daemon is designed to run until you stop it:
   disk (`logs/issue-<N>/owner`, the same kind of lock) before it starts, so a
   manual `loope -rework <N>` or `-continue <N>` against an issue a daemon is
   already driving is refused (`#N is already running`) instead of opening a
-  second Claude session in the same worktree. The same claim keeps the daemon's startup orphan sweep
-  off issues a `-once`, `-rework` or `-continue` in another shell is working on
-  — the workDir lock proves no second *daemon* is up, not that an issue is idle.
+  second Claude session in the same worktree. The same claim keeps the daemon's
+  orphan sweep off issues a `-once`, `-rework` or `-continue` in another shell
+  is working on — the workDir lock proves no second *daemon* is up, not that an
+  issue is idle.
 - **Panics don't kill the loop.** A panic in one issue's pipeline parks that
   issue with the panic recorded; the daemon and sibling pipelines continue. In
   `-serve` mode a dashboard listener error is logged, never fatal.
