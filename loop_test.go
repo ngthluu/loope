@@ -77,7 +77,12 @@ func (e *fakeEnv) orchestratorWithLabels(sl StateLabels) *Orchestrator {
 }
 
 // callsMatching returns joined arg strings of calls whose name and args match.
+// callsMatching reads the recorded calls under the runner's own mutex, so a test
+// may assert on them while goroutines are still making them — which the loop's
+// concurrency tests do, polling until an expected call has happened.
 func (e *fakeEnv) callsMatching(name, substr string) []string {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
 	var out []string
 	for _, c := range e.f.calls {
 		joined := strings.Join(c.args, " ")
@@ -917,6 +922,78 @@ func TestSweepOrphansPreservesResumableWIP(t *testing.T) {
 	cause := readParkCause(logDir)
 	if _, resumable := classifyCause(cause); !resumable {
 		t.Errorf("sweep park cause %q must be auto-resumable", cause)
+	}
+}
+
+// A stop request that nobody could finish — GitHub was down when it was made,
+// or when the run it landed on released its claim — used to have no reader at
+// all: the orphan sweep lists only ai-wip, the eligible listing skips anything
+// with a state label, and a shipped issue is closed. The marker sat there until
+// a human re-queued the issue months later, at which point the fresh ticket was
+// parked straight back into ai-stopped, quoting a hold from a previous life.
+func TestSweepStopsFinishesAStopNothingIsRunning(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	swaps := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swaps) == 0 || !strings.Contains(swaps[0], "--add-label ai-stopped") {
+		t.Fatalf("a pending stop with nothing running it must be finished, got %v", swaps)
+	}
+	if stopRequested(o.issueLogDir(7)) {
+		t.Fatal("the stop landed, so its marker is spent")
+	}
+}
+
+// The same sweep on a stop that arrived after its run had already shipped:
+// there is nothing to stop, so the request is retired rather than dragging a
+// finished ticket back out of ai-done.
+func TestSweepStopsRetiresAStopThatLostToAFinishedRun(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-done")
+	recordStopRequest(o.issueLogDir(7))
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("an issue that already shipped must not be relabelled stopped")
+	}
+	if stopRequested(o.issueLogDir(7)) {
+		t.Fatal("a marker nothing will ever consume must not be left behind")
+	}
+}
+
+// The run that owns a stop consumes it as it unwinds. The sweep stepping in
+// would relabel a ticket out from under a live Claude session.
+func TestSweepStopsLeavesALiveRunsStopAlone(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	logDir := o.issueLogDir(7)
+	recordStopRequest(logDir)
+	o.registry.register(7, logDir, func() {})
+	defer o.registry.release(7, logDir)
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "ai-stopped")) != 0 {
+		t.Fatal("the run owning this stop labels as it unwinds; the sweep must not do it underneath")
+	}
+	if !stopRequested(logDir) {
+		t.Fatal("the marker is how the running session learns of the stop and must survive")
+	}
+}
+
+func TestSweepStopsIgnoresIssuesWithNoMarker(t *testing.T) {
+	env, o := stopEnv(t, "ai-agent", "ai-wip")
+	recordState(o.issueLogDir(7), "ai-wip")
+
+	if err := o.SweepStops(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "")) != 0 {
+		t.Fatalf("a sweep with nothing pending must not call gh at all, got %v", env.callsMatching("gh", ""))
 	}
 }
 

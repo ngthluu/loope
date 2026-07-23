@@ -55,10 +55,12 @@ const (
 	resumeBackoffMax = 60 * time.Minute
 )
 
-// interruptedCause is the park cause SweepOrphans records for a run a daemon
-// restart interrupted mid-pipeline. classifyCause treats it as resumable so the
-// preserved worktree/session is auto-resumed (with backoff) rather than re-run.
-const interruptedCause = "interrupted mid-run by a daemon restart"
+// interruptedCause is the park cause SweepOrphans records for a run nothing owns
+// any more — a daemon restart mid-pipeline, or any other way a run stopped
+// existing while its ticket still said ai-wip. classifyCause treats it as
+// resumable so the preserved worktree/session is auto-resumed (with backoff)
+// rather than re-run.
+const interruptedCause = "interrupted mid-run: nothing is running this any more"
 
 func (o *Orchestrator) clock() time.Time {
 	if o.now != nil {
@@ -327,7 +329,7 @@ func classifyCause(msg string) (guidance string, resumable bool) {
 		strings.Contains(m, "max-budget") || strings.Contains(m, "budget"):
 		return "Cause: hit the turn/budget ceiling mid-run — the loop auto-resumes where it stopped (raise the execute maxTurns/maxBudgetUSD if this recurs).", true
 	case strings.Contains(m, "interrupted mid-run"):
-		return "Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session.", true
+		return "Cause: the run behind this issue is gone (a restart, or a transition that failed halfway) — the loop auto-resumes the preserved session.", true
 	}
 	for _, sig := range transientSignatures {
 		if strings.Contains(m, sig) {
@@ -612,6 +614,61 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 		// died — and deleting a claim file we do not hold is how a live claim
 		// becomes invisible to everyone else: the next claimant creates a fresh
 		// file at the same path and both believe they own the issue.
+	}
+	return nil
+}
+
+// SweepStops finishes stop requests that no run is going to finish.
+//
+// A marker means "a stop was requested and has not completed yet". Almost always
+// the process owning the run completes it as it unwinds, or Stop does it itself
+// on the spot. What is left over is the case where neither could: a stop whose
+// labeling failed — GitHub being unreachable is often exactly why an operator is
+// stopping things — or one that landed in the last instant of a run whose
+// releaseClaim then failed the same way.
+//
+// Those markers had no reader at all. SweepOrphans lists only ai-wip, the
+// eligible listing skips anything carrying a state label, and a shipped issue is
+// closed. The next thing to read one would be a pickup months later, after a
+// human re-queued the issue — which would park the fresh ticket straight back
+// into ai-stopped, quoting a hold from a previous life. "The request stays
+// pending" is only an honest thing for the rest of the code to say if something
+// eventually retries it; this is that something.
+//
+// finishStopped decides what each one still means: park the issue as stopped, or
+// retire the request because the run finished first. A failure here is logged and
+// left pending for the next cycle, which is the same answer as before, only now
+// with a next cycle.
+func (o *Orchestrator) SweepStops(ctx context.Context) error {
+	logsDir := filepath.Join(o.cfg.WorkDir, "logs")
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return nil
+		}
+		n, ok := issueDirNumber(e)
+		if !ok {
+			continue
+		}
+		logDir := filepath.Join(logsDir, e.Name())
+		if !stopRequested(logDir) {
+			continue
+		}
+		// A live run owns its own stop: it consumes the marker as it unwinds, and
+		// stepping in would relabel a ticket out from under a session.
+		if o.registry.running(n) || otherProcessRunning(logDir) {
+			continue
+		}
+		log.Printf("issue #%d: a stop request is still pending with nothing running it — finishing it now", n)
+		if err := o.finishStopped(ctx, n, ""); err != nil {
+			log.Printf("issue #%d: finishing the pending stop failed (it stays pending): %v", n, err)
+		}
 	}
 	return nil
 }

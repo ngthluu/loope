@@ -94,6 +94,45 @@ func TestRunLoopOnceDrainsInFlightPipelines(t *testing.T) {
 	}
 }
 
+// Recovery has to be continuous, not a boot-time formality. Everything that can
+// strand a ticket — a label swap that failed, a resume that could not start, a
+// stop nobody could finish — happens while the daemon is up, and a sweep that
+// only ran at startup meant every one of those was "stuck until a human restarts
+// the daemon".
+func TestRunLoopSweepsEveryCycleNotJustAtStartup(t *testing.T) {
+	env := newSlotEnv(t)
+	o := env.orchestrator()
+	o.cfg.PollIntervalSec = 0
+	captureLog(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runLoop(ctx, o, o.cfg, false /* once */, true /* sweeping */)
+		close(done)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if n := len(env.callsMatching("gh", "issue list --repo org/repo --label ai-wip")); n >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("orphan sweep ran %d times across many cycles, want it every cycle",
+				len(env.callsMatching("gh", "issue list --repo org/repo --label ai-wip")))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runLoop did not return after cancellation")
+	}
+}
+
 func TestGateBlocksOnRequiredFailure(t *testing.T) {
 	f := &fakeRunner{handler: okHandler(map[string]rresp{
 		"claude --version": {err: errors.New("not found")},

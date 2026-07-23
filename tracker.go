@@ -305,6 +305,19 @@ func clearStopRequest(logDir string) {
 // scanLogs reads workDir/logs and returns one Ticket per issue-<N> dir, steps
 // ordered by seq and cost summed, sorted by LastActive descending. A missing
 // logs dir yields an empty slice, not an error.
+// issueDirNumber reads the issue number out of a logs/ entry, reporting false
+// for anything that is not an issue-<N> directory (the triage log dir, say).
+func issueDirNumber(e os.DirEntry) (int, bool) {
+	if !e.IsDir() || !strings.HasPrefix(e.Name(), "issue-") {
+		return 0, false
+	}
+	num, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "issue-"))
+	if err != nil {
+		return 0, false
+	}
+	return num, true
+}
+
 func scanLogs(workDir string) ([]Ticket, error) {
 	logsDir := filepath.Join(workDir, "logs")
 	entries, err := os.ReadDir(logsDir)
@@ -316,11 +329,8 @@ func scanLogs(workDir string) ([]Ticket, error) {
 	}
 	var tickets []Ticket
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "issue-") {
-			continue
-		}
-		num, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "issue-"))
-		if err != nil {
+		num, ok := issueDirNumber(e)
+		if !ok {
 			continue
 		}
 		tk, ok := scanIssueDir(filepath.Join(logsDir, e.Name()), num)

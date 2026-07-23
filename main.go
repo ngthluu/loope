@@ -179,22 +179,34 @@ func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) 
 	return 0, true
 }
 
-// runLoop drives the poll cycle forever: one startup orphan sweep (retried
-// until it succeeds once), then auto-resume resumable parked issues and top the
-// in-flight pipeline set up from the eligible queue, waiting one interval
-// between cycles. Cycles no longer block on the pipelines they start, so both
-// exit paths drain in-flight work with o.Wait() before returning — main's
-// deferred workDir-lock release must not run while a pipeline is live. Every
-// stage runs under guard, so a panic is one bad cycle, not a dead daemon.
-// Returns when the context is cancelled or after a single cycle when once is set.
-func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool) {
+// runLoop drives the poll cycle forever: recover anything stranded, then
+// auto-resume resumable parked issues and top the in-flight pipeline set up from
+// the eligible queue, waiting one interval between cycles. Cycles no longer
+// block on the pipelines they start, so both exit paths drain in-flight work
+// before returning — main's deferred workDir-lock release must not run while a
+// pipeline is live. Every stage runs under guard, so a panic is one bad cycle,
+// not a dead daemon. Returns when the context is cancelled or after a single
+// cycle when once is set.
+//
+// The two recovery sweeps run EVERY cycle, not once at startup. Every way a
+// ticket can be stranded — a label swap that failed, a resume that could not
+// start, a stop nobody could finish — used to mean "stuck until a human restarts
+// the daemon", because the only thing that looks for stranded tickets ran at
+// boot. They are cheap (one `gh issue list` and one directory scan) and both
+// refuse to touch anything with a live claim behind it, so what they recover is
+// only ever work nothing else will.
+//
+// sweeping is off for -once, which holds no workDir lock: the sweeps assume no
+// other DAEMON is up.
+func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweeping bool) {
 	log.Printf("watching %s for label %q every %ds", cfg.RepoSlug, cfg.EligibleLabel, cfg.PollIntervalSec)
 	for {
-		if sweep {
+		if sweeping {
 			if err := guard("orphan sweep", func() error { return o.SweepOrphans(ctx) }); err != nil {
 				log.Printf("orphan sweep failed (will retry next cycle): %v", err)
-			} else {
-				sweep = false
+			}
+			if err := guard("stop sweep", func() error { return o.SweepStops(ctx) }); err != nil {
+				log.Printf("stop sweep failed (will retry next cycle): %v", err)
 			}
 		}
 		// Resumes run BEFORE new work: they continue an issue that already has a
