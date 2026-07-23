@@ -27,12 +27,12 @@ const (
 	modeRun            cliMode = iota // start the daemon (config given)
 	modeVersion                       // print version and exit, without reading config
 	modeHelp                          // print usage and exit 0 (bare invocation / --help)
-	modeDoctorNoConfig                // --doctor without --config: usage error, exit 2
+	modeDoctorNoConfig                // --doctor without --config: run config-less preflight and exit
 )
 
 // resolveMode maps the parsed flags to a run mode. --version wins over
 // everything (the config is never read); a missing --config means help unless
-// --doctor was asked for, which is a usage error.
+// --doctor was asked for, which runs the environment checks without a config.
 func resolveMode(configPath string, showVersion, doctor bool) cliMode {
 	switch {
 	case showVersion:
@@ -72,9 +72,13 @@ func main() {
 		usage(fs, os.Stdout)
 		os.Exit(0)
 	case modeDoctorNoConfig:
-		fmt.Fprintln(os.Stderr, "--config is required")
-		usage(fs, os.Stderr)
-		os.Exit(2)
+		// -doctor without -config: run the environment checks that need no
+		// config (binaries, auth, superpowers) and skip the repo-specific
+		// ones. Lets a user verify their machine before writing a config.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		code, _ := gate(ctx, os.Stderr, execRunner{}, nil, true)
+		os.Exit(code)
 	}
 
 	cfg, err := LoadConfig(*configPath)

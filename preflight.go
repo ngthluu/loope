@@ -75,6 +75,17 @@ func binaryCheck(ctx context.Context, r Runner, name string, fix []string, args 
 
 var fixSuperpowers = []string{"claude plugin install superpowers@claude-plugins-official"}
 
+// skipIfNoConfig returns a statusSkip result when the daemon has no config,
+// which is the `loope -doctor` case run without --config. The repo-specific
+// checks depend on config values (repoPath, repoSlug), so they are skipped
+// rather than run against zero values.
+func skipIfNoConfig(name string, cfg *Config) (CheckResult, bool) {
+	if cfg == nil {
+		return CheckResult{Name: name, Status: statusSkip, Detail: "skipped (no --config)"}, true
+	}
+	return CheckResult{}, false
+}
+
 // skipIfBlocked returns a statusSkip result naming the first blocker that did
 // not pass. A skipped check is never fatal on its own — its blocker already is.
 func skipIfBlocked(name string, blockers ...CheckResult) (CheckResult, bool) {
@@ -109,7 +120,7 @@ func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckRe
 		return res
 	}
 	var env []string
-	if cfg.ClaudeConfigDir != "" {
+	if cfg != nil && cfg.ClaudeConfigDir != "" {
 		env = []string{"CLAUDE_CONFIG_DIR=" + cfg.ClaudeConfigDir}
 	}
 	out, err := probe(ctx, r, "", env, "claude", "plugin", "list")
@@ -118,7 +129,7 @@ func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckRe
 	}
 	if !strings.Contains(out, "superpowers@") {
 		detail := "plugin not installed"
-		if cfg.ClaudeConfigDir != "" {
+		if cfg != nil && cfg.ClaudeConfigDir != "" {
 			detail += " (CLAUDE_CONFIG_DIR=" + cfg.ClaudeConfigDir + ")"
 		}
 		return CheckResult{Name: "superpowers", Status: statusFail, Detail: detail, Fix: fixSuperpowers}
@@ -127,6 +138,9 @@ func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckRe
 }
 
 func checkRepoPath(ctx context.Context, r Runner, cfg *Config, git CheckResult) CheckResult {
+	if res, skipped := skipIfNoConfig("repoPath", cfg); skipped {
+		return res
+	}
 	if res, skipped := skipIfBlocked("repoPath", git); skipped {
 		return res
 	}
@@ -143,6 +157,9 @@ func checkRepoPath(ctx context.Context, r Runner, cfg *Config, git CheckResult) 
 }
 
 func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth CheckResult) CheckResult {
+	if res, skipped := skipIfNoConfig("repo access", cfg); skipped {
+		return res
+	}
 	if res, skipped := skipIfBlocked("repo access", gh, ghAuth); skipped {
 		return res
 	}
@@ -180,6 +197,9 @@ func wantedLabels(cfg *Config) []string {
 // checkLabels warns (never fails) about labels the loop needs but the repo does
 // not have, handing the user the exact `gh label create` commands.
 func checkLabels(ctx context.Context, r Runner, cfg *Config, access CheckResult) CheckResult {
+	if res, skipped := skipIfNoConfig("labels", cfg); skipped {
+		return res
+	}
 	if res, skipped := skipIfBlocked("labels", access); skipped {
 		return res
 	}

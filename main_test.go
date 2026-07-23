@@ -116,6 +116,24 @@ func TestGateDoctorAlwaysReportsAndNeverProceeds(t *testing.T) {
 	}
 }
 
+func TestGateNoConfigDoctorReportsAndSkipsRepoChecks(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)}
+	var buf bytes.Buffer
+	code, proceed := gate(context.Background(), &buf, f, nil, true)
+	if proceed {
+		t.Fatal("-doctor must never proceed into the loop")
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 when the environment is healthy without config", code)
+	}
+	if !strings.Contains(buf.String(), "loope preflight") {
+		t.Fatalf("no-config -doctor must print the report, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "no --config") {
+		t.Fatalf("no-config -doctor report must note the skipped repo checks, got %q", buf.String())
+	}
+}
+
 func TestResolveMode(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -129,7 +147,7 @@ func TestResolveMode(t *testing.T) {
 		{"config runs", "loope.json", false, false, modeRun},
 		{"config with doctor still runs", "loope.json", false, true, modeRun},
 		{"bare invocation is help", "", false, false, modeHelp},
-		{"doctor without config is a usage error", "", false, true, modeDoctorNoConfig},
+		{"doctor without config runs config-less doctor", "", false, true, modeDoctorNoConfig},
 	}
 	for _, c := range cases {
 		if got := resolveMode(c.configPath, c.version, c.doctor); got != c.want {
