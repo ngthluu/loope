@@ -19,6 +19,16 @@ type Orchestrator struct {
 	gh     *GitHub
 	wt     *Worktree
 
+	// registry holds the cancel func of every pipeline live in this process, so
+	// a stop request can halt one immediately.
+	registry runRegistry
+
+	// baseCtx is the daemon's lifetime context, set by main. Work started from
+	// a short-lived caller (an HTTP request) runs on it instead, so a continue
+	// survives its HTTP response and dies with the daemon. nil means
+	// context.Background().
+	baseCtx context.Context
+
 	// Auto-resume bookkeeping: per-issue backoff between resume attempts and
 	// once-per-process skip logging. In-memory only — a restart retrying
 	// immediately costs at most one extra attempt.
@@ -48,6 +58,15 @@ func (o *Orchestrator) clock() time.Time {
 		return o.now()
 	}
 	return time.Now()
+}
+
+// base returns the daemon-lifetime context for work that must outlive its
+// caller. Defaults to Background so tests and one-shot CLI paths work unset.
+func (o *Orchestrator) base() context.Context {
+	if o.baseCtx != nil {
+		return o.baseCtx
+	}
+	return context.Background()
 }
 
 type pick struct {
