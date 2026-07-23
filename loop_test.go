@@ -1069,3 +1069,46 @@ func TestStopNotRunningReturnsSentinel(t *testing.T) {
 		t.Fatalf("Stop(99) with nothing in flight = %v, want errNotRunning", err)
 	}
 }
+
+func TestPauseTransitionsToStoppedAndPreservesState(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A recorded session that pause must leave untouched.
+	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordState(logDir, "ai-wip")
+
+	o.pause(context.Background(), 7)
+
+	// ai-wip -> ai-stopped as one atomic swap.
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-stopped") {
+		t.Fatalf("want single ai-wip->ai-stopped swap, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-stopped" {
+		t.Fatalf("local state = %q, want ai-stopped", got)
+	}
+	// Session preserved.
+	if si, err := readSession(logDir); err != nil || si.SessionID != "s1" {
+		t.Fatalf("session not preserved: %+v err=%v", si, err)
+	}
+	// No park cause recorded — nothing auto-resumes a stopped ticket.
+	if c := readParkCause(logDir); c != "" {
+		t.Fatalf("pause recorded a park cause %q, want none", c)
+	}
+	// A stop comment was posted.
+	var commented bool
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "Stopped by user") {
+			commented = true
+		}
+	}
+	if !commented {
+		t.Fatal("pause did not comment the stop notice")
+	}
+}

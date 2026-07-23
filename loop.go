@@ -388,6 +388,25 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 	return cause
 }
 
+// pause is the terminal outcome for a user-stopped run: swap ai-wip->ai-stopped,
+// record the state, and comment. It runs on the LIVE parent ctx (the pipeline's
+// child ctx is already cancelled, so its GitHub calls would fail). It
+// deliberately does NOT touch the worktree, branch, logs, or session file, and
+// records NO park cause — so no auto-resume path (SweepOrphans queries ai-wip,
+// ResumeParked queries ai-rework) will ever act on a stopped ticket. It stays
+// put until the user hits Continue.
+func (o *Orchestrator) pause(ctx context.Context, n int) {
+	logDir := o.issueLogDir(n)
+	_ = o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Stopped)
+	recordState(logDir, o.cfg.StateLabels.Stopped)
+	_ = o.gh.Comment(ctx, n, stoppedComment())
+}
+
+// stoppedComment is the fixed notice posted when a run is stopped by the user.
+func stoppedComment() string {
+	return "⏸ Stopped by user. Worktree, logs and session are preserved. Press Continue to resume."
+}
+
 // ResumeParked scans ai-rework issues and re-runs Rework on the ones parked for
 // a transient, resumable cause (usage/rate limit, turn/budget ceiling, network
 // outage). Genuine errors have no resumable park cause and stay parked for a
