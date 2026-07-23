@@ -738,7 +738,7 @@ func TestResumeParkedResumesAndShips(t *testing.T) {
 	prepParked(t, env, "api status 429: usage limit")
 	env.f.handler = reworkHandler(env)
 	o := env.orchestrator()
-	if err := o.ResumeParked(context.Background()); err != nil {
+	if err := resumeCycle(o); err != nil {
 		t.Fatal(err)
 	}
 	if len(env.callsMatching("claude", "--resume s1")) == 0 {
@@ -754,7 +754,7 @@ func TestResumeParkedSkipsNonResumable(t *testing.T) {
 	env := newFakeEnv(t)
 	prepParked(t, env, "git push: permission denied")
 	env.f.handler = reworkHandler(env)
-	if err := env.orchestrator().ResumeParked(context.Background()); err != nil {
+	if err := resumeCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	if got := env.callsMatching("claude", ""); len(got) != 0 {
@@ -767,7 +767,7 @@ func TestResumeParkedSkipsMissingWorktree(t *testing.T) {
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	recordParkCause(logDir, "usage limit") // cause resumable, but no worktree/session
 	env.f.handler = reworkHandler(env)
-	if err := env.orchestrator().ResumeParked(context.Background()); err != nil {
+	if err := resumeCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
 	}
 	if got := env.callsMatching("claude", ""); len(got) != 0 {
@@ -789,8 +789,8 @@ func TestResumeParkedBacksOffAfterFailure(t *testing.T) {
 	o := env.orchestrator()
 	o.now = func() time.Time { return now }
 
-	if err := o.ResumeParked(context.Background()); err == nil {
-		t.Fatal("want first resume to fail")
+	if err := resumeCycle(o); err != nil {
+		t.Fatalf("listing succeeded, want nil error, got %v", err)
 	}
 	first := len(env.callsMatching("claude", "--resume"))
 	if first != 1 {
@@ -798,14 +798,14 @@ func TestResumeParkedBacksOffAfterFailure(t *testing.T) {
 	}
 
 	// Same instant: still inside the 5-minute backoff window.
-	_ = o.ResumeParked(context.Background())
+	_ = resumeCycle(o)
 	if got := len(env.callsMatching("claude", "--resume")); got != first {
 		t.Errorf("resume inside backoff window: calls = %d, want %d", got, first)
 	}
 
 	// Past the window: retries.
 	now = now.Add(6 * time.Minute)
-	_ = o.ResumeParked(context.Background())
+	_ = resumeCycle(o)
 	if got := len(env.callsMatching("claude", "--resume")); got != first+1 {
 		t.Errorf("resume after backoff: calls = %d, want %d", got, first+1)
 	}

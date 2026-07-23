@@ -327,31 +327,55 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 // a transient, resumable cause (usage/rate limit, turn/budget ceiling, network
 // outage). Genuine errors have no resumable park cause and stay parked for a
 // human. Each issue backs off exponentially between attempts (5m doubling to
-// 60m) so a still-active usage limit isn't hammered every poll cycle. Resumes
-// run sequentially: they're expensive Claude sessions.
+// 60m) so a still-active usage limit isn't hammered every poll cycle.
+//
+// Resumes draw from the same TicketsPerCycle budget as new work and run
+// concurrently with it. ProcessOnce runs first in a cycle and so gets first
+// claim on free slots; resumes take what's left and, having backoff, come back.
+// Only the listing error is returned — each resume logs its own outcome.
 func (o *Orchestrator) ResumeParked(ctx context.Context) error {
+	if o.freeSlots() == 0 {
+		return nil
+	}
 	issues, err := o.gh.ListIssuesWithLabel(ctx, o.cfg.StateLabels.Rework)
 	if err != nil {
 		return err
 	}
-	var errs []error
 	for _, is := range issues {
 		if ctx.Err() != nil {
+			break
+		}
+		if o.freeSlots() == 0 {
 			break
 		}
 		n := is.Number
 		if !o.shouldResume(n) {
 			continue
 		}
-		log.Printf("issue #%d: auto-resuming parked work", n)
-		if err := o.Rework(ctx, n); err != nil {
-			o.noteResumeFailure(n)
-			errs = append(errs, fmt.Errorf("auto-resume #%d: %w", n, err))
+		// park swaps ai-wip->ai-rework before its pipeline goroutine returns, so
+		// an issue can look parked while its worktree is still owned by a live
+		// pipeline. tryAcquire is what refuses that.
+		if !o.tryAcquire(n) {
 			continue
 		}
-		o.clearResumeState(n)
+		go func(n int) {
+			defer o.release(n)
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("issue #%d: resume panic: %v\n%s", n, r, debug.Stack())
+					_ = o.park(ctx, n, o.cfg.StateLabels.Rework, fmt.Errorf("panic: %v", r))
+				}
+			}()
+			log.Printf("issue #%d: auto-resuming parked work", n)
+			if err := o.Rework(ctx, n); err != nil {
+				log.Printf("auto-resume #%d failed: %v", n, err)
+				o.noteResumeFailure(n)
+				return
+			}
+			o.clearResumeState(n)
+		}(n)
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // shouldResume reports whether issue n is auto-resumable right now: parked for

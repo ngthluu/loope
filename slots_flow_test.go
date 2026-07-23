@@ -155,3 +155,84 @@ func TestProcessOnceFiltersInFlightIssues(t *testing.T) {
 		t.Fatal("sanity: the first cycle should have made claude calls")
 	}
 }
+
+// Resumes draw from the same budget as new work: with every slot taken by a
+// pipeline, no resume starts.
+func TestResumeParkedYieldsToFullBudget(t *testing.T) {
+	env := newSlotEnv(t, 7)
+	env.setRework(11)
+	prepParkedIn(t, env.fakeEnv, 11, "api status 429: usage limit")
+	o := env.orchestrator() // budget clamps to 1
+	started, release := gatePipelines(o, env.f)
+
+	if err := o.ProcessOnce(context.Background()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	awaitStarted(t, started, 1)
+
+	if err := o.ResumeParked(context.Background()); err != nil {
+		t.Fatalf("ResumeParked error = %v, want nil", err)
+	}
+	if got := env.callsMatching("claude", "--resume"); len(got) != 0 {
+		t.Fatalf("no slot free, want no resume, got %v", got)
+	}
+
+	close(release)
+	o.Wait()
+}
+
+// An issue whose pipeline is still in flight must not be resumed, even after
+// park has already swapped its label to ai-rework.
+func TestResumeParkedSkipsIssueStillInFlight(t *testing.T) {
+	env := newSlotEnv(t, 7)
+	env.setRework(7)
+	prepParkedIn(t, env.fakeEnv, 7, "api status 429: usage limit")
+	o := env.orchestrator()
+	o.cfg.TicketsPerCycle = 3
+	started, release := gatePipelines(o, env.f)
+
+	if err := o.ProcessOnce(context.Background()); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	awaitStarted(t, started, 1)
+
+	if err := o.ResumeParked(context.Background()); err != nil {
+		t.Fatalf("ResumeParked error = %v, want nil", err)
+	}
+	if got := env.callsMatching("claude", "--resume"); len(got) != 0 {
+		t.Fatalf("issue #7 is in flight, want no resume, got %v", got)
+	}
+
+	close(release)
+	o.Wait()
+}
+
+// With a free slot and no competing work, a resume starts and returns before
+// the resume session finishes.
+func TestResumeParkedRunsConcurrently(t *testing.T) {
+	env := newSlotEnv(t) // nothing eligible
+	env.setRework(11)
+	prepParkedIn(t, env.fakeEnv, 11, "api status 429: usage limit")
+	o := env.orchestrator()
+	started, release := gatePipelines(o, env.f)
+
+	returned := make(chan error, 1)
+	go func() { returned <- o.ResumeParked(context.Background()) }()
+	awaitStarted(t, started, 1)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("ResumeParked error = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ResumeParked did not return while its resume was still running")
+	}
+	close(release)
+	o.Wait()
+	if got := env.callsMatching("claude", "--resume"); len(got) == 0 {
+		t.Fatal("want the saved session resumed")
+	}
+	if free := o.freeSlots(); free != 1 {
+		t.Fatalf("freeSlots after drain = %d, want 1", free)
+	}
+}
