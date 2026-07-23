@@ -22,7 +22,13 @@ type Orchestrator struct {
 	// Auto-resume bookkeeping: per-issue backoff between resume attempts and
 	// once-per-process skip logging. In-memory only — a restart retrying
 	// immediately costs at most one extra attempt.
+	//
+	// mu also guards the slot ledger (active): ticketsPerCycle is a live
+	// concurrency budget, not a batch size, so cycles start work and return
+	// while earlier pipelines are still running. See slots.go.
 	mu            sync.Mutex
+	active        map[int]struct{} // issue numbers with a pipeline in flight
+	inFlight      sync.WaitGroup   // one Add per acquired slot; drained on shutdown
 	resumeBackoff map[int]backoffState
 	skipLogged    map[int]bool
 	now           func() time.Time // test seam; nil means time.Now
