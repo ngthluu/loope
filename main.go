@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,19 +20,61 @@ import (
 // and is overridden at release time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
-func main() {
-	configPath := flag.String("config", "loope.json", "path to config file")
-	once := flag.Bool("once", false, "run a single poll cycle and exit")
-	rework := flag.Int("rework", 0, "resume a parked (ai-rework) issue by number, ship it, then exit")
-	serve := flag.Bool("serve", false, "run the read-only progress dashboard and exit on signal")
-	addr := flag.String("addr", "localhost:8080", "address for -serve to listen on")
-	showVersion := flag.Bool("version", false, "print the loope version and exit")
-	doctor := flag.Bool("doctor", false, "run the preflight checks, print the report, and exit")
-	flag.Parse()
+// cliMode is the run mode resolved from the parsed command-line flags.
+type cliMode int
 
-	if *showVersion {
+const (
+	modeRun            cliMode = iota // start the daemon (config given)
+	modeVersion                       // print version and exit, without reading config
+	modeHelp                          // print usage and exit 0 (bare invocation / --help)
+	modeDoctorNoConfig                // --doctor without --config: usage error, exit 2
+)
+
+// resolveMode maps the parsed flags to a run mode. --version wins over
+// everything (the config is never read); a missing --config means help unless
+// --doctor was asked for, which is a usage error.
+func resolveMode(configPath string, showVersion, doctor bool) cliMode {
+	switch {
+	case showVersion:
+		return modeVersion
+	case configPath == "" && doctor:
+		return modeDoctorNoConfig
+	case configPath == "":
+		return modeHelp
+	default:
+		return modeRun
+	}
+}
+
+func main() {
+	fs := flag.NewFlagSet("loope", flag.ContinueOnError)
+	var help bytes.Buffer
+	fs.SetOutput(&help)
+	configPath := fs.String("config", "", "path to config file (required)")
+	showVersion := fs.Bool("version", false, "print the loope version and exit")
+	doctor := fs.Bool("doctor", false, "run preflight checks, print the report, and exit")
+	fs.Usage = func() { usage(fs, &help) }
+
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Stdout.Write(help.Bytes()) // -h/--help: usage to stdout, exit 0
+			os.Exit(0)
+		}
+		os.Stderr.Write(help.Bytes()) // genuine parse error: to stderr, exit 2
+		os.Exit(2)
+	}
+
+	switch resolveMode(*configPath, *showVersion, *doctor) {
+	case modeVersion:
 		fmt.Println("loope", version)
 		return
+	case modeHelp:
+		usage(fs, os.Stdout)
+		os.Exit(0)
+	case modeDoctorNoConfig:
+		fmt.Fprintln(os.Stderr, "--config is required")
+		usage(fs, os.Stderr)
+		os.Exit(2)
 	}
 
 	cfg, err := LoadConfig(*configPath)
@@ -57,48 +101,45 @@ func main() {
 	o := &Orchestrator{cfg: cfg, runner: r, gh: NewGitHub(r, cfg),
 		wt: &Worktree{runner: r, repoPath: cfg.RepoPath, retry: cfg.GitHubRetry.policy()}}
 
-	if *rework > 0 {
-		if err := o.Rework(ctx, *rework); err != nil {
-			log.Fatalf("rework #%d: %v", *rework, err)
-		}
-		return
+	// The daemon owns the workDir exclusively. The lock both stops a second
+	// daemon from stealing live ai-wip work and proves any ai-wip issue found at
+	// startup is an orphan from a crashed run — which is why the sweep only runs
+	// when the lock is held.
+	release, err := acquireLock(cfg.WorkDir)
+	if err != nil {
+		log.Fatal(err)
 	}
+	defer release()
 
-	// Long-running modes own the workDir exclusively. The lock both stops a
-	// second daemon from stealing live ai-wip work and proves any ai-wip issue
-	// found at startup is an orphan from a crashed run — which is why the
-	// sweep only runs when the lock is held.
-	sweep := false
-	if !*once {
-		release, err := acquireLock(cfg.WorkDir)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer release()
-		sweep = true
+	srv, err := NewServer(r, cfg)
+	if err != nil {
+		log.Fatalf("dashboard: %v", err)
 	}
-
-	if *serve {
-		srv, err := NewServer(r, cfg)
-		if err != nil {
-			log.Fatalf("serve: %v", err)
+	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
+	go func() {
+		<-ctx.Done()
+		httpSrv.Close()
+	}()
+	// The dashboard is auxiliary: it runs in a goroutine and a listener error is
+	// logged, never fatal, so the worker keeps shipping PRs.
+	go func() {
+		log.Printf("progress dashboard on http://%s (reading %s)", cfg.Addr, cfg.WorkDir)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("dashboard server stopped: %v", err)
 		}
-		httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
-		go func() {
-			<-ctx.Done()
-			httpSrv.Close()
-		}()
-		// The dashboard is auxiliary: it runs in a goroutine and a listener
-		// error is logged, never fatal, so the worker keeps shipping PRs.
-		go func() {
-			log.Printf("progress dashboard on http://%s (reading %s)", *addr, cfg.WorkDir)
-			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("dashboard server stopped: %v", err)
-			}
-		}()
-	}
+	}()
 
-	runLoop(ctx, o, cfg, *once, sweep)
+	runLoop(ctx, o, cfg, true /* sweep */)
+}
+
+// usage prints a one-line description and the flag defaults to w. It backs the
+// FlagSet's Usage func (so -h/--help and parse errors reach it) and is also
+// called directly for the bare-invocation and --doctor-without-config paths.
+func usage(fs *flag.FlagSet, w io.Writer) {
+	fmt.Fprintln(w, "loope — autonomous GitHub issue pipeline daemon")
+	fmt.Fprintf(w, "\nUsage:\n  %s --config <FILE>\n\nFlags:\n", fs.Name())
+	fs.SetOutput(w)
+	fs.PrintDefaults()
 }
 
 // gate runs the preflight checks before any mode starts. It returns the process
@@ -127,8 +168,9 @@ func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) 
 // exit paths drain in-flight work with o.Wait() before returning — main's
 // deferred workDir-lock release must not run while a pipeline is live. Every
 // stage runs under guard, so a panic is one bad cycle, not a dead daemon.
-// Returns when the context is cancelled or after a single cycle when once is set.
-func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool) {
+// Returns only when the context is cancelled, draining in-flight pipelines
+// via o.Wait() on that path before returning.
+func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, sweep bool) {
 	log.Printf("watching %s for label %q every %ds", cfg.RepoSlug, cfg.EligibleLabel, cfg.PollIntervalSec)
 	for {
 		if sweep {
@@ -147,12 +189,6 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, once, sweep bool
 		}
 		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
 			log.Printf("cycle error: %v", err)
-		}
-		if once {
-			// -once fills slots once and drains them; it does not top up as
-			// pipelines complete.
-			o.Wait()
-			return
 		}
 		select {
 		case <-ctx.Done():

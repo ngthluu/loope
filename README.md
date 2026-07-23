@@ -27,7 +27,7 @@ published for macOS and Linux on `amd64` and `arm64`.
 Prefer to do it yourself? Grab an archive from the
 [releases page](https://github.com/ngthluu/loope/releases), or build from
 source (see [Build and run](#build-and-run)). Check the installed version with
-`loope -version`.
+`loope --version`.
 
 > loope is a wrapper around your local toolchain: it needs `git`, `gh`
 > (authenticated), and `claude` on your `PATH` at run time. See
@@ -64,8 +64,7 @@ Each poll cycle:
 A poll cycle does **not** wait for the pipelines it starts. It fills the free
 `ticketsPerCycle` slots, returns, and polls again one interval later — so work
 labelled while other pipelines are running is picked up as soon as a slot frees,
-rather than at the end of a batch. `-once` fills the slots one time, waits for
-them to drain, and exits.
+rather than at the end of a batch.
 
 Within a cycle, auto-resumes of parked issues claim slots **before** new
 eligible issues: continuing work that already has a worktree and session on disk
@@ -92,17 +91,11 @@ On failure the loop comments the error on the issue, swaps `ai-wip` →
 session id (saved in `logs/issue-<N>/session`). Nothing is deleted, so no
 progress is lost.
 
-To recover a parked issue, resume its Claude session and drive it to a PR:
-
-```bash
-./loope -rework <N> -config loope.json
-```
-
-This resumes the saved session in the preserved worktree, finishes the work,
-and ships the PR (swapping `ai-rework` → `ai-done`). It is idempotent — if it
-fails again the issue stays `ai-rework` with the worktree intact, so you can
-re-run it. If the worktree or session file is gone, remove the `ai-rework`
-label to re-queue the issue from scratch.
+Parked issues recover automatically: each poll cycle the daemon auto-resumes
+resumable `ai-rework` issues (backoff-gated), continuing the saved Claude
+session in the preserved worktree, finishing the work, and shipping the PR
+(swapping `ai-rework` → `ai-done`). If the worktree or session file is gone,
+remove the `ai-rework` label to re-queue the issue from scratch.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing
 > `ai-failed` issues are still recognized and stay out of the queue.
@@ -125,7 +118,7 @@ piece is missing, printing what is missing and the command that fixes it. To
 run the same checks standalone:
 
 ```bash
-./loope -doctor -config loope.json
+./loope --doctor --config loope.json
 ```
 
 `-doctor` prints the full report even when everything passes and exits non-zero
@@ -153,31 +146,26 @@ gh label create ai-needs-info --repo your-org/your-repo
 ```bash
 go build -o loope .
 cp loope.json.example loope.json   # then edit repoPath / repoSlug / workDir
-./loope -config loope.json -once   # single poll cycle, then exit
-./loope -config loope.json         # daemon: poll every pollIntervalSec
+./loope --config loope.json        # daemon: poll every pollIntervalSec, serve the dashboard
 ```
 
-`-once` is the easiest way to smoke-test a new config: with no eligible
-issues it logs `watching …` and exits cleanly. The daemon shuts down
+`--config` is required — there is no default config path. The daemon shuts down
 gracefully on Ctrl-C / SIGTERM; if a pipeline is interrupted mid-issue, the
-failure path still cleans up labels and worktrees.
+failure path still cleans up labels and worktrees. To validate a new config
+without starting the loop, run `./loope --doctor --config loope.json`.
 
-## Progress dashboard (`loope -serve`)
+## Progress dashboard
 
-`loope -serve` runs the poll loop **and** serves a live web dashboard from the
-same process, so one command both picks up labeled issues and shows every
-issue the loop has touched, its live state, and a full per-issue pipeline
-timeline:
+The daemon always serves a live web dashboard from the same process, so one
+command both picks up labeled issues and shows every issue the loop has touched,
+its live state, and a full per-issue pipeline timeline. The listen address is
+the `addr` config field (default `localhost:8080`):
 
 ```bash
-./loope -serve -config loope.json              # http://localhost:8080
-./loope -serve -config loope.json -addr localhost:9000
+./loope --config loope.json                    # dashboard on http://localhost:8080
 ```
 
-| Flag     | Default          | Description                        |
-|----------|------------------|------------------------------------|
-| `-serve` | off              | Serve the dashboard while also running the poll loop |
-| `-addr`  | `localhost:8080` | Address to listen on               |
+Point it elsewhere by setting `"addr": "localhost:9000"` in the config.
 
 The dashboard side rebuilds the view from two sources: the `logs/issue-<N>/`
 artifacts on disk and current issue label/title state from `gh` (TTL-cached for
@@ -234,6 +222,7 @@ with `~/`.
 | `workDir`         | yes      | —          | Where worktrees and logs are created                    |
 | `eligibleLabel`   | no       | `ai-agent` | Label that marks an issue as available to the loop      |
 | `pollIntervalSec` | no       | `60`       | Seconds between poll cycles                             |
+| `addr`            | no       | `localhost:8080` | Address the progress dashboard listens on        |
 | `ticketsPerCycle` | no       | `1`        | Maximum number of pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Auto-resumes of parked issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
 | `personaPath`     | no       | —          | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir` | no       | —          | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call (see below) |
@@ -320,7 +309,7 @@ hard caps per session; `0` omits the cap. `effort` maps to `--effort`.
 When a session hits one of these caps (`terminal_reason: max_turns`) or a Claude
 usage/rate limit, the loop parks the issue as `ai-rework` with the cause noted in
 the issue comment, and the daemon auto-resumes it (with backoff) once the limit
-resets; `loope -rework <N>` still works for manual resumes.
+resets.
 
 ### Persona
 
@@ -365,7 +354,7 @@ The daemon is designed to run until you stop it:
   a Claude usage/rate limit, a turn/budget ceiling, or a network outage is
   retried automatically each poll cycle, with per-issue exponential backoff
   (5 min doubling to 60 min). Only genuine errors — anything else — stay parked
-  for a human `loope -rework <N>`.
+  for a human to inspect.
 - **Crashes self-heal on restart.** On startup the daemon sweeps issues left in
   `ai-wip` by a crashed run. If the worktree and a recorded Claude session
   survived, the run is resumable: the issue is parked as `ai-rework` with its
@@ -375,14 +364,14 @@ The daemon is designed to run until you stop it:
 - **One daemon per workDir.** A pid lock at `<workDir>/logs/daemon.lock`
   refuses a second instance while one is alive and is taken over when stale.
 - **Panics don't kill the loop.** A panic in one issue's pipeline parks that
-  issue with the panic recorded; the daemon and sibling pipelines continue. In
-  `-serve` mode a dashboard listener error is logged, never fatal.
+  issue with the panic recorded; the daemon and sibling pipelines continue. A
+  dashboard listener error is logged, never fatal.
 
 GitHub stays current throughout: labels, comments, and PRs are retried with
 backoff (see `githubRetry`) until connectivity returns.
 
-If a daemon is running against the same workDir, prefer letting it auto-resume:
-a manual `loope -rework <N>` races the daemon's own resume of the same issue.
+Parked issues are resumed by the daemon that owns the workDir; there is no
+manual resume entry point to race it.
 
 ## Run as a service (macOS)
 

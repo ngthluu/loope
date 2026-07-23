@@ -2,6 +2,7 @@
   "repoPath": "/Users/you/src/your-repo",
   "repoSlug": "your-org/your-repo",
   "eligibleLabel": "ai-agent",
+  "addr": "localhost:8080",
   "pollIntervalSec": 60,
   "ticketsPerCycle": 3,
   "workDir": "~/.loope/worktrees",

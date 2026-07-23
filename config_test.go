@@ -241,3 +241,25 @@ func TestRetryConfigPolicy(t *testing.T) {
 		t.Errorf("policy = %+v, want %+v", got, want)
 	}
 }
+
+func TestLoadConfigAddrDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "localhost:8080" {
+		t.Errorf("Addr = %q, want localhost:8080", cfg.Addr)
+	}
+}
+
+func TestLoadConfigAddrOverride(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w", "addr": "localhost:9000"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "localhost:9000" {
+		t.Errorf("Addr = %q, want localhost:9000", cfg.Addr)
+	}
+}

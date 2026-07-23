@@ -69,15 +69,20 @@ func TestResumeIsNotStarvedByAFullEligibleQueue(t *testing.T) {
 	o.cfg.TicketsPerCycle = 2
 	env.setRework(5)
 	prepParkedIn(t, env.fakeEnv, 5, "usage limit reached")
+	// A long poll interval keeps the loop to a single cycle so cancellation is
+	// the only wake-up after the slots fill.
+	o.cfg.PollIntervalSec = 3600
 
 	started, release := gatePipelines(o, env.f)
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runLoop(context.Background(), o, o.cfg, true /* once */, false /* sweep */)
+		runLoop(ctx, o, o.cfg, false /* sweep */)
 		close(done)
 	}()
 
 	got := awaitStarted(t, started, 2)
+	cancel()
 	close(release)
 	select {
 	case <-done:
@@ -104,15 +109,20 @@ func TestResumeAndNewWorkShareTheBudget(t *testing.T) {
 	o.cfg.TicketsPerCycle = 2
 	env.setRework(5)
 	prepParkedIn(t, env.fakeEnv, 5, "usage limit reached")
+	// A long poll interval keeps the loop to a single cycle so cancellation is
+	// the only wake-up after the slots fill.
+	o.cfg.PollIntervalSec = 3600
 
 	started, release := gatePipelines(o, env.f)
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runLoop(context.Background(), o, o.cfg, true /* once */, false /* sweep */)
+		runLoop(ctx, o, o.cfg, false /* sweep */)
 		close(done)
 	}()
 
 	got := awaitStarted(t, started, 2)
+	cancel()
 	close(release)
 	select {
 	case <-done:

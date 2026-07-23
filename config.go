@@ -94,6 +94,7 @@ type Config struct {
 	PollIntervalSec     int         `json:"pollIntervalSec"`
 	TicketsPerCycle     int         `json:"ticketsPerCycle"`
 	WorkDir             string      `json:"workDir"`
+	Addr                string      `json:"addr"`
 	PersonaPath         string      `json:"personaPath"`
 	ClaudeConfigDir     string      `json:"claudeConfigDir"`
 	MaxQARounds         int         `json:"maxQARounds"`
@@ -108,7 +109,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	cfg := &Config{EligibleLabel: "ai-agent", PollIntervalSec: 60, MaxQARounds: 20, ConfidenceThreshold: 70, TicketsPerCycle: 1, StateLabels: defaultStateLabels(), GitHubRetry: RetryConfig{BaseDelaySec: 2, MaxDelaySec: 60}}
+	cfg := &Config{Addr: "localhost:8080", EligibleLabel: "ai-agent", PollIntervalSec: 60, MaxQARounds: 20, ConfidenceThreshold: 70, TicketsPerCycle: 1, StateLabels: defaultStateLabels(), GitHubRetry: RetryConfig{BaseDelaySec: 2, MaxDelaySec: 60}}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
