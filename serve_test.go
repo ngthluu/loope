@@ -328,7 +328,7 @@ func TestDetailShowsGitHubLinksAndSession(t *testing.T) {
 	v := view{Tickets: []Ticket{{Number: 7, Title: "T", SessionID: "abc-123-def", PRURL: "https://github.com/o/r/pull/9", Steps: []Step{{Seq: 1, Label: "execute", Status: StatusRunning}}}}}
 	v.Selected = &v.Tickets[0]
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "detail", v); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "detail", v); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -486,7 +486,7 @@ func TestStepcardRendersTranscript(t *testing.T) {
 		{Kind: "tool_result", IsError: false},
 	}}
 	var b strings.Builder
-	if err := s.page.ExecuteTemplate(&b, "stepcard", step); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&b, "stepcard", step); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -638,5 +638,165 @@ func TestServePersistsFetchedTitles(t *testing.T) {
 	}
 	if strings.TrimSpace(string(body)) != "Add OAuth login" {
 		t.Fatalf("persisted title = %q", body)
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	for _, tc := range []struct{ path, ctPart string }{
+		{"/static/htmx.min.js", "javascript"},
+		{"/static/idiomorph-ext.min.js", "javascript"},
+		{"/static/app.js", "javascript"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", tc.path, rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("%s: empty body", tc.path)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tc.ctPart) {
+			t.Fatalf("%s: content-type = %q, want it to contain %q", tc.path, ct, tc.ctPart)
+		}
+	}
+}
+
+func TestStaticUnknownPath404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, _ := get(t, h, "/static/nope.js")
+	if code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+}
+
+// The asset tree is an implementation detail: net/http's file server would
+// happily render a directory index for it, which is an endpoint the dashboard
+// never had and never wants.
+func TestStaticDirectoryListingIs404(t *testing.T) {
+	h := newTestServer(t).Handler()
+	// "/static/." is not covered here: ServeMux normalizes it to "/static/"
+	// with a 301 before any handler sees it.
+	code, body := get(t, h, "/static/")
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", code)
+	}
+	if strings.Contains(body, "app.js") {
+		t.Errorf("body listed the asset directory: %q", body)
+	}
+}
+
+func TestPageWiresHTMXPolling(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	for _, want := range []string{
+		`src="/static/htmx.min.js"`,
+		`src="/static/idiomorph-ext.min.js"`,
+		`src="/static/app.js"`,
+		`hx-ext="morph"`,
+		`hx-get="/rail?issue=142"`,
+		`hx-get="/detail?issue=142"`,
+		`hx-trigger="every 3s"`,
+		`hx-swap="morph:innerHTML"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page missing %q", want)
+		}
+	}
+}
+
+// The rail's ticket rows and the pipeline's step cards must stay keyed, so
+// idiomorph matches them by identity instead of rebuilding them on every poll.
+// The key has to be `id`: idiomorph builds its match sets from id attributes
+// only, so a bespoke data-* key would look keyed while morphing positionally.
+func TestPollFragmentsAreKeyed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, rail := get(t, h, "/rail?issue=142")
+	if !strings.Contains(rail, `id="t142"`) {
+		t.Fatalf("rail row not keyed: %s", rail)
+	}
+	_, detail := get(t, h, "/detail?issue=142")
+	if !strings.Contains(detail, `id="s1"`) {
+		t.Fatalf("step card not keyed: %s", detail)
+	}
+}
+
+func TestRailFragmentCarriesOOBStatbar(t *testing.T) {
+	h := newTestServer(t).Handler()
+	code, body := get(t, h, "/rail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, `hx-swap-oob="true"`) {
+		t.Fatalf("rail fragment carries no out-of-band statbar: %s", body)
+	}
+	if !strings.Contains(body, `id="statbar"`) {
+		t.Fatalf("out-of-band statbar has no id to swap into: %s", body)
+	}
+	// The stats the header shows must be in the fragment: one ticket, none
+	// running (the seeded step is settled), $0.51 spent.
+	for _, want := range []string{`id="stat-tickets" class="text-base font-semibold tabular-nums text-text">1<`, `id="stat-running">0<`, `>$0.51<`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("statbar missing %q: %s", want, body)
+		}
+	}
+	// The dead patching hook is gone.
+	if strings.Contains(body, "railmeta") {
+		t.Fatalf("rail still emits the obsolete #railmeta element")
+	}
+}
+
+// TestAppCSSCoversBothClassSources is the guard against the manual Tailwind
+// regeneration step being skipped. Half the dashboard's classes exist only in
+// templates and half only in Go helpers, so app.css is checked for one sentinel
+// from each source. A miss means someone changed classes without re-running:
+//
+//	tailwindcss -i web/tailwind.css -o web/static/app.css --minify
+func TestAppCSSCoversBothClassSources(t *testing.T) {
+	css, err := webFS.ReadFile("web/static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(css) < 4096 {
+		t.Fatalf("app.css is only %d bytes — the Tailwind build produced nothing useful", len(css))
+	}
+	for _, want := range []string{
+		`line-clamp-2`, // template-only: web/templates/rail.html
+		`bg-ok\/50`,    // Go-only: stripeClass in render.go
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Fatalf("app.css missing %q — regenerate it: tailwindcss -i web/tailwind.css -o web/static/app.css --minify", want)
+		}
+	}
+}
+
+func TestStaticCSSServed(t *testing.T) {
+	h := newTestServer(t).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/static/app.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("empty body")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
+		t.Fatalf("content-type = %q, want text/css", ct)
+	}
+}
+
+func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
+	h := newTestServer(t).Handler()
+	_, body := get(t, h, "/")
+	if !strings.Contains(body, `href="/static/app.css"`) {
+		t.Fatalf("page does not link the vendored stylesheet")
+	}
+	if strings.Contains(body, "cdn.tailwindcss.com") {
+		t.Fatalf("page still loads the Tailwind browser CDN")
 	}
 }
