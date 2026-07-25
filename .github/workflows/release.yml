@@ -21,10 +21,20 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      - name: Select release notes
+        id: notes
+        run: |
+          file="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$file" ]; then
+            echo "args=release --clean --release-notes=$file" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=release --clean" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: ${{ steps.notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
