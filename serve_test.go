@@ -943,3 +943,99 @@ func TestDetailRendersContinueButtonForStopped(t *testing.T) {
 		t.Fatalf("stopped detail should render a Continue button, got: %s", body)
 	}
 }
+
+// TestWorktreeURIEscapesPath pins the exact scheme/host prefix the VS Code
+// handler expects and proves url.URL does the percent-encoding — workDir on
+// macOS frequently contains spaces, which manual string concatenation would
+// emit raw and the browser would refuse.
+func TestWorktreeURIEscapesPath(t *testing.T) {
+	got := string(worktreeURI("/Users/me/my work/issue-7"))
+	want := "vscode://file/Users/me/my%20work/issue-7"
+	if got != want {
+		t.Fatalf("worktreeURI = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, "vscode://file/") {
+		t.Fatalf("worktreeURI = %q, want vscode://file/ prefix", got)
+	}
+}
+
+// TestLoadSetsWorktreeFieldsWhenDirExists covers both halves of the one stat
+// load() runs for the selected ticket: the path is always reported so the
+// disabled tooltip can name it, and the URI appears only while the folder is
+// on disk. The second half also documents the live behaviour — the detail pane
+// re-polls, so removing the worktree flips the chip off with no cache to bust.
+func TestLoadSetsWorktreeFieldsWhenDirExists(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v := s.load(context.Background(), "142")
+	if v.WorktreePath != wt {
+		t.Fatalf("WorktreePath = %q, want %q", v.WorktreePath, wt)
+	}
+	if string(v.WorktreeURI) != string(worktreeURI(wt)) {
+		t.Fatalf("WorktreeURI = %q, want %q", v.WorktreeURI, worktreeURI(wt))
+	}
+
+	if err := os.Remove(wt); err != nil {
+		t.Fatal(err)
+	}
+	v = s.load(context.Background(), "142")
+	if v.WorktreePath != wt {
+		t.Fatalf("WorktreePath = %q after removal, want %q", v.WorktreePath, wt)
+	}
+	if v.WorktreeURI != "" {
+		t.Fatalf("WorktreeURI = %q after removal, want empty", v.WorktreeURI)
+	}
+}
+
+// TestDetailShowsEnabledVSCodeChip asserts the live worktree renders a real
+// vscode://file/ href. The ZgotmplZ check is the regression guard for the
+// template.URL requirement: html/template blanks non-http schemes typed as
+// plain strings, which would leave a chip that looks fine and does nothing.
+func TestDetailShowsEnabledVSCodeChip(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/detail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	want := `href="` + string(worktreeURI(wt)) + `"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("detail missing %q", want)
+	}
+	if !strings.Contains(body, "open in VS Code") {
+		t.Fatalf("detail missing the chip label")
+	}
+	if strings.Contains(body, "ZgotmplZ") {
+		t.Fatalf("detail sanitized the vscode:// href — WorktreeURI must be template.URL")
+	}
+}
+
+// TestDetailShowsDisabledVSCodeChip covers the post-merge state: the worktree
+// is gone, so the chip is still there (so the row does not jump) but inert,
+// with a tooltip naming the path and explaining the absence.
+func TestDetailShowsDisabledVSCodeChip(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree %q should not exist in a fresh test server", wt)
+	}
+	code, body := get(t, s.Handler(), "/detail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "open in VS Code") {
+		t.Fatalf("detail missing the chip label")
+	}
+	if !strings.Contains(body, "No worktree folder at "+wt) {
+		t.Fatalf("detail missing the disabled tooltip naming %q", wt)
+	}
+	if strings.Contains(body, "vscode://") {
+		t.Fatalf("detail still emits a vscode:// link for a missing worktree")
+	}
+}

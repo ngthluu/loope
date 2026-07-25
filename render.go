@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"net/url"
 	"strconv"
 )
 
@@ -35,6 +36,16 @@ func templateFuncs(cfg *Config) template.FuncMap {
 		"pipelineRows": pipelineRows,
 		"txLine":       txLine,
 	}
+}
+
+// worktreeURI is the vscode://file/<path> URI that asks the OS to open a
+// worktree folder in VS Code. It returns template.URL because html/template
+// rewrites href values whose scheme is not http/https/mailto to "#ZgotmplZ",
+// which would leave the chip silently inert. url.URL does the escaping, so a
+// workDir containing spaces still produces a URI the browser accepts.
+func worktreeURI(path string) template.URL {
+	u := url.URL{Scheme: "vscode", Host: "file", Path: path}
+	return template.URL(u.String())
 }
 
 // hasRunning reports whether any of the ticket's steps is still in flight.
