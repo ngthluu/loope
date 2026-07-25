@@ -9,19 +9,47 @@ Each poll cycle runs four steps:
      It investigates, scores how confidently the bug can be fixed as reported
      and, below `confidenceThreshold`, escalates to `ai-needs-info` instead of
      guessing (see [Confidence gate](configuration.md#confidence-gate));
-     otherwise it reproduces with a failing test, fixes, and commits.
+     otherwise it reproduces with a failing test, fixes, and commits. A short
+     read-only session then reads the issue and the resulting diff and appends a
+     UAT checklist to the issue body.
    - **`feature`** — anything needing design → three sessions. An architect
      brainstorm session scores confidence and, below `confidenceThreshold`,
      escalates to `ai-needs-info`; otherwise it brainstorms with a cheaper
      "product owner proxy" agent in a Q&A loop, then writes and commits the
-     spec. A **fresh** session turns that spec into a committed implementation
-     plan, and a third session executes the plan.
+     spec. A short read-only session then turns that spec into a UAT checklist
+     appended to the issue body. A **fresh** session turns the spec into a
+     committed implementation plan, and a third session executes the plan.
    - **`done`** — the work is already fully implemented in the codebase → the
      loop comments, applies `ai-done`, and closes the issue without opening a PR.
 3. **Work** happens on branch `ai/issue-<N>` in a dedicated git worktree under
    `workDir`, created from the remote default branch.
 4. **Ship** — if the pipeline produced at least one commit, the branch is pushed
    and a PR is opened (`Closes #N`); the PR URL is commented on the issue.
+
+## UAT checklist
+
+Both routes publish a hand-verification checklist onto the **issue body** (not a
+comment), under a `## 🤖 UAT checklist` heading preceded by an invisible
+`<!-- loope:uat -->` marker. The marker is the idempotency key: an issue that
+already carries it is never given a second checklist, so re-runs, resumes and
+reworks leave the first one in place.
+
+The step is deliberately non-blocking. It runs in its own ephemeral session
+(`models.uat`, no inheritance from `architect`) with `Write`, `Edit` and
+`NotebookEdit` disabled, and it never records a resumable session. If anything
+goes wrong — the body fetch fails, the session errors or hits its cap, the
+result carries no checklist, the body would grow past GitHub's size limit — the
+step logs the issue number and the reason and returns, and the pipeline carries
+on to plan/execute or to shipping. The session's full output is kept as
+`<seq>-uat.output.md` in the issue's log directory either way.
+
+On the feature route it runs immediately after the spec is committed, before the
+plan exists: the checklist describes the behavior the spec promises. On the bug
+route it runs after the fix, from the issue plus `git diff origin/<base>...HEAD`,
+and only on the outcome where a fix was actually produced — an `ai-needs-info`
+escalation or an already-done close publishes nothing. The rework flow does not
+run it: the feature route already published one, and the marker check would skip
+it anyway.
 
 ## Concurrency and scheduling
 

@@ -22,6 +22,14 @@ below 70, the issue is too under-specified or ambiguous to implement
 responsibly: do NOT design or write a spec. Instead, list what is missing and
 the specific questions the author must answer, then stop.
 
+Write that reply as a short, skimmable list the author can answer in one comment:
+- Open with ONE sentence naming the single thing that blocks you most.
+- Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
+- At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
+- Under 200 words total.
+- Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
+
 HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
 Ask clarifying questions as plain text (AskUserQuestion is disabled).
 Follow the brainstorming flow to a committed spec: clarifying questions, design,
@@ -125,6 +133,14 @@ questions the author must answer, then stop.
 The CONFIDENCE: line comes first even when an instruction below tells you to
 print another sentinel and stop.
 
+Write that reply as a short, skimmable list the author can answer in one comment:
+- Open with ONE sentence naming the single thing that blocks you most.
+- Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
+- At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
+- Under 200 words total.
+- Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
+
 Reproduce the bug with a failing test first, then fix it, verify the full test
 suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
 and note them in commit messages.
@@ -187,7 +203,7 @@ func TestGoldenAlreadyDoneComment(t *testing.T) {
 
 func TestGoldenNeedsInfoComment(t *testing.T) {
 	check(t, "needsInfoComment", needsInfoComment(42, "ai-needs-info", "Which database?"),
-		"🤖 Not confident enough to implement (confidence 42/100). Please clarify and remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
+		"🤖 Not confident enough to implement (confidence 42/100). Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
 }
 
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +
@@ -243,4 +259,57 @@ func TestGoldenClassifyCauseGuidance(t *testing.T) {
 		}
 		check(t, "classifyCause("+tc.msg+")", got, tc.want)
 	}
+}
+
+func TestGoldenUATSection(t *testing.T) {
+	check(t, "uatSection", uatSection("- [ ] Run the thing and see the thing."),
+		"<!-- loope:uat -->\n\n## 🤖 UAT checklist\n\n- [ ] Run the thing and see the thing.")
+}
+
+func TestGoldenUATFeaturePrompt(t *testing.T) {
+	want := `Read the approved spec at docs/spec.md and write a UAT (user acceptance test)
+checklist for a human who will verify the shipped feature by hand.
+
+Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
+UAT_END. Print nothing before or after those two lines.
+
+Rules for the checklist:
+- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
+  more than one area to verify.
+- Each item is one concrete action a human performs plus the one observable
+  result they should see.
+- No implementation detail, no file paths, no code.
+- Short: aim for under 20 items. Cover every behavior the spec describes,
+  including the error and edge cases it specifies, but do not invent scope
+  beyond it.
+- Do not modify, create, or commit any file.`
+	check(t, "uatFeaturePrompt", uatFeaturePrompt("docs/spec.md"), want)
+}
+
+func TestGoldenUATBugPrompt(t *testing.T) {
+	want := `A bug fix has just been committed on this branch. Write a UAT (user acceptance
+test) checklist for a human who will verify the fix by hand.
+
+The GitHub issue being fixed:
+ISSUE BODY
+
+Read the issue above, then inspect what actually changed with
+` + "`git diff origin/main...HEAD`" + ` and ` + "`git log origin/main..HEAD`" + `, so the checklist
+describes the real fix. If that diff is empty — nothing was committed — print
+nothing at all: no markers, no checklist, no explanation.
+
+Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
+UAT_END. Print nothing before or after those two lines.
+
+Rules for the checklist:
+- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
+  more than one area to verify.
+- Each item is one concrete action a human performs plus the one observable
+  result they should see.
+- No implementation detail, no file paths, no code.
+- Short: aim for under 20 items. Cover the reported bug and every behavior the
+  fix touches, including its error and edge cases, but do not invent scope
+  beyond them.
+- Do not modify, create, or commit any file.`
+	check(t, "uatBugPrompt", uatBugPrompt("ISSUE BODY", "main"), want)
 }

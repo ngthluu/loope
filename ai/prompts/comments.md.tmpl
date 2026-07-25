@@ -2,7 +2,7 @@
 
 {{define "already-done"}}🤖 Already implemented — closing. {{.Reason}}{{end}}
 
-{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Please clarify and remove the `{{.Label}}` label to re-queue:
+{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
 
 {{.Feedback}}{{end}}
 
@@ -35,3 +35,9 @@ Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in thi
 {{define "guidance-interrupted"}}Cause: the daemon restarted while this issue was mid-run — the preserved session is resumed automatically.{{end}}
 
 {{define "guidance-network"}}Cause: network outage. Re-queue once connectivity is back.{{end}}
+
+{{define "uat-section"}}{{.UATMarker}}
+
+## 🤖 UAT checklist
+
+{{.Checklist}}{{end}}

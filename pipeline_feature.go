@@ -21,7 +21,9 @@ const specReadySentinel = "SPEC_READY:"
 // (PIPELINE_READY); and a fresh execute session (session C) that implements it.
 // Below the confidence threshold it returns *lowConfidenceError without
 // designing anything.
-func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string) error {
+// Immediately after the spec is committed — before plan and execute — the
+// non-blocking UAT step publishes a human-verifiable checklist onto the issue.
+func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT) error {
 	start := time.Now()
 	architect := func(label, prompt, resume string) (*ClaudeResult, error) {
 		return c.Call(ctx, ClaudeCall{
@@ -58,6 +60,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 		// through and keep prodding (mirrors the plan-file behavior).
 		if rel, ok := parseSpecReady(output); ok {
 			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
+				uat.RunFeature(ctx, c, cfg, wtPath, specPath)
 				return runPlanThenExecute(ctx, c, cfg, wtPath, specPath, start)
 			}
 		}

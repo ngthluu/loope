@@ -83,7 +83,7 @@ started with. `~` is expanded.
 
 ## `models`
 
-Four roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
+Five roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
 
 - `architect` — the heavy lifter: brainstorms, plans, debugs, and (unless
   `execute` overrides it) executes.
@@ -94,6 +94,14 @@ Four roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
   `maxTurns`/`maxBudgetUSD` than the bounded architect Q&A rounds. Any field left
   unset inherits from `architect`, so omitting the block entirely keeps the old
   behavior (execute runs with the architect config).
+- `uat` — optional. The short read-only session that writes the UAT checklist
+  appended to the issue body. Unlike `execute`, it does **not** inherit from
+  `architect`: the block is used exactly as written, so leaving it out means the
+  `claude` CLI's own defaults with no budget or turn cap. A cheap model with a
+  low cap is the right shape here (`{"model": "sonnet", "effort": "medium",
+  "maxBudgetUSD": 2, "maxTurns": 30}`). The step never blocks the pipeline — if
+  the session fails or hits its cap, the checklist is simply skipped and the
+  reason is logged.
 
 `maxBudgetUSD` and `maxTurns` are passed straight to the `claude` CLI as hard
 caps per session; `0` omits the cap. `effort` maps to `--effort`.

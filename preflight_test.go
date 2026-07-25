@@ -12,15 +12,15 @@ import (
 // keyed by the full command line ("gh auth status") and replace the default.
 func okHandler(overrides map[string]rresp) func(rcall) (string, string, error) {
 	defaults := map[string]string{
-		"git --version":                       "git version 2.39.5",
-		"gh --version":                        "gh version 2.63.2",
-		"gh auth status":                      "Logged in to github.com as you",
-		"claude --version":                    "2.0.1 (Claude Code)",
-		"claude plugin list":                  "superpowers@claude-plugins-official  enabled",
-		"git rev-parse --is-inside-work-tree": "true",
+		"git --version":                                       "git version 2.39.5",
+		"gh --version":                                        "gh version 2.63.2",
+		"gh auth status":                                      "Logged in to github.com as you",
+		"claude --version":                                    "2.0.1 (Claude Code)",
+		"claude plugin list":                                  "superpowers@claude-plugins-official  enabled",
+		"git rev-parse --is-inside-work-tree":                 "true",
 		"gh repo view your-org/your-repo --json name":         `{"name":"your-repo"}`,
 		"gh label list --repo your-org/your-repo --json name": `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-failed"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"}]`,
-		"curl --version": "curl 8.7.1 (x86_64-apple-darwin23.0)",
+		"curl --version":                                      "curl 8.7.1 (x86_64-apple-darwin23.0)",
 	}
 	return func(c rcall) (string, string, error) {
 		key := strings.TrimSpace(c.name + " " + strings.Join(c.args, " "))

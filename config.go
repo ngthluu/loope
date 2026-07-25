@@ -35,6 +35,11 @@ type Models struct {
 	// Any field left unset falls back to Architect (see executeConfig), so
 	// existing configs without an execute block behave exactly as before.
 	Execute ModelConfig `json:"execute"`
+	// UAT is the config for the UAT-checklist session. Unlike Execute it has no
+	// fallback helper: the block is used exactly as written, so an absent block
+	// means the claude CLI's own defaults with no budget or turn cap. The session
+	// is short and read-only, so a cheap model with a low cap is the right shape.
+	UAT ModelConfig `json:"uat"`
 }
 
 // executeConfig returns the model config for the plan-execution step, filling

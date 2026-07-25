@@ -4,7 +4,11 @@ import (
 	"context"
 )
 
-func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent string) error {
+// RunBugPipeline drives one systematic-debugging session, gated on confidence
+// and the already-done claim. base is the base branch: on the outcome where a
+// fix was actually produced, the non-blocking UAT step diffs against
+// origin/<base> to build a human-verifiable checklist for the issue body.
+func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent, cfg.ConfidenceThreshold),
 		Model:           cfg.Models.Architect,
@@ -33,6 +37,9 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 	if reason, ok := parseAlreadyDone(res.Result); ok {
 		return &alreadyDoneError{reason: reason}
 	}
+	// Only this outcome produced a fix — neither the needs-info nor the
+	// already-done return above reaches here, so neither publishes a checklist.
+	uat.RunBug(ctx, c, cfg, wtPath, issueContent, base)
 	return nil
 }
 
