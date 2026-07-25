@@ -11,12 +11,12 @@ with `~/`.
 | `eligibleLabel`       | no       | `ai-agent`       | Label that marks an issue as available to the loop      |
 | `pollIntervalSec`     | no       | `60`             | Seconds between poll cycles                             |
 | `addr`                | no       | `localhost:8080` | Address the progress dashboard listens on               |
-| `ticketsPerCycle`     | no       | `1`              | Maximum pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Resumes of interrupted issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
+| `ticketsPerCycle`     | no       | `1`              | Maximum pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Values below 1 are treated as 1 |
 | `personaPath`         | no       | —                | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir`     | no       | —                | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call ([details](#claudeconfigdir)) |
 | `maxQARounds`         | no       | `20`             | Max architect↔answerer rounds before a feature fails    |
 | `confidenceThreshold` | no       | `70`             | Confidence score (0–100) below which an issue is escalated to `needsInfo` instead of implemented, on both the bug and feature routes; `0` disables the gate |
-| `stateLabels`         | no       | see below        | Names of the state labels (including `needsInfo`)       |
+| `stateLabels`         | no       | see below        | Names of the [state labels](how-it-works.md#status-state-machine) |
 | `githubRetry`         | no       | see below        | Retry policy for transient GitHub failures              |
 | `models`              | no       | —                | Per-role model settings ([details](#models))            |
 
@@ -25,8 +25,20 @@ with `~/`.
 The state labels are configurable; unset fields keep their defaults:
 
 ```json
-"stateLabels": {"wip": "ai-wip", "failed": "ai-failed", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info"}
+"stateLabels": {
+  "wip": "ai-wip",
+  "done": "ai-done",
+  "rework": "ai-rework",
+  "needsInfo": "ai-needs-info",
+  "stopped": "ai-stopped",
+  "failed": "ai-failed"
+}
 ```
+
+See [the status state machine](how-it-works.md#status-state-machine) for what
+each state means and how issues move between them. `failed` is deprecated — the
+loop never applies it, but a configured name is still recognized so existing
+issues stay out of the queue.
 
 Partial overrides work — `{"wip": "bot-wip"}` renames only the WIP label. If you
 change these on a live repo, migrate any issues still carrying the old label
@@ -45,9 +57,9 @@ after it has scored.
 When that score is below `confidenceThreshold` (default `70`), the loop does
 **not** guess: it comments the score and the session's specific questions on the
 issue, applies the `ai-needs-info` label, removes the worktree, and stops. The
-issue leaves the queue and is **not** auto-resumed — a human answers the
-questions and removes the `ai-needs-info` label, which re-queues the issue from
-scratch. Set `confidenceThreshold` to `0` to disable the gate on both routes and
+issue leaves the queue and the daemon never touches it again — a human answers
+the questions and removes the `ai-needs-info` label, which re-queues the issue
+from scratch. Set `confidenceThreshold` to `0` to disable the gate on both routes and
 always attempt an implementation.
 
 ## `githubRetry`

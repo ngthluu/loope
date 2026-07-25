@@ -144,7 +144,7 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	if res.IsError {
 		// The JSON parsed and carries a session id, so hand the result back
 		// alongside the error: a session/rate limit (HTTP 429) is exactly when a
-		// caller wants to persist the session so `loop -rework` can resume it.
+		// caller wants to persist the session for the dashboard.
 		return &res, fmt.Errorf("claude %s: %s", call.Label, res.failureSummary())
 	}
 	return &res, nil
@@ -219,8 +219,8 @@ func (c *Claude) writeLog(seq int, label, ext, content string) {
 	_ = os.WriteFile(filepath.Join(c.logDir, name), []byte(content), 0o644)
 }
 
-// SessionInfo is persisted to <logDir>/session so a failed run can be resumed
-// with `loop -rework`. It holds the latest primary working session for the issue.
+// SessionInfo is persisted to <logDir>/session so the dashboard can show which
+// Claude session did the work. It holds the latest primary session for the issue.
 type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	Kind      string `json:"kind"`

@@ -36,7 +36,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 
 	res, err := architect("brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
 	// Record before the error check: an errored call (e.g. a 429 session limit)
-	// still returns a session id, and preserving it lets `loop -rework` resume.
+	// still returns a session id, and the dashboard shows it on the parked ticket.
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature")
 	}

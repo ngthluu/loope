@@ -238,9 +238,11 @@ func clearState(logDir string) {
 	_ = os.Remove(filepath.Join(logDir, stateFile))
 }
 
-// parkCauseFile holds the failure text that parked the issue as ai-rework, so
-// the resume scan can decide whether it is a hand-off it may continue or a
-// failure that waits for a human, without re-deriving it from GitHub comments.
+// parkCauseFile holds the failure text that parked the issue as ai-rework. It is
+// a diagnostic left next to the logs for whoever inspects the workDir: nothing in
+// the daemon reads it back, because a parked issue only moves when a human
+// removes the label. It is cleared when the issue leaves the parked state, so a
+// stale cause can't outlive the failure it describes.
 const parkCauseFile = "park-cause"
 
 // recordParkCause writes the park cause to <logDir>/park-cause. Best-effort,

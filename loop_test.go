@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeEnv simulates gh/git/claude for orchestrator tests.
@@ -556,97 +555,21 @@ func TestProcessOnceHandlesMultipleTickets(t *testing.T) {
 	}
 }
 
-// seedRework creates the preserved worktree and session file that a parked
-// issue would have left behind, so Rework can resume it.
-func seedRework(t *testing.T, env *fakeEnv, n int, session, kind string) {
-	t.Helper()
-	if err := os.MkdirAll(worktreePath(env.wtDir, n), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logDir := filepath.Join(env.wtDir, "logs", fmt.Sprintf("issue-%d", n))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := fmt.Sprintf(`{"sessionId":%q,"kind":%q}`, session, kind)
-	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestReworkResumesAndShips(t *testing.T) {
-	env := newFakeEnv(t)
-	seedRework(t, env, 7, "resume-me", "bug")
-	if err := env.orchestrator().Rework(context.Background(), 7); err != nil {
-		t.Fatal(err)
-	}
-	resumed := false
-	for _, c := range env.f.calls {
-		if c.name == "claude" && argAfter(c.args, "--resume") == "resume-me" {
-			resumed = true
-		}
-	}
-	if !resumed {
-		t.Error("rework must resume the saved session id")
-	}
-	if len(env.callsMatching("git", "push")) == 0 {
-		t.Error("rework must push")
-	}
-	if len(env.callsMatching("gh", "pr create")) == 0 {
-		t.Error("rework must open a PR")
-	}
-	swap := env.callsMatching("gh", "--remove-label ai-rework")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
-		t.Errorf("want single ai-rework->ai-done swap, got: %v", swap)
-	}
-}
-
-func TestReworkMissingWorktreeErrors(t *testing.T) {
-	env := newFakeEnv(t)
-	if err := env.orchestrator().Rework(context.Background(), 7); err == nil {
-		t.Fatal("want error when no preserved worktree exists")
-	}
-	if len(env.callsMatching("gh", "pr create")) != 0 || len(env.callsMatching("git", "push")) != 0 {
-		t.Error("missing worktree must make no destructive changes")
-	}
-}
-
-func TestReworkMissingSessionErrors(t *testing.T) {
-	env := newFakeEnv(t)
-	// Worktree exists but no session file.
-	if err := os.MkdirAll(worktreePath(env.wtDir, 7), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := env.orchestrator().Rework(context.Background(), 7); err == nil {
-		t.Fatal("want error when no session file exists")
-	}
-	if len(env.callsMatching("gh", "pr create")) != 0 {
-		t.Error("missing session must not create a PR")
-	}
-}
-
 func TestClassifyCause(t *testing.T) {
-	cases := []struct {
-		name, errMsg, wantSub string
-		wantResumable         bool
-	}{
-		// Failures are explained but never auto-resumed: the guidance is for the
-		// human who has to remove the label.
-		{"session limit", "claude debug: terminated: api_error; api status 429; You've hit your session limit", "usage", false},
-		{"max turns", "claude execute: terminated: max_turns", "turn", false},
-		{"network down", "claude execute: exec: could not resolve host api.anthropic.com", "network", false},
-		{"timeout", "claude execute: request timed out", "network", false},
-		{"unknown", "git push: permission denied", "", false},
-		{"panic", "panic: runtime error: index out of range", "", false},
-		{"panic with transient text", "panic: nil result after client call: i/o timeout", "", false},
-		{"mixed case", "API STATUS 429: Usage Limit", "usage", false},
-		// The deliberate hand-off (daemon restart / Continue) is the one resume.
-		{"interrupted", interruptedCause, "restart", true},
+	cases := []struct{ name, errMsg, wantSub string }{
+		// Failures are explained but never acted on: the guidance is for the human
+		// who has to remove the label.
+		{"session limit", "claude debug: terminated: api_error; api status 429; You've hit your session limit", "usage"},
+		{"max turns", "claude execute: terminated: max_turns", "turn"},
+		{"network down", "claude execute: exec: could not resolve host api.anthropic.com", "network"},
+		{"timeout", "claude execute: request timed out", "network"},
+		{"unknown", "git push: permission denied", ""},
+		{"panic", "panic: runtime error: index out of range", ""},
+		{"panic with transient text", "panic: nil result after client call: i/o timeout", ""},
+		{"mixed case", "API STATUS 429: Usage Limit", "usage"},
 	}
 	for _, tc := range cases {
-		got, resumable := classifyCause(tc.errMsg)
-		if resumable != tc.wantResumable {
-			t.Errorf("%s: resumable = %v, want %v", tc.name, resumable, tc.wantResumable)
-		}
+		got := classifyCause(tc.errMsg)
 		if tc.wantSub == "" {
 			if got != "" {
 				t.Errorf("%s: want no guidance for an unrecognized cause, got %q", tc.name, got)
@@ -657,13 +580,6 @@ func TestClassifyCause(t *testing.T) {
 			t.Errorf("%s: guidance %q should mention %q", tc.name, got, tc.wantSub)
 		}
 	}
-	// The wrapper keeps working for the park comment path.
-	if failureGuidance(nil) != "" {
-		t.Error("nil cause must yield no guidance")
-	}
-	if g := failureGuidance(fmt.Errorf("usage limit reached")); !strings.Contains(g, "usage") {
-		t.Errorf("failureGuidance wrapper = %q", g)
-	}
 }
 
 // TestParkCommentIncludesGuidance verifies a max_turns park explains the cause
@@ -671,7 +587,7 @@ func TestClassifyCause(t *testing.T) {
 func TestParkCommentIncludesGuidance(t *testing.T) {
 	env := newFakeEnv(t)
 	o := env.orchestrator()
-	err := o.park(context.Background(), 7, o.cfg.StateLabels.WIP, fmt.Errorf("claude execute: terminated: max_turns"))
+	err := o.park(context.Background(), 7, fmt.Errorf("claude execute: terminated: max_turns"))
 	if err == nil {
 		t.Fatal("park must return the cause so the caller still fails")
 	}
@@ -702,168 +618,20 @@ func prepParked(t *testing.T, env *fakeEnv, cause string) {
 	recordParkCause(logDir, cause)
 }
 
-func TestReparkNewErrorStillComments(t *testing.T) {
-	env := newFakeEnv(t)
-	prepParked(t, env, "usage limit reached")
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "claude" {
-			return "", "segfault", fmt.Errorf("exit 1")
-		}
-		return base(c)
-	}
-	if err := env.orchestrator().Rework(context.Background(), 7); err == nil {
-		t.Fatal("want rework failure")
-	}
-	if got := env.callsMatching("gh", "issue comment"); len(got) == 0 {
-		t.Error("a non-resumable failure during rework is new information and must comment")
-	}
-}
-
-// TestReworkRecordsSessionOnError verifies a rework that fails again (e.g. a
-// fresh 429) stays parked AND updates the saved session to the latest one, so
-// the next `loop -rework` resumes from where this attempt left off rather than
-// the stale pre-rework session.
-func TestReworkRecordsSessionOnError(t *testing.T) {
-	env := newFakeEnv(t)
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "claude" {
-			return claudeErrorJSON("You've hit your session limit", "resumed-429"), "", nil
-		}
-		return base(c)
-	}
-	seedRework(t, env, 7, "resume-me", "bug")
-	if err := env.orchestrator().Rework(context.Background(), 7); err == nil {
-		t.Fatal("want error so the issue stays parked as ai-rework")
-	}
-	si, err := readSession(filepath.Join(env.wtDir, "logs", "issue-7"))
-	if err != nil {
-		t.Fatalf("session must remain recorded after a failed rework: %v", err)
-	}
-	if si.SessionID != "resumed-429" {
-		t.Errorf("session id = %q, want resumed-429 (updated to the latest session)", si.SessionID)
-	}
-}
-
-// reworkHandler makes the fake gh return issue 7 as ai-rework for label
-// scans, on top of newFakeEnv's defaults.
-func reworkHandler(env *fakeEnv) func(rcall) (string, string, error) {
-	base := env.f.handler
-	return func(c rcall) (string, string, error) {
-		joined := strings.Join(c.args, " ")
-		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-rework") {
-			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-rework"}]}]`, "", nil
-		}
-		return base(c)
-	}
-}
-
-func TestResumeParkedResumesAndShips(t *testing.T) {
-	env := newFakeEnv(t)
-	prepParked(t, env, interruptedCause)
-	env.f.handler = reworkHandler(env)
-	o := env.orchestrator()
-	if err := resumeCycle(o); err != nil {
-		t.Fatal(err)
-	}
-	if len(env.callsMatching("claude", "--resume s1")) == 0 {
-		t.Error("must resume the saved session")
-	}
-	if len(env.callsMatching("gh", "--remove-label ai-rework")) == 0 ||
-		len(env.callsMatching("gh", "--add-label ai-done")) == 0 {
-		t.Error("successful resume must swap ai-rework -> ai-done")
-	}
-}
-
-func TestResumeParkedSkipsNonResumable(t *testing.T) {
-	env := newFakeEnv(t)
-	prepParked(t, env, "git push: permission denied")
-	env.f.handler = reworkHandler(env)
-	if err := resumeCycle(env.orchestrator()); err != nil {
-		t.Fatal(err)
-	}
-	if got := env.callsMatching("claude", ""); len(got) != 0 {
-		t.Errorf("non-resumable cause must not spawn claude, got %v", got)
-	}
-}
-
-func TestResumeParkedSkipsMissingWorktree(t *testing.T) {
-	env := newFakeEnv(t)
-	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
-	recordParkCause(logDir, interruptedCause) // cause resumable, but no worktree/session
-	env.f.handler = reworkHandler(env)
-	if err := resumeCycle(env.orchestrator()); err != nil {
-		t.Fatal(err)
-	}
-	if got := env.callsMatching("claude", ""); len(got) != 0 {
-		t.Errorf("missing worktree must not spawn claude, got %v", got)
-	}
-}
-
-// A resume that fails WITHOUT re-parking (an infra error before the session is
-// touched, so the resumable cause survives) is retried on the next cycle — but
-// only after its backoff window, so a broken environment isn't hammered.
-func TestResumeParkedBacksOffAfterFailure(t *testing.T) {
-	env := newFakeEnv(t)
-	prepParked(t, env, interruptedCause)
-	base := reworkHandler(env)
-	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "gh" && strings.HasPrefix(strings.Join(c.args, " "), "issue view") {
-			return "", "not found", fmt.Errorf("exit 1")
-		}
-		return base(c)
-	}
-	now := time.Unix(1_700_000_000, 0)
-	o := env.orchestrator()
-	o.now = func() time.Time { return now }
-
-	if err := resumeCycle(o); err != nil {
-		t.Fatalf("listing succeeded, want nil error, got %v", err)
-	}
-	first := len(env.callsMatching("gh", "issue view"))
-	if first == 0 {
-		t.Fatal("want a first resume attempt")
-	}
-
-	// Same instant: still inside the 5-minute backoff window.
-	_ = resumeCycle(o)
-	if got := len(env.callsMatching("gh", "issue view")); got != first {
-		t.Errorf("resume inside backoff window: calls = %d, want %d", got, first)
-	}
-
-	// Past the window: retries.
-	now = now.Add(6 * time.Minute)
-	_ = resumeCycle(o)
-	if got := len(env.callsMatching("gh", "issue view")); got <= first {
-		t.Errorf("resume after backoff: calls = %d, want more than %d", got, first)
-	}
-}
-
 func TestSweepOrphansRequeuesStaleWIP(t *testing.T) {
 	env := newFakeEnv(t)
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		joined := strings.Join(c.args, " ")
-		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
-			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
-		}
-		return base(c)
-	}
+	env.f.handler = wipListHandler(env)
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	recordState(logDir, "ai-wip")
+	recordParkCause(logDir, "some older failure")
 
 	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []struct{ name, substr string }{
-		{"git", "worktree remove --force"},
-		{"git", "branch -D ai/issue-7"},
-		{"gh", "--remove-label ai-wip"},
-	} {
-		if len(env.callsMatching(want.name, want.substr)) == 0 {
-			t.Errorf("missing call %s %q", want.name, want.substr)
-		}
+	// A bare ai-wip removal, so the issue falls back to the eligible queue.
+	rm := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
+		t.Fatalf("want a bare ai-wip removal, got %v", rm)
 	}
 	if len(env.callsMatching("gh", "issue comment")) != 0 {
 		t.Error("orphan sweep must not comment on issues")
@@ -871,21 +639,18 @@ func TestSweepOrphansRequeuesStaleWIP(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(logDir, "state")); !os.IsNotExist(err) {
 		t.Error("sweep must clear the local state marker")
 	}
+	if got := readParkCause(logDir); got != "" {
+		t.Errorf("sweep must clear the park cause, got %q", got)
+	}
 }
 
-// A crashed run that left a worktree AND a recorded session behind is resumable:
-// SweepOrphans must preserve it (park for rework, worktree intact) rather than
-// force-removing it and re-running the whole pipeline from zero.
-func TestSweepOrphansPreservesResumableWIP(t *testing.T) {
+// The sweep must never destroy what a crashed run left behind: the re-queued run
+// reuses the worktree (Worktree.Create returns the existing path), so deleting it
+// here would throw away the crashed run's commits and pay for the whole pipeline
+// again from zero.
+func TestSweepOrphansPreservesWorktreeAndSession(t *testing.T) {
 	env := newFakeEnv(t)
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		joined := strings.Join(c.args, " ")
-		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
-			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
-		}
-		return base(c)
-	}
+	env.f.handler = wipListHandler(env)
 	// Simulate the crash residue: a worktree on disk and a recorded session.
 	wtPath := worktreePath(env.wtDir, 7)
 	if err := os.MkdirAll(wtPath, 0o755); err != nil {
@@ -898,24 +663,35 @@ func TestSweepOrphansPreservesResumableWIP(t *testing.T) {
 	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// Must NOT reclaim: no worktree/branch delete.
 	if len(env.callsMatching("git", "worktree remove")) != 0 || len(env.callsMatching("git", "branch -D")) != 0 {
-		t.Error("resumable orphan must not have its worktree/branch removed")
+		t.Error("sweep must not remove the orphan's worktree or branch")
 	}
 	if _, err := os.Stat(wtPath); err != nil {
-		t.Error("resumable orphan's worktree must be preserved on disk")
+		t.Error("orphan's worktree must be preserved on disk")
 	}
-	// Must park for rework: ai-wip -> ai-rework, with a resumable cause recorded.
-	swap := env.callsMatching("gh", "--remove-label ai-wip")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
-		t.Errorf("want single ai-wip->ai-rework park swap, got: %v", swap)
+	if si, err := readSession(logDir); err != nil || si.SessionID != "sess-7" {
+		t.Errorf("session must survive the sweep, got %+v (err %v)", si, err)
 	}
-	if got := env.readLocalState(7); got != "ai-rework" {
-		t.Errorf("local state = %q, want ai-rework", got)
+	// ai-rework is only ever entered by a failure, never by the sweep: an
+	// interrupted run goes straight back to the eligible queue.
+	if got := env.callsMatching("gh", "--add-label ai-rework"); len(got) != 0 {
+		t.Errorf("sweep must not park the orphan as ai-rework, got %v", got)
 	}
-	cause := readParkCause(logDir)
-	if _, resumable := classifyCause(cause); !resumable {
-		t.Errorf("sweep park cause %q must be auto-resumable", cause)
+	if got := env.readLocalState(7); got != "" {
+		t.Errorf("local state = %q, want cleared", got)
+	}
+}
+
+// wipListHandler makes the fake gh return issue 7 as ai-wip for label scans, on
+// top of newFakeEnv's defaults.
+func wipListHandler(env *fakeEnv) func(rcall) (string, string, error) {
+	base := env.f.handler
+	return func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip") {
+			return `[{"number": 7, "title": "Fix crash", "labels": [{"name": "ai-wip"}]}]`, "", nil
+		}
+		return base(c)
 	}
 }
 
@@ -927,31 +703,6 @@ func TestSweepOrphansPropagatesListError(t *testing.T) {
 	o := env.orchestrator()
 	if err := o.SweepOrphans(context.Background()); err == nil {
 		t.Fatal("offline sweep must return an error so runLoop retries next cycle")
-	}
-}
-
-func TestReworkAlreadyDoneCloses(t *testing.T) {
-	env := newFakeEnv(t)
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "claude" {
-			return claudeJSON("PIPELINE_ALREADY_DONE: nothing left to do", "d1"), "", nil
-		}
-		return base(c)
-	}
-	seedRework(t, env, 7, "resume-me", "feature")
-	if err := env.orchestrator().Rework(context.Background(), 7); err != nil {
-		t.Fatal(err)
-	}
-	swap := env.callsMatching("gh", "--remove-label ai-rework")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
-		t.Errorf("want ai-rework->ai-done swap, got: %v", swap)
-	}
-	if len(env.callsMatching("gh", "issue close")) == 0 {
-		t.Error("already-done rework must close the issue")
-	}
-	if len(env.callsMatching("gh", "pr create")) != 0 {
-		t.Error("already-done rework must not create a PR")
 	}
 }
 
@@ -1129,56 +880,43 @@ func TestStopDuringPipelineParksAsStopped(t *testing.T) {
 	}
 }
 
-func TestContinueWithSessionQueuesRework(t *testing.T) {
-	env := newFakeEnv(t)
-	o := env.orchestrator()
-	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	recordState(logDir, "ai-stopped")
+// Continue always re-queues to the eligible state, session or no session: the
+// daemon has no resume path any more, so a stopped ticket goes back through the
+// normal cycle — which reuses the preserved worktree.
+func TestContinueRequeuesEligible(t *testing.T) {
+	for _, withSession := range []bool{true, false} {
+		name := "no session"
+		if withSession {
+			name = "saved session"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newFakeEnv(t)
+			o := env.orchestrator()
+			logDir := filepath.Join(env.wtDir, "logs", "issue-7")
+			if err := os.MkdirAll(logDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if withSession {
+				(&Claude{logDir: logDir}).RecordSession("s1", "bug")
+			}
+			recordState(logDir, "ai-stopped")
+			recordParkCause(logDir, "whatever")
 
-	if err := o.Continue(context.Background(), 7); err != nil {
-		t.Fatalf("Continue: %v", err)
-	}
-	swap := env.callsMatching("gh", "--remove-label ai-stopped")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
-		t.Fatalf("want ai-stopped->ai-rework swap, got %v", swap)
-	}
-	if got := env.readLocalState(7); got != "ai-rework" {
-		t.Fatalf("local state = %q, want ai-rework", got)
-	}
-	if c := readParkCause(logDir); c != interruptedCause {
-		t.Fatalf("park cause = %q, want %q (resumable)", c, interruptedCause)
-	}
-}
-
-func TestContinueWithoutSessionRequeuesEligible(t *testing.T) {
-	env := newFakeEnv(t)
-	o := env.orchestrator()
-	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	recordState(logDir, "ai-stopped")
-	recordParkCause(logDir, "whatever")
-
-	if err := o.Continue(context.Background(), 7); err != nil {
-		t.Fatalf("Continue: %v", err)
-	}
-	// ai-stopped removed (not swapped) so the ticket falls back to eligible.
-	rm := env.callsMatching("gh", "--remove-label ai-stopped")
-	if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
-		t.Fatalf("want a bare ai-stopped removal, got %v", rm)
-	}
-	if got := env.readLocalState(7); got != "" {
-		t.Fatalf("local state = %q, want cleared", got)
-	}
-	if c := readParkCause(logDir); c != "" {
-		t.Fatalf("park cause = %q, want cleared", c)
+			if err := o.Continue(context.Background(), 7); err != nil {
+				t.Fatalf("Continue: %v", err)
+			}
+			// ai-stopped removed (not swapped) so the ticket falls back to eligible.
+			rm := env.callsMatching("gh", "--remove-label ai-stopped")
+			if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
+				t.Fatalf("want a bare ai-stopped removal, got %v", rm)
+			}
+			if got := env.readLocalState(7); got != "" {
+				t.Fatalf("local state = %q, want cleared", got)
+			}
+			if c := readParkCause(logDir); c != "" {
+				t.Fatalf("park cause = %q, want cleared", c)
+			}
+		})
 	}
 }
 

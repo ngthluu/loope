@@ -3,15 +3,13 @@ package main
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // A sweep that failed at boot is retried on later cycles — and by then this
-// process has its own live pipelines wearing ai-wip. The sweep exists to clean
-// up a CRASHED run's leftovers, so it must skip anything the slot ledger says is
-// in flight: parking a live issue relabels it out from under its own pipeline,
-// and the reclaim path force-removes the worktree that pipeline is committing
-// into.
+// process has its own live pipelines wearing ai-wip. The sweep exists to
+// re-queue a CRASHED run's leftovers, so it must skip anything the slot ledger
+// says is in flight: stripping a live pipeline's ai-wip label would let the next
+// cycle start a second run for the same issue.
 func TestSweepOrphansSkipsInFlightPipelines(t *testing.T) {
 	env := newSlotEnv(t, 7)
 	o := env.orchestrator()
@@ -29,7 +27,7 @@ func TestSweepOrphansSkipsInFlightPipelines(t *testing.T) {
 	}
 
 	if n := len(env.callsMatching("gh", "--remove-label ai-wip")); n != 0 {
-		t.Errorf("sweep relabelled a live pipeline's issue (%d swaps), want 0", n)
+		t.Errorf("sweep relabelled a live pipeline's issue (%d removals), want 0", n)
 	}
 	if n := len(env.callsMatching("git", "worktree remove")); n != 0 {
 		t.Errorf("sweep removed a live pipeline's worktree (%d calls), want 0", n)
@@ -46,7 +44,7 @@ func TestSweepOrphansSkipsInFlightPipelines(t *testing.T) {
 
 // A genuine orphan — ai-wip with no pipeline in flight — must still be swept.
 // The in-flight filter narrows the sweep; it must not disable it.
-func TestSweepOrphansStillReclaimsGenuineOrphans(t *testing.T) {
+func TestSweepOrphansStillRequeuesGenuineOrphans(t *testing.T) {
 	env := newSlotEnv(t)
 	o := env.orchestrator()
 	env.setWIP(4)
@@ -55,86 +53,6 @@ func TestSweepOrphansStillReclaimsGenuineOrphans(t *testing.T) {
 		t.Fatalf("SweepOrphans: %v", err)
 	}
 	if n := len(env.callsMatching("gh", "--remove-label ai-wip")); n != 1 {
-		t.Fatalf("orphan not reclaimed: %d ai-wip removals, want 1", n)
-	}
-}
-
-// ProcessOnce ran first and always claimed every free slot, so a parked issue
-// could never be resumed while eligible work kept arriving — its preserved
-// worktree and session would sit forever. Resuming existing work takes priority
-// over starting new work.
-func TestResumeIsNotStarvedByAFullEligibleQueue(t *testing.T) {
-	env := newSlotEnv(t, 1, 2, 3)
-	o := env.orchestrator()
-	o.cfg.TicketsPerCycle = 2
-	env.setRework(5)
-	prepParkedIn(t, env.fakeEnv, 5, interruptedCause)
-	// A long poll interval keeps the loop to a single cycle so cancellation is
-	// the only wake-up after the slots fill.
-	o.cfg.PollIntervalSec = 3600
-
-	started, release := gatePipelines(o, env.f)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		runLoop(ctx, o, o.cfg, false /* sweep */)
-		close(done)
-	}()
-
-	got := awaitStarted(t, started, 2)
-	cancel()
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("runLoop did not return after pipelines drained")
-	}
-
-	resumed := false
-	for _, n := range got {
-		if n == 5 {
-			resumed = true
-		}
-	}
-	if !resumed {
-		t.Fatalf("parked issue #5 was starved by the eligible queue; started %v", got)
-	}
-}
-
-// Starving resumes must not flip into starving new work: with slots to spare,
-// a cycle runs the resume AND tops up from the eligible queue.
-func TestResumeAndNewWorkShareTheBudget(t *testing.T) {
-	env := newSlotEnv(t, 1)
-	o := env.orchestrator()
-	o.cfg.TicketsPerCycle = 2
-	env.setRework(5)
-	prepParkedIn(t, env.fakeEnv, 5, interruptedCause)
-	// A long poll interval keeps the loop to a single cycle so cancellation is
-	// the only wake-up after the slots fill.
-	o.cfg.PollIntervalSec = 3600
-
-	started, release := gatePipelines(o, env.f)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		runLoop(ctx, o, o.cfg, false /* sweep */)
-		close(done)
-	}()
-
-	got := awaitStarted(t, started, 2)
-	cancel()
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("runLoop did not return after pipelines drained")
-	}
-
-	seen := map[int]bool{}
-	for _, n := range got {
-		seen[n] = true
-	}
-	if !seen[5] || !seen[1] {
-		t.Fatalf("want both the resume (#5) and new work (#1) started, got %v", got)
+		t.Fatalf("orphan not re-queued: %d ai-wip removals, want 1", n)
 	}
 }

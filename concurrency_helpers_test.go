@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -99,7 +98,6 @@ type slotEnv struct {
 	*fakeEnv
 	mu       sync.Mutex
 	eligible []int
-	rework   []int
 	wip      []int
 }
 
@@ -107,12 +105,6 @@ func (s *slotEnv) setEligible(nums ...int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.eligible = nums
-}
-
-func (s *slotEnv) setRework(nums ...int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rework = nums
 }
 
 func (s *slotEnv) setWIP(nums ...int) {
@@ -137,10 +129,6 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 		switch c.name {
 		case "gh":
 			switch {
-			case strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-rework"):
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				return s.listJSON(s.rework, "ai-rework"), "", nil
 			case strings.HasPrefix(joined, "issue list") && strings.Contains(joined, "--label ai-wip"):
 				s.mu.Lock()
 				defer s.mu.Unlock()
@@ -172,24 +160,6 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 		return "", "", nil
 	}
 	return s
-}
-
-// prepParkedIn seeds the on-disk residue of a parked issue — preserved
-// worktree, recorded session, park cause — so shouldResume accepts it. Same
-// shape as prepParked, but for any issue number.
-func prepParkedIn(t *testing.T, env *fakeEnv, n int, cause string) {
-	t.Helper()
-	if err := os.MkdirAll(worktreePath(env.wtDir, n), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logDir := filepath.Join(env.wtDir, "logs", fmt.Sprintf("issue-%d", n))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "session"), []byte(`{"sessionId":"s1","kind":"bug"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	recordParkCause(logDir, cause)
 }
 
 // lockedBuf is an io.Writer safe for the concurrent pipeline goroutines that
@@ -227,13 +197,6 @@ func captureLog(t *testing.T) func() string {
 // can assert on observable state the way they did when ProcessOnce blocked.
 func runCycle(o *Orchestrator) error {
 	err := o.ProcessOnce(context.Background())
-	o.Wait()
-	return err
-}
-
-// resumeCycle is runCycle for the auto-resume path.
-func resumeCycle(o *Orchestrator) error {
-	err := o.ResumeParked(context.Background())
 	o.Wait()
 	return err
 }

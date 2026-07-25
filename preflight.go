@@ -174,16 +174,28 @@ func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth Chec
 	return CheckResult{Name: "repo access", Status: statusOK, Detail: cfg.RepoSlug}
 }
 
-// wantedLabels is every label the loop applies: the eligible label plus all
-// five state labels. Empty names are skipped.
+// wantedLabels is every label the loop can APPLY: the eligible label plus the
+// state labels it actually assigns. Empty names are skipped.
+//
+// Stopped belongs here even though only the dashboard applies it: pause swaps
+// WIP->Stopped, and that swap failing is how a Stop silently does nothing (see
+// Orchestrator.pause, which deliberately leaves state unchanged rather than
+// diverging from the real label). Warning at boot is the only place the user
+// learns the label is missing before they need it.
+//
+// Failed is deliberately absent. It is recognized (hasStateLabel) so issues
+// carrying it from an older version stay de-queued, but nothing applies it any
+// more — so asking a fresh repo to create a label the loop will never use is
+// noise. Recognized-but-never-applied is why this list is "can apply", not
+// "knows about".
 func wantedLabels(cfg *Config) []string {
 	names := []string{
 		cfg.EligibleLabel,
 		cfg.StateLabels.WIP,
-		cfg.StateLabels.Failed,
 		cfg.StateLabels.Done,
 		cfg.StateLabels.Rework,
 		cfg.StateLabels.NeedsInfo,
+		cfg.StateLabels.Stopped,
 	}
 	out := names[:0:0]
 	for _, n := range names {

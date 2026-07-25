@@ -164,17 +164,6 @@ PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
 	check(t, "bugPrompt(threshold=0)", bugPrompt("ISSUE BODY", 0), want)
 }
 
-func TestGoldenReworkPrompt(t *testing.T) {
-	want := `Continue the work on this issue where the previous session left off.
-Complete the remaining implementation, make the full test suite pass, and commit
-all changes. HEADLESS: do not ask questions; make reasonable calls and note them
-in commit messages.
-
-If you find the work is already fully implemented, do not fabricate changes:
-print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
-	check(t, "reworkPrompt", reworkPrompt(), want)
-}
-
 func TestGoldenTriagePrompt(t *testing.T) {
 	want := `You are a triage agent for an automated development pipeline.
 
@@ -243,21 +232,13 @@ func TestGoldenPRBody(t *testing.T) {
 }
 
 func TestGoldenClassifyCauseGuidance(t *testing.T) {
-	cases := []struct {
-		msg, want     string
-		wantResumable bool
-	}{
-		{"session limit reached", "Cause: Claude usage/rate limit. Re-queue once the limit resets.", false},
-		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs.", false},
-		{"interrupted mid-run", "Cause: the daemon restarted while this issue was mid-run — the preserved session is resumed automatically.", true},
-		{"dial tcp: i/o timeout", "Cause: network outage. Re-queue once connectivity is back.", false},
+	cases := []struct{ msg, want string }{
+		{"session limit reached", "Cause: Claude usage/rate limit. Re-queue once the limit resets."},
+		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs."},
+		{"dial tcp: i/o timeout", "Cause: network outage. Re-queue once connectivity is back."},
 	}
 	for _, tc := range cases {
-		got, resumable := classifyCause(tc.msg)
-		if resumable != tc.wantResumable {
-			t.Errorf("classifyCause(%q) resumable = %v, want %v", tc.msg, resumable, tc.wantResumable)
-		}
-		check(t, "classifyCause("+tc.msg+")", got, tc.want)
+		check(t, "classifyCause("+tc.msg+")", classifyCause(tc.msg), tc.want)
 	}
 }
 

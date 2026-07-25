@@ -32,8 +32,6 @@ Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in thi
 
 {{define "guidance-budget"}}Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs.{{end}}
 
-{{define "guidance-interrupted"}}Cause: the daemon restarted while this issue was mid-run — the preserved session is resumed automatically.{{end}}
-
 {{define "guidance-network"}}Cause: network outage. Re-queue once connectivity is back.{{end}}
 
 {{define "uat-section"}}{{.UATMarker}}

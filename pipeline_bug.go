@@ -16,7 +16,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	// Record before the error check: an errored call (e.g. a 429 session limit)
-	// still returns a session id, and preserving it lets `loop -rework` resume.
+	// still returns a session id, and the dashboard shows it on the parked ticket.
 	if res != nil {
 		c.RecordSession(res.SessionID, "bug")
 	}

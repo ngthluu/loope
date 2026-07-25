@@ -167,9 +167,11 @@ func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) 
 }
 
 // runLoop drives the poll cycle forever: one startup orphan sweep (retried
-// until it succeeds once), then resume interrupted parked issues and top the
-// in-flight pipeline set up from the eligible queue, waiting one interval
-// between cycles. Cycles no longer block on the pipelines they start, so both
+// until it succeeds once), then top the in-flight pipeline set up from the
+// eligible queue, waiting one interval between cycles. There is no resume stage:
+// ai-rework is terminal, so the only way work continues is a human removing the
+// label, which puts the issue back in the eligible queue this cycle already
+// reads. Cycles no longer block on the pipelines they start, so both
 // exit paths drain in-flight work with o.Wait() before returning — main's
 // deferred workDir-lock release must not run while a pipeline is live. Every
 // stage runs under guard, so a panic is one bad cycle, not a dead daemon.
@@ -184,13 +186,6 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, sweep bool) {
 			} else {
 				sweep = false
 			}
-		}
-		// Resumes run BEFORE new work: they continue an issue that already has a
-		// worktree and session on disk, and they draw from the same slot budget.
-		// With ProcessOnce first, a queue that always has eligible issues would
-		// claim every slot every cycle and no interrupted issue would be resumed.
-		if err := guard("resume", func() error { return o.ResumeParked(ctx) }); err != nil {
-			log.Printf("resume error: %v", err)
 		}
 		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
 			log.Printf("cycle error: %v", err)
