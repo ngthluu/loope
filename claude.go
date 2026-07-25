@@ -219,6 +219,11 @@ func (c *Claude) writeLog(seq int, label, ext, content string) {
 	_ = os.WriteFile(filepath.Join(c.logDir, name), []byte(content), 0o644)
 }
 
+// sessionFile holds the SessionInfo JSON. The dashboard reads it back on every
+// disk scan; nothing else in the daemon does, since a session id is only ever
+// surfaced, never resumed.
+const sessionFile = "session"
+
 // SessionInfo is persisted to <logDir>/session so the dashboard can show which
 // Claude session did the work. It holds the latest primary session for the issue.
 type SessionInfo struct {
@@ -242,12 +247,12 @@ func (c *Claude) RecordSession(id, kind string) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(c.logDir, "session"), b, 0o644)
+	_ = os.WriteFile(filepath.Join(c.logDir, sessionFile), b, 0o644)
 }
 
 // readSession reads the SessionInfo written by RecordSession from logDir.
 func readSession(logDir string) (SessionInfo, error) {
-	data, err := os.ReadFile(filepath.Join(logDir, "session"))
+	data, err := os.ReadFile(filepath.Join(logDir, sessionFile))
 	if err != nil {
 		return SessionInfo{}, err
 	}

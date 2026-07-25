@@ -361,13 +361,10 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 				tk.LastActive = info.ModTime()
 			}
 		}
-		if name == "session" {
-			if data, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
-				var si SessionInfo
-				if json.Unmarshal(data, &si) == nil {
-					tk.Kind = si.Kind
-					tk.SessionID = si.SessionID
-				}
+		if name == sessionFile {
+			if si, rerr := readSession(dir); rerr == nil {
+				tk.Kind = si.Kind
+				tk.SessionID = si.SessionID
 			}
 			continue
 		}
