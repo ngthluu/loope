@@ -179,6 +179,39 @@ func (g *GitHub) IssueTitle(ctx context.Context, num int) (string, error) {
 	return v.Title, nil
 }
 
+// IssueBody returns just the issue's body, used by the UAT step to detect an
+// already-published checklist and to build the appended body.
+func (g *GitHub) IssueBody(ctx context.Context, n int) (string, error) {
+	out, err := g.gh(ctx, "issue", "view", strconv.Itoa(n), "--repo", g.slug, "--json", "body")
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		return "", fmt.Errorf("parse issue body: %w", err)
+	}
+	return v.Body, nil
+}
+
+// AppendIssueBody appends text to the issue body via a read-modify-write
+// `gh issue edit --body`. The read-modify-write is not atomic; the loop is the
+// only writer of the body, and the UAT marker check makes a lost update at worst
+// a missing checklist, never a duplicated one.
+func (g *GitHub) AppendIssueBody(ctx context.Context, n int, text string) error {
+	body, err := g.IssueBody(ctx, n)
+	if err != nil {
+		return err
+	}
+	updated := text
+	if trimmed := strings.TrimRight(body, "\n"); trimmed != "" {
+		updated = trimmed + "\n\n" + text
+	}
+	_, err = g.gh(ctx, "issue", "edit", strconv.Itoa(n), "--repo", g.slug, "--body", updated)
+	return err
+}
+
 func (g *GitHub) CreatePR(ctx context.Context, branch, title, body string) (string, error) {
 	out, err := g.gh(ctx, "pr", "create", "--repo", g.slug, "--head", branch,
 		"--title", title, "--body", body)
