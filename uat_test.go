@@ -262,6 +262,41 @@ func TestUATSurvivesCommentFailure(t *testing.T) {
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 }
 
+// StartFeature runs the session on its own goroutine — the caller gets control
+// back while it is still in flight — and its wait func joins it, so the
+// checklist is published by the time wait returns.
+func TestUATStartFeatureRunsInBackgroundAndWaitJoins(t *testing.T) {
+	tgt := &fakeUATTarget{body: "the issue body"}
+	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] click it")}}}
+	release := make(chan struct{})
+	g := &gateRunner{inner: f, gate: func(dir, name, stdin string) chan struct{} { return release }}
+	c := &Claude{runner: g}
+
+	wait := (&UAT{Target: tgt, Num: 7}).StartFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
+	// The session is parked in the gate, so StartFeature plainly did not run it
+	// inline: control is back here with nothing published yet.
+	if len(tgt.posted) != 0 {
+		t.Fatalf("StartFeature ran the session inline: posted %d comments", len(tgt.posted))
+	}
+	close(release)
+	wait()
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d comments after wait(), want 1 — wait must join the session", len(tgt.posted))
+	}
+}
+
+// Disabled UAT: no goroutine, no calls, and still a usable wait func.
+func TestUATStartFeatureNilReceiverIsSafe(t *testing.T) {
+	var u *UAT
+	f := &fakeRunner{}
+	c := &Claude{runner: f}
+	u.StartFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")()
+	(&UAT{}).StartFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")()
+	if len(f.calls) != 0 {
+		t.Errorf("a disabled UAT must make no calls, got %d", len(f.calls))
+	}
+}
+
 // A nil *UAT (and a UAT with no target) disables the step entirely, so callers
 // never need a nil guard.
 func TestUATNilReceiverIsSafe(t *testing.T) {

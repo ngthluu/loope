@@ -51,6 +51,28 @@ func (u *UAT) RunFeature(ctx context.Context, c *Claude, cfg *Config, wtPath, sp
 	u.run(ctx, c, cfg, wtPath, uatLabel, uatFeaturePrompt(specPath))
 }
 
+// StartFeature runs RunFeature in the background and returns the func that waits
+// for it. The checklist is a side errand on a spec that is already committed:
+// nothing downstream reads it, so the plan session must not sit behind a whole
+// UAT session before it starts.
+//
+// The wait func is mandatory, not optional — the caller must call it before
+// returning, because the UAT session reads the worktree and the pipeline's
+// context, both of which the caller's caller tears down on return. A disabled
+// UAT starts no goroutine and returns a no-op wait, so callers never need a nil
+// guard.
+func (u *UAT) StartFeature(ctx context.Context, c *Claude, cfg *Config, wtPath, specPath string) (wait func()) {
+	if u == nil || u.Target == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		u.RunFeature(ctx, c, cfg, wtPath, specPath)
+	}()
+	return func() { <-done }
+}
+
 // RunBug publishes the checklist for the bug route, from the issue content plus
 // the diff the fix produced. Same non-blocking contract as RunFeature.
 func (u *UAT) RunBug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string) {
