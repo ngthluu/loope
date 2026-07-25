@@ -943,3 +943,18 @@ func TestDetailRendersContinueButtonForStopped(t *testing.T) {
 		t.Fatalf("stopped detail should render a Continue button, got: %s", body)
 	}
 }
+
+// TestWorktreeURIEscapesPath pins the exact scheme/host prefix the VS Code
+// handler expects and proves url.URL does the percent-encoding — workDir on
+// macOS frequently contains spaces, which manual string concatenation would
+// emit raw and the browser would refuse.
+func TestWorktreeURIEscapesPath(t *testing.T) {
+	got := string(worktreeURI("/Users/me/my work/issue-7"))
+	want := "vscode://file/Users/me/my%20work/issue-7"
+	if got != want {
+		t.Fatalf("worktreeURI = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, "vscode://file/") {
+		t.Fatalf("worktreeURI = %q, want vscode://file/ prefix", got)
+	}
+}
