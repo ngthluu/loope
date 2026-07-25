@@ -219,8 +219,8 @@ func TestBugPipelineRunsUATAfterDebug(t *testing.T) {
 	if argAfter(f.calls[1].args, "--model") != "sonnet" {
 		t.Errorf("the uat call must use models.uat, got %v", f.calls[1].args)
 	}
-	if len(tgt.appended) != 1 {
-		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d UAT comments, want 1", len(tgt.posted))
 	}
 }
 
@@ -239,7 +239,7 @@ func TestBugPipelineSkipsUATOnLowConfidence(t *testing.T) {
 	if len(f.calls) != 1 {
 		t.Errorf("calls = %d, want only the debug turn", len(f.calls))
 	}
-	if tgt.bodyCalls != 0 || len(tgt.appended) != 0 {
+	if tgt.bodyCalls != 0 || len(tgt.posted) != 0 {
 		t.Error("the UAT step must not run on the low-confidence outcome")
 	}
 }
@@ -255,7 +255,7 @@ func TestBugPipelineSkipsUATOnAlreadyDone(t *testing.T) {
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError, got %v", err)
 	}
-	if tgt.bodyCalls != 0 || len(tgt.appended) != 0 {
+	if tgt.bodyCalls != 0 || len(tgt.posted) != 0 {
 		t.Error("the UAT step must not run on the already-done outcome")
 	}
 }

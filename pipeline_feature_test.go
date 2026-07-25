@@ -589,8 +589,8 @@ func TestFeaturePipelineRunsUATBeforePlan(t *testing.T) {
 	if len(labels) != 4 {
 		t.Fatalf("calls = %d, want architect, uat, plan, execute", len(labels))
 	}
-	if len(tgt.appended) != 1 {
-		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d UAT comments, want 1", len(tgt.posted))
 	}
 }
 
