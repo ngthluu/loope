@@ -43,9 +43,12 @@ step logs the issue number and the reason and returns, and the pipeline carries
 on to plan/execute or to shipping. The session's full output is kept as
 `<seq>-uat.output.md` in the issue's log directory either way.
 
-On the feature route it runs immediately after the spec is committed, before the
-plan exists: the checklist describes the behavior the spec promises. On the bug
-route it runs after the fix, from the issue plus `git diff origin/<base>...HEAD`,
+On the feature route it starts as soon as the spec is committed and then runs
+**alongside** the plan session: the checklist describes the behavior the spec
+promises, and nothing downstream reads it, so the plan never waits for it. The
+pipeline joins the UAT session before it returns, so the session never outlives
+the worktree it is reading. On the bug route it runs after the fix (nothing is
+left to overlap it with), from the issue plus `git diff origin/<base>...HEAD`,
 and only on the outcome where a fix was actually produced — an `ai-needs-info`
 escalation or an already-done close publishes nothing.
 

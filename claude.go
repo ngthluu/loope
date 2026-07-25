@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Usage is the token accounting claude emits in its result JSON. The counts are
@@ -76,11 +77,17 @@ func (r ClaudeResult) failureSummary() string {
 // JSON output of every call as NNN-<label>.json for postmortems. configDir, when
 // set, is passed to claude as CLAUDE_CONFIG_DIR so the loop can run under a
 // dedicated profile (e.g. ~/.claude-personal) instead of the default ~/.claude.
+//
+// One *Claude is shared by the concurrent sessions of a single pipeline (the UAT
+// session runs alongside plan/execute), so mu guards the mutable state: the log
+// sequence counter. Everything else is per-call locals or distinctly-named files.
 type Claude struct {
 	runner    Runner
 	logDir    string
 	configDir string
-	seq       int
+
+	mu  sync.Mutex
+	seq int
 }
 
 type ClaudeCall struct {
@@ -159,8 +166,12 @@ func effortArgs(effort string) []string {
 
 // nextSeq allocates the shared sequence number for a call's log files, seeding
 // it from the count of existing .json postmortems so numbering continues across
-// process restarts.
+// process restarts. Held under mu: concurrent sessions on one *Claude must not
+// race on the counter, nor be handed the same number and overwrite each other's
+// logs.
 func (c *Claude) nextSeq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.seq == 0 && c.logDir != "" {
 		if entries, err := os.ReadDir(c.logDir); err == nil {
 			for _, e := range entries {

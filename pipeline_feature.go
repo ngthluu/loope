@@ -60,7 +60,13 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 		// through and keep prodding (mirrors the plan-file behavior).
 		if rel, ok := parseSpecReady(output); ok {
 			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
-				uat.RunFeature(ctx, c, cfg, wtPath, specPath)
+				// The UAT session runs alongside plan/execute — it only reads
+				// the committed spec, so nothing downstream waits on it. The
+				// wait runs on every exit path (including a failed plan): the
+				// session must not outlive the pipeline, whose worktree and
+				// context the caller tears down on return.
+				wait := uat.StartFeature(ctx, c, cfg, wtPath, specPath)
+				defer wait()
 				return runPlanThenExecute(ctx, c, cfg, wtPath, specPath, start)
 			}
 		}

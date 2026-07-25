@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -550,34 +551,34 @@ func TestReadPersona(t *testing.T) {
 	}
 }
 
-// Decision 2, taken literally: the UAT session runs immediately after the spec,
-// before plan and execute.
-func TestFeaturePipelineRunsUATBeforePlan(t *testing.T) {
+// Decision 2: the UAT session is launched as soon as the spec is committed, and
+// works from that spec. It races with plan/execute, so the assertions key on the
+// prompt each session got, never on call ordinals.
+func TestFeaturePipelineRunsUATOnTheCommittedSpec(t *testing.T) {
 	wt := t.TempDir()
-	var labels []string
+	var uatPrompt, uatModel string
+	seen := map[string]int{}
 	f := &fakeRunner{}
+	// fakeRunner calls its handler under its own mutex, so the counters and the
+	// captured prompt need no extra locking even with two sessions in flight.
 	f.handler = func(c rcall) (string, string, error) {
-		labels = append(labels, argAfter(c.args, "--model"))
-		switch len(labels) {
-		case 1: // architect: commits the spec straight away
-			writeSpecFile(t, wt)
-			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
-		case 2: // the UAT session
-			if !strings.Contains(c.stdin, "2026-07-13-thing-design.md") {
-				t.Errorf("the second call should be the UAT session on the spec, got: %s", c.stdin)
-			}
-			return claudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
-		case 3: // plan
-			if !strings.Contains(c.stdin, "/superpowers:writing-plans") {
-				t.Errorf("the third call should be the plan session, got: %s", c.stdin)
-			}
+		switch {
+		case strings.Contains(c.stdin, "/superpowers:writing-plans"):
+			seen["plan"]++
 			writePlanFile(t, wt)
 			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
-		case 4: // execute
+		case strings.Contains(c.stdin, "/superpowers:executing-plans"):
+			seen["execute"]++
 			return claudeJSON("Executed.", "exec-1"), "", nil
+		case strings.Contains(c.stdin, uatBeginSentinel):
+			seen["uat"]++
+			uatPrompt, uatModel = c.stdin, argAfter(c.args, "--model")
+			return claudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
+		default: // architect: commits the spec straight away
+			seen["architect"]++
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
 		}
-		t.Fatalf("unexpected call %d: %v", len(labels), c.args)
-		return "", "", nil
 	}
 	tgt := &fakeUATTarget{body: "the issue body"}
 	cfg := featureConfig()
@@ -586,9 +587,67 @@ func TestFeaturePipelineRunsUATBeforePlan(t *testing.T) {
 	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}); err != nil {
 		t.Fatal(err)
 	}
-	if len(labels) != 4 {
-		t.Fatalf("calls = %d, want architect, uat, plan, execute", len(labels))
+	for _, want := range []string{"architect", "uat", "plan", "execute"} {
+		if seen[want] != 1 {
+			t.Errorf("%s sessions = %d, want exactly 1 (all: %v)", want, seen[want], seen)
+		}
 	}
+	if !strings.Contains(uatPrompt, "2026-07-13-thing-design.md") {
+		t.Errorf("the UAT session must work from the committed spec, got: %s", uatPrompt)
+	}
+	if uatModel != "sonnet" {
+		t.Errorf("UAT model = %q, want the models.uat block", uatModel)
+	}
+	if len(tgt.appended) != 1 {
+		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	}
+}
+
+// The UAT session and the plan session run at the same time: UAT is a side
+// errand on the committed spec, so it must not hold the plan session up. The
+// gate blocks the UAT call until the plan call has started — under a sequential
+// pipeline the plan call never arrives and the gate times out.
+func TestFeaturePipelineRunsUATConcurrentlyWithPlan(t *testing.T) {
+	wt := t.TempDir()
+	f := &fakeRunner{}
+	planStarted := make(chan struct{})
+	f.handler = func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "/superpowers:writing-plans"):
+			close(planStarted)
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case strings.Contains(c.stdin, "/superpowers:executing-plans"):
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		case strings.Contains(c.stdin, uatBeginSentinel):
+			return claudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
+		default: // architect: commits the spec straight away
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		}
+	}
+	var overlapped atomic.Bool
+	g := &gateRunner{inner: f, gate: func(dir, name, stdin string) chan struct{} {
+		if name == "claude" && strings.Contains(stdin, uatBeginSentinel) {
+			select {
+			case <-planStarted:
+				overlapped.Store(true)
+			case <-time.After(3 * time.Second):
+			}
+		}
+		return nil
+	}}
+	tgt := &fakeUATTarget{body: "the issue body"}
+	cfg := featureConfig()
+	cfg.Models.UAT = ModelConfig{Model: "sonnet"}
+	c := &Claude{runner: g}
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if !overlapped.Load() {
+		t.Error("the plan session did not start while the UAT session was still running — UAT is blocking the pipeline")
+	}
+	// Still published, and the pipeline waited for it before returning.
 	if len(tgt.appended) != 1 {
 		t.Errorf("appended %d sections, want 1", len(tgt.appended))
 	}
@@ -597,21 +656,24 @@ func TestFeaturePipelineRunsUATBeforePlan(t *testing.T) {
 // Non-blocking: a UAT session that errors must not stop plan and execute.
 func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 	wt := t.TempDir()
-	var n int
+	seen := map[string]int{}
 	f := &fakeRunner{}
 	f.handler = func(c rcall) (string, string, error) {
-		n++
 		switch {
-		case n == 1:
-			writeSpecFile(t, wt)
-			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
-		case n == 2:
-			return "", "boom", fmt.Errorf("exit 1") // the UAT session fails
-		case n == 3:
+		case strings.Contains(c.stdin, "/superpowers:writing-plans"):
+			seen["plan"]++
 			writePlanFile(t, wt)
 			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
-		default:
+		case strings.Contains(c.stdin, "/superpowers:executing-plans"):
+			seen["execute"]++
 			return claudeJSON("Executed.", "exec-1"), "", nil
+		case strings.Contains(c.stdin, uatBeginSentinel):
+			seen["uat"]++
+			return "", "boom", fmt.Errorf("exit 1") // the UAT session fails
+		default:
+			seen["architect"]++
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
 		}
 	}
 	c := &Claude{runner: f}
@@ -619,7 +681,7 @@ func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}); err != nil {
 		t.Fatalf("a failed UAT session must never block the pipeline: %v", err)
 	}
-	if n != 4 {
-		t.Errorf("calls = %d, want the pipeline to have run plan and execute anyway", n)
+	if seen["plan"] != 1 || seen["execute"] != 1 {
+		t.Errorf("sessions = %v, want the pipeline to have run plan and execute anyway", seen)
 	}
 }
