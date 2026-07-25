@@ -31,7 +31,7 @@ func TestListEligibleIssuesFiltersStateLabels(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: `[
 		{"number": 1, "title": "A", "body": "a", "labels": [{"name": "ai-agent"}]},
 		{"number": 2, "title": "B", "body": "b", "labels": [{"name": "ai-agent"}, {"name": "ai-wip"}]},
-		{"number": 3, "title": "C", "body": "c", "labels": [{"name": "ai-agent"}, {"name": "ai-failed"}]},
+		{"number": 3, "title": "C", "body": "c", "labels": [{"name": "ai-agent"}, {"name": "ai-rework"}]},
 		{"number": 4, "title": "D", "body": "d", "labels": [{"name": "ai-agent"}, {"name": "ai-done"}]}
 	]`}}}
 	g := testGitHub(f)
@@ -58,7 +58,7 @@ func TestListEligibleIssuesFiltersConfiguredStateLabels(t *testing.T) {
 		{"number": 3, "title": "C", "body": "c", "labels": [{"name": "ai-agent"}, {"name": "ai-wip"}]}
 	]`}}}
 	g := NewGitHub(f, &Config{RepoPath: "/clone", RepoSlug: "org/repo",
-		StateLabels: StateLabels{WIP: "bot-wip", Failed: "bot-failed", Done: "bot-done"}})
+		StateLabels: StateLabels{WIP: "bot-wip", Done: "bot-done"}})
 	issues, err := g.ListEligibleIssues(context.Background(), "ai-agent")
 	if err != nil {
 		t.Fatal(err)

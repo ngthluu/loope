@@ -182,12 +182,6 @@ func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth Chec
 // Orchestrator.pause, which deliberately leaves state unchanged rather than
 // diverging from the real label). Warning at boot is the only place the user
 // learns the label is missing before they need it.
-//
-// Failed is deliberately absent. It is recognized (hasStateLabel) so issues
-// carrying it from an older version stay de-queued, but nothing applies it any
-// more — so asking a fresh repo to create a label the loop will never use is
-// noise. Recognized-but-never-applied is why this list is "can apply", not
-// "knows about".
 func wantedLabels(cfg *Config) []string {
 	names := []string{
 		cfg.EligibleLabel,

@@ -206,9 +206,6 @@ func TestProcessOnceHappyPathBug(t *testing.T) {
 			t.Errorf("missing call %s %q", want.name, want.substr)
 		}
 	}
-	if len(env.callsMatching("gh", "--add-label ai-failed")) != 0 {
-		t.Error("happy path must not add ai-failed")
-	}
 	// wip->done swap must be a single atomic gh call, not two separate calls.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
 	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
@@ -228,7 +225,7 @@ func TestProcessOnceHappyPathBug(t *testing.T) {
 
 func TestProcessOnceUsesConfiguredStateLabels(t *testing.T) {
 	env := newFakeEnv(t)
-	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Failed: "bot-failed", Done: "bot-done"})
+	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Done: "bot-done"})
 	if err := runCycle(o); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +236,7 @@ func TestProcessOnceUsesConfiguredStateLabels(t *testing.T) {
 	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label bot-done") {
 		t.Errorf("want single swap to configured done label, got: %v", swap)
 	}
-	for _, stale := range []string{"ai-wip", "ai-done", "ai-failed"} {
+	for _, stale := range []string{"ai-wip", "ai-done"} {
 		if len(env.callsMatching("gh", stale)) != 0 {
 			t.Errorf("default label %q must not be used when overridden", stale)
 		}
@@ -252,13 +249,9 @@ func TestProcessOnceFailurePathParksForRework(t *testing.T) {
 	if err := runCycle(env.orchestrator()); err != nil {
 		t.Fatalf("a failing pipeline must not be returned from the cycle, got %v", err)
 	}
-	// Parked as ai-rework, not ai-failed.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
 	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
 		t.Errorf("want single ai-wip->ai-rework swap, got: %v", swap)
-	}
-	if len(env.callsMatching("gh", "--add-label ai-failed")) != 0 {
-		t.Error("failure path must no longer mark ai-failed")
 	}
 	// Progress preserved: no worktree removal, no branch deletion, no PR/push.
 	if len(env.callsMatching("git", "worktree remove")) != 0 {
@@ -335,11 +328,10 @@ func TestProcessOnceRecordsLocalStateRework(t *testing.T) {
 }
 
 // A deterministic tooling failure (here: git push) happens AFTER the pipeline
-// has already produced commits. It must NOT be marked ai-failed, and it must NOT
-// discard that work: instead the issue is parked for rework (ai-wip->ai-rework)
-// with the worktree preserved, so it resumes rather than re-running the whole
-// pipeline from zero next cycle.
-func TestToolingFailureDoesNotMarkFailed(t *testing.T) {
+// has already produced commits. It must NOT discard that work: instead the issue
+// is parked for rework (ai-wip->ai-rework) with the worktree preserved, so it
+// resumes rather than re-running the whole pipeline from zero next cycle.
+func TestToolingFailureParksForRework(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.handler
 	env.f.handler = func(c rcall) (string, string, error) {
@@ -352,10 +344,8 @@ func TestToolingFailureDoesNotMarkFailed(t *testing.T) {
 		t.Fatalf("cycle error = %v, want nil", err)
 	}
 	// It must not have swapped to a terminal state label.
-	for _, term := range []string{"--add-label ai-failed", "--add-label ai-done"} {
-		if len(env.callsMatching("gh", term)) != 0 {
-			t.Errorf("tooling failure must not add a terminal label (%s)", term)
-		}
+	if len(env.callsMatching("gh", "--add-label ai-done")) != 0 {
+		t.Error("tooling failure must not add the done label")
 	}
 	// It parks for rework: ai-wip -> ai-rework, recorded locally too.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
@@ -392,10 +382,6 @@ func TestDoneSwapFailureIsSurfaced(t *testing.T) {
 	out := logged()
 	if !strings.Contains(out, "done") && !strings.Contains(out, "Done") {
 		t.Errorf("the daemon log should explain the Done swap failed, got: %s", out)
-	}
-	// The PR was still created — a Done-swap failure must not mark it ai-failed.
-	if len(env.callsMatching("gh", "--add-label ai-failed")) != 0 {
-		t.Error("Done swap failure must not mark the issue ai-failed")
 	}
 }
 
@@ -437,9 +423,6 @@ func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 	if len(env.callsMatching("git", "push")) != 0 {
 		t.Error("done path must not push")
 	}
-	if len(env.callsMatching("gh", "--add-label ai-failed")) != 0 {
-		t.Error("done path must not mark the issue ai-failed")
-	}
 }
 
 func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
@@ -451,7 +434,7 @@ func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
 		}
 		return base(c)
 	}
-	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Failed: "bot-failed", Done: "bot-done"})
+	o := env.orchestratorWithLabels(StateLabels{WIP: "bot-wip", Done: "bot-done"})
 	if err := runCycle(o); err != nil {
 		t.Fatal(err)
 	}

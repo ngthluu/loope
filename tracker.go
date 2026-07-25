@@ -316,8 +316,6 @@ func statusRank(cfg *Config, label string) int {
 		return 4 // unknown/other — don't let an empty config label alias this to "done"
 	}
 	switch stateKind(cfg, label) {
-	case "failed":
-		return 0
 	case "rework":
 		return 1
 	case "wip":

@@ -168,9 +168,5 @@ already-implemented check can close out work that turned out to be finished. Wha
 is *not* carried over is the Claude conversation: the new run starts a fresh
 session. Progress survives as commits, not as context.
 
-> `ai-failed` is deprecated: the loop no longer applies it, though existing
-> `ai-failed` issues are still recognized as a state label and stay out of the
-> queue.
-
 See [Operations](operations.md#always-on-operation) for how crashes and
 transient failures play out in practice.

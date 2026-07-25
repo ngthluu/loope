@@ -11,7 +11,6 @@ import (
 
 const (
 	labelWIP       = "ai-wip"
-	labelFailed    = "ai-failed"
 	labelDone      = "ai-done"
 	labelRework    = "ai-rework"
 	labelNeedsInfo = "ai-needs-info"
@@ -64,10 +63,9 @@ func (m Models) executeConfig() ModelConfig {
 }
 
 // StateLabels are the labels the loop applies to track issue state.
-// Unset fields fall back to the ai-wip/ai-failed/ai-done defaults.
+// Unset fields fall back to the ai-wip/ai-done defaults.
 type StateLabels struct {
 	WIP       string `json:"wip"`
-	Failed    string `json:"failed"`
 	Done      string `json:"done"`
 	Rework    string `json:"rework"`
 	NeedsInfo string `json:"needsInfo"`
@@ -75,7 +73,7 @@ type StateLabels struct {
 }
 
 func defaultStateLabels() StateLabels {
-	return StateLabels{WIP: labelWIP, Failed: labelFailed, Done: labelDone, Rework: labelRework, NeedsInfo: labelNeedsInfo, Stopped: labelStopped}
+	return StateLabels{WIP: labelWIP, Done: labelDone, Rework: labelRework, NeedsInfo: labelNeedsInfo, Stopped: labelStopped}
 }
 
 // RetryConfig is the JSON-facing form of RetryPolicy: durations in seconds.

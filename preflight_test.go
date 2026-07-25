@@ -19,7 +19,7 @@ func okHandler(overrides map[string]rresp) func(rcall) (string, string, error) {
 		"claude plugin list":                                  "superpowers@claude-plugins-official  enabled",
 		"git rev-parse --is-inside-work-tree":                 "true",
 		"gh repo view your-org/your-repo --json name":         `{"name":"your-repo"}`,
-		"gh label list --repo your-org/your-repo --json name": `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-failed"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"}]`,
+		"gh label list --repo your-org/your-repo --json name": `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"}]`,
 		"curl --version":                                      "curl 8.7.1 (x86_64-apple-darwin23.0)",
 	}
 	return func(c rcall) (string, string, error) {
@@ -244,8 +244,7 @@ func TestPreflightMissingLabelsWarn(t *testing.T) {
 		t.Fatalf("labels status = %d, want statusWarn", c.Status)
 	}
 	// ai-stopped is included deliberately: Stop swaps ai-wip->ai-stopped, so a
-	// repo missing that label cannot stop a ticket at all. ai-failed is absent
-	// from the repo too, but deprecated labels are never asked for.
+	// repo missing that label cannot stop a ticket at all.
 	want := []string{
 		"gh label create ai-rework --repo your-org/your-repo",
 		"gh label create ai-needs-info --repo your-org/your-repo",
@@ -264,28 +263,15 @@ func TestPreflightMissingLabelsWarn(t *testing.T) {
 	}
 }
 
-// The default handler's repo still carries the deprecated ai-failed label, so
-// this also covers a repo that predates the deprecation: labels the loop no
-// longer wants are simply ignored, never flagged as unexpected.
+// Extra labels the loop does not want are simply ignored, never flagged as
+// unexpected — only missing ones are reported.
 func TestPreflightAllLabelsPresent(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &fakeRunner{handler: okHandler(map[string]rresp{
+		"gh label list --repo your-org/your-repo --json name": {stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"},{"name":"bug"}]`},
+	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	if c := resultByName(t, results, "labels"); c.Status != statusOK {
 		t.Fatalf("labels status = %d (detail %q), want statusOK", c.Status, c.Detail)
-	}
-}
-
-// A repo set up today has no ai-failed label and never needs one: the loop only
-// recognizes it so pre-existing ai-failed issues stay out of the queue, and it
-// applies it nowhere. Preflight must not ask the user to create it.
-func TestPreflightDoesNotRequireDeprecatedFailedLabel(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh label list --repo your-org/your-repo --json name": {stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"}]`},
-	})}
-	results := Preflight(context.Background(), f, preflightConfig())
-	c := resultByName(t, results, "labels")
-	if c.Status != statusOK {
-		t.Fatalf("labels status = %d (detail %q, fix %v), want statusOK", c.Status, c.Detail, c.Fix)
 	}
 }
 

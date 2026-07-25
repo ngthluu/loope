@@ -173,8 +173,6 @@ func stateKind(cfg *Config, label string) string {
 		return "wip"
 	case cfg.StateLabels.Rework:
 		return "rework"
-	case cfg.StateLabels.Failed:
-		return "failed"
 	case cfg.StateLabels.Stopped:
 		return "stopped"
 	case cfg.EligibleLabel:

@@ -30,15 +30,12 @@ The state labels are configurable; unset fields keep their defaults:
   "done": "ai-done",
   "rework": "ai-rework",
   "needsInfo": "ai-needs-info",
-  "stopped": "ai-stopped",
-  "failed": "ai-failed"
+  "stopped": "ai-stopped"
 }
 ```
 
 See [the status state machine](how-it-works.md#status-state-machine) for what
-each state means and how issues move between them. `failed` is deprecated — the
-loop never applies it, but a configured name is still recognized so existing
-issues stay out of the queue.
+each state means and how issues move between them.
 
 Partial overrides work — `{"wip": "bot-wip"}` renames only the WIP label. If you
 change these on a live repo, migrate any issues still carrying the old label

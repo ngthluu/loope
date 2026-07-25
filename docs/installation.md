@@ -67,9 +67,7 @@ gh label create ai-stopped    --repo your-org/your-repo
 ```
 
 `ai-stopped` is what **Stop** on the dashboard swaps `ai-wip` for; without it the
-stop cannot land and the ticket keeps running. The deprecated `ai-failed` label
-is **not** needed — the loop recognizes it so older issues stay out of the queue,
-but never applies it. See [the status state
+stop cannot land and the ticket keeps running. See [the status state
 machine](how-it-works.md#status-state-machine) for what each label means.
 
 ## Build from source
