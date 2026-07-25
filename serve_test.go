@@ -989,3 +989,53 @@ func TestLoadSetsWorktreeFieldsWhenDirExists(t *testing.T) {
 		t.Fatalf("WorktreeURI = %q after removal, want empty", v.WorktreeURI)
 	}
 }
+
+// TestDetailShowsEnabledVSCodeChip asserts the live worktree renders a real
+// vscode://file/ href. The ZgotmplZ check is the regression guard for the
+// template.URL requirement: html/template blanks non-http schemes typed as
+// plain strings, which would leave a chip that looks fine and does nothing.
+func TestDetailShowsEnabledVSCodeChip(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, s.Handler(), "/detail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	want := `href="` + string(worktreeURI(wt)) + `"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("detail missing %q", want)
+	}
+	if !strings.Contains(body, "open in VS Code") {
+		t.Fatalf("detail missing the chip label")
+	}
+	if strings.Contains(body, "ZgotmplZ") {
+		t.Fatalf("detail sanitized the vscode:// href — WorktreeURI must be template.URL")
+	}
+}
+
+// TestDetailShowsDisabledVSCodeChip covers the post-merge state: the worktree
+// is gone, so the chip is still there (so the row does not jump) but inert,
+// with a tooltip naming the path and explaining the absence.
+func TestDetailShowsDisabledVSCodeChip(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree %q should not exist in a fresh test server", wt)
+	}
+	code, body := get(t, s.Handler(), "/detail?issue=142")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !strings.Contains(body, "open in VS Code") {
+		t.Fatalf("detail missing the chip label")
+	}
+	if !strings.Contains(body, "No worktree folder at "+wt) {
+		t.Fatalf("detail missing the disabled tooltip naming %q", wt)
+	}
+	if strings.Contains(body, "vscode://") {
+		t.Fatalf("detail still emits a vscode:// link for a missing worktree")
+	}
+}
