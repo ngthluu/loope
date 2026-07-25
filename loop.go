@@ -276,7 +276,7 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	uat := &UAT{Target: o.gh, Num: n}
 	var perr error
 	if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content)
+		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
 	} else {
 		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath), uat)
 	}
