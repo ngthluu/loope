@@ -2,7 +2,7 @@
 
 {{define "already-done"}}🤖 Already implemented — closing. {{.Reason}}{{end}}
 
-{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Please clarify and remove the `{{.Label}}` label to re-queue:
+{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
 
 {{.Feedback}}{{end}}
 
