@@ -61,5 +61,6 @@ func promptData() map[string]any {
 		"UATBeginSentinel":    uatBeginSentinel,
 		"UATEndSentinel":      uatEndSentinel,
 		"UATMarker":           uatMarker,
+		"BotMarker":           botMarker,
 	}
 }

@@ -182,12 +182,12 @@ Respond with ONLY a JSON object, no other text:
 
 func TestGoldenPickupComment(t *testing.T) {
 	check(t, "pickupComment", pickupComment("feature", "ai/issue-12"),
-		"🤖 Picked up (feature flow). Branch: `ai/issue-12`")
+		"🤖 Picked up (feature flow). Branch: `ai/issue-12`\n\n"+botMarker)
 }
 
 func TestGoldenAlreadyDoneComment(t *testing.T) {
 	check(t, "alreadyDoneComment", alreadyDoneComment("The flag already exists."),
-		"🤖 Already implemented — closing. The flag already exists.")
+		"🤖 Already implemented — closing. The flag already exists.\n\n"+botMarker)
 }
 
 func TestGoldenNeedsInfoComment(t *testing.T) {
@@ -198,28 +198,32 @@ func TestGoldenNeedsInfoComment(t *testing.T) {
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +
 	"Remove the `ai-rework` label to queue a fresh attempt — any worktree, branch and logs this run produced are preserved and reused, so no work is lost."
 
+// parkTail is the hidden marker every status comment ends with, so
+// FetchIssueContent can strip it back out of the next run's issue content.
+const parkTail = "\n\n" + botMarker
+
 func TestGoldenParkCommentFull(t *testing.T) {
 	check(t, "parkComment(guidance+error)", parkComment("ai-rework", "Cause: network outage. Re-queue once connectivity is back.", "dial tcp: i/o timeout"),
 		parkHead+"\n\nCause: network outage. Re-queue once connectivity is back."+
-			"\n\n<details><summary>Error detail</summary>\n\n````\ndial tcp: i/o timeout\n````\n\n</details>")
+			"\n\n<details><summary>Error detail</summary>\n\n````\ndial tcp: i/o timeout\n````\n\n</details>"+parkTail)
 }
 
 func TestGoldenParkCommentNoGuidance(t *testing.T) {
 	check(t, "parkComment(error only)", parkComment("ai-rework", "", "boom"),
-		parkHead+"\n\n<details><summary>Error detail</summary>\n\n````\nboom\n````\n\n</details>")
+		parkHead+"\n\n<details><summary>Error detail</summary>\n\n````\nboom\n````\n\n</details>"+parkTail)
 }
 
 func TestGoldenParkCommentNoError(t *testing.T) {
 	check(t, "parkComment(guidance only)", parkComment("ai-rework", "Cause: x.", ""),
-		parkHead+"\n\nCause: x.")
+		parkHead+"\n\nCause: x."+parkTail)
 }
 
 func TestGoldenParkCommentBare(t *testing.T) {
-	check(t, "parkComment(bare)", parkComment("ai-rework", "", ""), parkHead)
+	check(t, "parkComment(bare)", parkComment("ai-rework", "", ""), parkHead+parkTail)
 }
 
 func TestGoldenPRComment(t *testing.T) {
-	check(t, "prComment", prComment("https://example.test/pr/1"), "🤖 PR: https://example.test/pr/1")
+	check(t, "prComment", prComment("https://example.test/pr/1"), "🤖 PR: https://example.test/pr/1\n\n"+botMarker)
 }
 
 func TestGoldenPRTitle(t *testing.T) {

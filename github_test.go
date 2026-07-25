@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -199,6 +200,67 @@ func TestFetchIssueContent(t *testing.T) {
 			t.Errorf("content missing %q:\n%s", want, got)
 		}
 	}
+}
+
+// The daemon's own status chatter (pickup, park + error dump, PR link, ...) is
+// noise in the prompt the issue content becomes — and it piles up on every
+// re-run. It must be stripped, both when carried by the marker and, for
+// comments posted before the marker existed, by its leading text.
+func TestFetchIssueContentDropsLoopeStatusComments(t *testing.T) {
+	comments := []string{
+		pickupComment("bug", "ai/issue-7"),
+		parkComment("ai-rework", "", "dial tcp: i/o timeout"),
+		prComment("https://example.test/pr/1"),
+		alreadyDoneComment("already there."),
+		stoppedComment(),
+		// Legacy: posted before the marker was introduced.
+		"🤖 Picked up (feature flow). Branch: `ai/issue-7`",
+		"⏸ Stopped by user. Worktree, logs and session are preserved.",
+	}
+	var arr []string
+	for _, c := range comments {
+		b, _ := json.Marshal(struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body string `json:"body"`
+		}{Body: c})
+		arr = append(arr, string(b))
+	}
+	arr = append(arr,
+		`{"author": {"login": "alice"}, "body": "repro attached"}`,
+		`{"author": {"login": "loope"}, "body": `+mustJSON(needsInfoComment(42, "ai-needs-info", "Which database?"))+`}`,
+		`{"author": {"login": "alice"}, "body": "1a, 2c"}`,
+	)
+	f := &fakeRunner{queue: []rresp{{stdout: `{
+		"title": "Crash on save",
+		"body": "It crashes.",
+		"comments": [` + strings.Join(arr, ",") + `]
+	}`}}}
+	g := testGitHub(f)
+	got, err := g.FetchIssueContent(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"Picked up", "Parked as", "PR: https", "Already implemented", "Stopped by user", "i/o timeout", botMarker} {
+		if strings.Contains(got, bad) {
+			t.Errorf("content still carries loope status text %q:\n%s", bad, got)
+		}
+	}
+	// A human comment, and the questions its answer refers to, must survive.
+	for _, want := range []string{"repro attached", "Which database?", "1a, 2c"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("content missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func TestCreatePRReturnsURL(t *testing.T) {
