@@ -191,37 +191,30 @@ func (g *GitHub) IssueTitle(ctx context.Context, num int) (string, error) {
 	return v.Title, nil
 }
 
-// IssueBody returns just the issue's body, used by the UAT step to detect an
-// already-published checklist and to build the appended body.
-func (g *GitHub) IssueBody(ctx context.Context, n int) (string, error) {
-	out, err := g.gh(ctx, "issue", "view", strconv.Itoa(n), "--repo", g.slug, "--json", "body")
+// UATSurfaces returns every text on the issue that could carry the UAT marker,
+// for the UAT step's idempotency check: each comment, plus the body, where the
+// checklist was published before it moved to a comment. One `gh issue view`
+// covers both, and the body entry is what keeps an issue that already has a
+// body checklist from gaining a duplicate comment.
+func (g *GitHub) UATSurfaces(ctx context.Context, n int) ([]string, error) {
+	out, err := g.gh(ctx, "issue", "view", strconv.Itoa(n), "--repo", g.slug, "--json", "body,comments")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var v struct {
-		Body string `json:"body"`
+		Body     string `json:"body"`
+		Comments []struct {
+			Body string `json:"body"`
+		} `json:"comments"`
 	}
 	if err := json.Unmarshal([]byte(out), &v); err != nil {
-		return "", fmt.Errorf("parse issue body: %w", err)
+		return nil, fmt.Errorf("parse issue view: %w", err)
 	}
-	return v.Body, nil
-}
-
-// AppendIssueBody appends text to the issue body via a read-modify-write
-// `gh issue edit --body`. The read-modify-write is not atomic; the loop is the
-// only writer of the body, and the UAT marker check makes a lost update at worst
-// a missing checklist, never a duplicated one.
-func (g *GitHub) AppendIssueBody(ctx context.Context, n int, text string) error {
-	body, err := g.IssueBody(ctx, n)
-	if err != nil {
-		return err
+	surfaces := []string{v.Body}
+	for _, c := range v.Comments {
+		surfaces = append(surfaces, c.Body)
 	}
-	updated := text
-	if trimmed := strings.TrimRight(body, "\n"); trimmed != "" {
-		updated = trimmed + "\n\n" + text
-	}
-	_, err = g.gh(ctx, "issue", "edit", strconv.Itoa(n), "--repo", g.slug, "--body", updated)
-	return err
+	return surfaces, nil
 }
 
 func (g *GitHub) CreatePR(ctx context.Context, branch, title, body string) (string, error) {

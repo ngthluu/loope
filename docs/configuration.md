@@ -104,7 +104,7 @@ Five roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
   unset inherits from `architect`, so omitting the block entirely keeps the old
   behavior (execute runs with the architect config).
 - `uat` — optional. The short read-only session that writes the UAT checklist
-  appended to the issue body. Unlike `execute`, it does **not** inherit from
+  posted as an issue comment. Unlike `execute`, it does **not** inherit from
   `architect`: the block is used exactly as written, so leaving it out means the
   `claude` CLI's own defaults with no budget or turn cap. A cheap model with a
   low cap is the right shape here (`{"model": "sonnet", "effort": "medium",

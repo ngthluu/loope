@@ -372,86 +372,37 @@ func TestHasStateLabelRecognizesRework(t *testing.T) {
 	}
 }
 
-func TestIssueBodyReturnsBody(t *testing.T) {
-	f := &fakeRunner{queue: []rresp{{stdout: `{"body": "the original body"}`}}}
+// UATSurfaces is one `gh issue view`: the body first, then every comment, so
+// the UAT step can look for its marker on either surface.
+func TestUATSurfacesReturnsBodyThenComments(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: `{"body": "the original body", "comments": [{"body": "first"}, {"body": "second"}]}`}}}
 	g := testGitHub(f)
 	g.retry = testRetry
-	body, err := g.IssueBody(context.Background(), 7)
+	got, err := g.UATSurfaces(context.Background(), 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body != "the original body" {
-		t.Errorf("body = %q", body)
+	want := []string{"the original body", "first", "second"}
+	if len(got) != len(want) {
+		t.Fatalf("surfaces = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("surface %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 	joined := strings.Join(f.calls[0].args, " ")
 	if !strings.Contains(joined, "issue view 7") || !strings.Contains(joined, "--repo org/repo") ||
-		!strings.Contains(joined, "--json body") {
+		!strings.Contains(joined, "--json body,comments") {
 		t.Errorf("gh args = %q", joined)
 	}
 }
 
-func TestIssueBodyPropagatesParseError(t *testing.T) {
+func TestUATSurfacesPropagatesParseError(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: `not json`}}}
 	g := testGitHub(f)
 	g.retry = testRetry
-	if _, err := g.IssueBody(context.Background(), 7); err == nil {
+	if _, err := g.UATSurfaces(context.Background(), 7); err == nil {
 		t.Error("want a parse error, got nil")
-	}
-}
-
-// AppendIssueBody is a read-modify-write: it re-reads the body, joins the new
-// text after a blank line, and edits the issue with the whole result.
-func TestAppendIssueBodyReadModifyWrite(t *testing.T) {
-	f := &fakeRunner{queue: []rresp{
-		{stdout: `{"body": "original"}`},
-		{stdout: ""},
-	}}
-	g := testGitHub(f)
-	g.retry = testRetry
-	if err := g.AppendIssueBody(context.Background(), 7, "APPENDED"); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.calls) != 2 {
-		t.Fatalf("calls = %d, want a read then a write", len(f.calls))
-	}
-	edit := f.calls[1]
-	joined := strings.Join(edit.args, " ")
-	if !strings.Contains(joined, "issue edit 7") || !strings.Contains(joined, "--repo org/repo") {
-		t.Errorf("edit args = %q", joined)
-	}
-	if got := argAfter(edit.args, "--body"); got != "original\n\nAPPENDED" {
-		t.Errorf("--body = %q, want the original plus a blank line plus the new text", got)
-	}
-}
-
-// An issue with an empty body must not gain leading blank lines.
-func TestAppendIssueBodyEmptyOriginal(t *testing.T) {
-	f := &fakeRunner{queue: []rresp{
-		{stdout: `{"body": ""}`},
-		{stdout: ""},
-	}}
-	g := testGitHub(f)
-	g.retry = testRetry
-	if err := g.AppendIssueBody(context.Background(), 7, "APPENDED"); err != nil {
-		t.Fatal(err)
-	}
-	if got := argAfter(f.calls[1].args, "--body"); got != "APPENDED" {
-		t.Errorf("--body = %q, want no leading blank lines", got)
-	}
-}
-
-// A failed read must not be followed by a write: half-appending is worse than
-// not appending.
-func TestAppendIssueBodyFailedReadDoesNotWrite(t *testing.T) {
-	f := &fakeRunner{queue: []rresp{{stdout: `not json`}}}
-	g := testGitHub(f)
-	g.retry = testRetry
-	if err := g.AppendIssueBody(context.Background(), 7, "APPENDED"); err == nil {
-		t.Fatal("want the read error propagated")
-	}
-	for _, c := range f.calls {
-		if strings.Contains(strings.Join(c.args, " "), "issue edit") {
-			t.Error("a failed read must not be followed by an edit")
-		}
 	}
 }
