@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log"
 	"strings"
 )
 
@@ -21,6 +23,97 @@ const (
 	maxUATChars       = 8000
 	maxIssueBodyChars = 60000
 )
+
+// UATTarget is the GitHub surface the UAT step reads from and publishes to.
+// *GitHub satisfies it; tests substitute a fake.
+type UATTarget interface {
+	IssueBody(ctx context.Context, n int) (string, error)
+	AppendIssueBody(ctx context.Context, n int, text string) error
+}
+
+// UAT publishes a human-verifiable acceptance checklist onto the issue body.
+// A nil *UAT (or one with no Target) disables the step entirely, so callers
+// never need a nil guard.
+type UAT struct {
+	Target UATTarget
+	Num    int
+}
+
+// RunFeature publishes the checklist for the feature route, from the committed
+// spec. It returns nothing: every failure path logs and continues, because a
+// missing checklist must never cost a shipped feature.
+func (u *UAT) RunFeature(ctx context.Context, c *Claude, cfg *Config, wtPath, specPath string) {
+	if u == nil || u.Target == nil {
+		return
+	}
+	u.run(ctx, c, cfg, wtPath, uatLabel, uatFeaturePrompt(specPath))
+}
+
+// RunBug publishes the checklist for the bug route, from the issue content plus
+// the diff the fix produced. Same non-blocking contract as RunFeature.
+func (u *UAT) RunBug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string) {
+	if u == nil || u.Target == nil {
+		return
+	}
+	u.run(ctx, c, cfg, wtPath, uatLabel, uatBugPrompt(issueContent, base))
+}
+
+// run is the whole sequence, shared by both routes: idempotency check, session,
+// extract, size guard, append. Every early return logs the issue number and the
+// reason, so a missing checklist is diagnosable from the daemon log alone.
+func (u *UAT) run(ctx context.Context, c *Claude, cfg *Config, wtPath, label, prompt string) {
+	if u == nil || u.Target == nil {
+		return
+	}
+	// Check before spending a session. A failed fetch skips too: publishing a
+	// second UAT section is worse than publishing none, and the next run on this
+	// issue gets another chance.
+	body, err := u.Target.IssueBody(ctx, u.Num)
+	if err != nil {
+		log.Printf("issue #%d: UAT skipped, issue body fetch failed: %v", u.Num, err)
+		return
+	}
+	if strings.Contains(body, uatMarker) {
+		log.Printf("issue #%d: UAT already present, skipping", u.Num)
+		return
+	}
+
+	// No RecordSession: the UAT session is ephemeral and must never overwrite the
+	// resumable primary session that `loop -rework` resumes.
+	res, err := c.Call(ctx, ClaudeCall{
+		Dir: wtPath, Label: label, Prompt: prompt,
+		Model:           cfg.Models.UAT,
+		SkipPermissions: true,
+		DisallowedTools: []string{"AskUserQuestion", "Write", "Edit", "NotebookEdit"},
+	})
+	if err != nil {
+		log.Printf("issue #%d: UAT skipped, session failed: %v", u.Num, err)
+		return
+	}
+
+	checklist, ok := parseUAT(res.Result)
+	if !ok {
+		log.Printf("issue #%d: UAT skipped, session produced no checklist", u.Num)
+		return
+	}
+	if len(checklist) > maxUATChars {
+		// ToValidUTF8 drops the partial rune a byte-offset cut can leave behind:
+		// an invalid-UTF-8 body would be rejected by the API.
+		checklist = strings.ToValidUTF8(checklist[:maxUATChars], "")
+		log.Printf("issue #%d: UAT checklist truncated to %d chars", u.Num, maxUATChars)
+	}
+
+	section := uatSection(checklist)
+	if len(body)+len(section) > maxIssueBodyChars {
+		log.Printf("issue #%d: UAT skipped, the resulting issue body would exceed %d chars", u.Num, maxIssueBodyChars)
+		return
+	}
+	if err := u.Target.AppendIssueBody(ctx, u.Num, section); err != nil {
+		log.Printf("issue #%d: UAT append failed: %v", u.Num, err)
+		return
+	}
+	log.Printf("issue #%d: UAT checklist published to the issue body", u.Num)
+}
 
 // parseUAT extracts the checklist from a UAT session's result: the text after
 // uatBeginSentinel, up to uatEndSentinel if present or to the end of the result
