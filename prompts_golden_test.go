@@ -203,7 +203,7 @@ func TestGoldenAlreadyDoneComment(t *testing.T) {
 
 func TestGoldenNeedsInfoComment(t *testing.T) {
 	check(t, "needsInfoComment", needsInfoComment(42, "ai-needs-info", "Which database?"),
-		"🤖 Not confident enough to implement (confidence 42/100). Please clarify and remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
+		"🤖 Not confident enough to implement (confidence 42/100). Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
 }
 
 func TestGoldenParkCommentFull(t *testing.T) {
