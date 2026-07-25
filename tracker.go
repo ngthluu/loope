@@ -257,18 +257,6 @@ func recordParkCause(logDir, msg string) {
 	_ = os.WriteFile(filepath.Join(logDir, parkCauseFile), []byte(msg), 0o644)
 }
 
-// readParkCause returns the recorded park cause, or "" when none exists. The
-// daemon itself never calls it — see parkCauseFile — it exists so tests and
-// anyone inspecting a workDir can read the marker back through the same path
-// logic that wrote it.
-func readParkCause(logDir string) string {
-	b, err := os.ReadFile(filepath.Join(logDir, parkCauseFile))
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
 // clearParkCause removes the park cause when the issue leaves the parked state.
 func clearParkCause(logDir string) {
 	if logDir == "" {

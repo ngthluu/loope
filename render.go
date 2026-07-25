@@ -191,8 +191,6 @@ func stripeClass(cfg *Config, label string) string {
 		return "bg-live"
 	case "rework":
 		return "bg-warn/80"
-	case "failed":
-		return "bg-err/70"
 	case "stopped":
 		return "bg-muted/60"
 	default:

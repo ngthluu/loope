@@ -4,9 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
+
+// readParkCause returns the recorded park cause, or "" when none exists. The
+// daemon only ever writes the marker (see parkCauseFile), so the reader lives
+// here: it lets tests check the write through the same path logic.
+func readParkCause(logDir string) string {
+	b, err := os.ReadFile(filepath.Join(logDir, parkCauseFile))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
 
 type rcall struct {
 	dir   string
