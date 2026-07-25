@@ -30,12 +30,17 @@ var promptTestData = map[string]map[string]any{
 	"guidance-budget":      {},
 	"guidance-interrupted": {},
 	"guidance-network":     {},
+	"ask-format":           {},
 }
 
-// skipTemplates are the two names in the set that are not prompts: the root
-// template ParseFS was seeded with, and the container file whose own body is
-// just the whitespace between its {{define}} blocks.
-var skipTemplates = map[string]bool{"prompts": true, "comments.md.tmpl": true}
+// skipTemplates are the names in the set that are not prompts: the root
+// template ParseFS was seeded with, and the container files whose own bodies
+// are just the whitespace between their {{define}} blocks.
+var skipTemplates = map[string]bool{
+	"prompts":            true,
+	"comments.md.tmpl":   true,
+	"ask-format.md.tmpl": true,
+}
 
 func TestEveryTemplateRenders(t *testing.T) {
 	for _, tmpl := range prompts.Templates() {
@@ -62,6 +67,45 @@ func TestEveryTemplateRenders(t *testing.T) {
 		if strings.HasSuffix(got, "\n") {
 			t.Errorf("template %q kept its trailing newline; mustRender must trim it", name)
 		}
+	}
+}
+
+// The reply-format instruction lives in exactly one place. This asserts the
+// block exists and still carries the rules that make the needs-info comment
+// readable — a silent deletion of one bullet would otherwise pass every other
+// test in this file.
+func TestAskFormatBlockCarriesItsRules(t *testing.T) {
+	got := mustRender("ask-format", promptData())
+	for _, want := range []string{
+		"numbered list of questions",
+		"At most 5 questions",
+		"MERGE related gaps",
+		"Under 200 words",
+		"no preamble",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ask-format block is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Both routes must ask in the same shape, from the same source. This is what
+// catches an edit made to one prompt that should have been an edit to the
+// shared block — and, via the threshold=0 cases, that the instruction stays
+// inside the gate's guard.
+func TestBothRoutesShareTheAskFormatBlock(t *testing.T) {
+	block := mustRender("ask-format", promptData())
+	if !strings.Contains(brainstormPrompt("I", 70), block) {
+		t.Error("brainstormPrompt(threshold=70) does not contain the ask-format block")
+	}
+	if !strings.Contains(bugPrompt("I", 70), block) {
+		t.Error("bugPrompt(threshold=70) does not contain the ask-format block")
+	}
+	if strings.Contains(brainstormPrompt("I", 0), block) {
+		t.Error("brainstormPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
+	}
+	if strings.Contains(bugPrompt("I", 0), block) {
+		t.Error("bugPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
 	}
 }
 
