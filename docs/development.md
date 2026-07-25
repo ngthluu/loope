@@ -40,17 +40,31 @@ Numbering continues across restarts; nothing is overwritten.
 
 ## Releasing
 
-Releases are cut by [GoReleaser](https://goreleaser.com) from a pushed tag:
+The normal path is the `/release-new-version` skill in Claude Code, run from a
+clean `main` that is in sync with origin. It diffs the latest tag against
+`HEAD`, has a Haiku subagent write grouped release notes, asks you for the tag,
+then writes `docs/release-notes/<tag>.md`, commits and pushes it, and pushes the
+tag. It never picks the version for you and never unwinds a partial run — a
+stopped run is safe to re-run.
+
+The tag push triggers the `Release` workflow, which builds the darwin/linux ·
+amd64/arm64 binaries, uploads them plus `checksums.txt` to a GitHub Release, and
+passes `docs/release-notes/<tag>.md` to GoReleaser with `--release-notes` so the
+release body is exactly the note you approved. The `install.sh` one-liner picks
+the archives up automatically.
+
+The manual fallback still works:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The `Release` workflow builds the darwin/linux · amd64/arm64 binaries, uploads
-them plus `checksums.txt` to a GitHub Release, and the `install.sh` one-liner
-picks them up automatically. Dry-run the build locally with
-`goreleaser release --snapshot --clean`.
+A hand-pushed tag releases with an **empty body** unless
+`docs/release-notes/v0.1.0.md` was committed before the tag — GoReleaser's
+generated changelog is disabled.
+
+Dry-run the build locally with `goreleaser release --snapshot --clean`.
 
 ## Contributing
 
