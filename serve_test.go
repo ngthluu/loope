@@ -958,3 +958,34 @@ func TestWorktreeURIEscapesPath(t *testing.T) {
 		t.Fatalf("worktreeURI = %q, want vscode://file/ prefix", got)
 	}
 }
+
+// TestLoadSetsWorktreeFieldsWhenDirExists covers both halves of the one stat
+// load() runs for the selected ticket: the path is always reported so the
+// disabled tooltip can name it, and the URI appears only while the folder is
+// on disk. The second half also documents the live behaviour — the detail pane
+// re-polls, so removing the worktree flips the chip off with no cache to bust.
+func TestLoadSetsWorktreeFieldsWhenDirExists(t *testing.T) {
+	s := newTestServer(t)
+	wt := worktreePath(s.cfg.WorkDir, 142)
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v := s.load(context.Background(), "142")
+	if v.WorktreePath != wt {
+		t.Fatalf("WorktreePath = %q, want %q", v.WorktreePath, wt)
+	}
+	if string(v.WorktreeURI) != string(worktreeURI(wt)) {
+		t.Fatalf("WorktreeURI = %q, want %q", v.WorktreeURI, worktreeURI(wt))
+	}
+
+	if err := os.Remove(wt); err != nil {
+		t.Fatal(err)
+	}
+	v = s.load(context.Background(), "142")
+	if v.WorktreePath != wt {
+		t.Fatalf("WorktreePath = %q after removal, want %q", v.WorktreePath, wt)
+	}
+	if v.WorktreeURI != "" {
+		t.Fatalf("WorktreeURI = %q after removal, want empty", v.WorktreeURI)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -94,6 +95,12 @@ type view struct {
 	GHError  string
 	Notice   string
 	Stats    stats
+	// WorktreePath is where the selected ticket's worktree lives, set even
+	// when the folder is gone so the disabled chip can name it.
+	WorktreePath string
+	// WorktreeURI is set only while that folder exists; an empty value is
+	// what switches the detail chip to its disabled variant.
+	WorktreeURI template.URL
 }
 
 // issues returns the tracked-issue list from GitHub. A successful fetch is
@@ -158,7 +165,24 @@ func (s *Server) load(ctx context.Context, selWanted string) view {
 	}
 	s.backfillPR(ctx, v.Selected)
 	s.backfillTitle(ctx, v.Selected)
+	s.setWorktree(&v)
 	return v
+}
+
+// setWorktree fills the selected ticket's worktree path and, when the folder is
+// actually on disk, the vscode:// URI the detail chip links to. One stat per
+// render, for the ticket on screen only — the rail has no use for it. A missing
+// folder is the normal end state: the pipeline removes the worktree once the
+// ticket is done, and the chip renders disabled from then on.
+func (s *Server) setWorktree(v *view) {
+	if v.Selected == nil {
+		return
+	}
+	path := worktreePath(s.cfg.WorkDir, v.Selected.Number)
+	v.WorktreePath = path
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		v.WorktreeURI = worktreeURI(path)
+	}
 }
 
 // issueLogDir is the log dir for one issue.
