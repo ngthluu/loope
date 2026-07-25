@@ -238,3 +238,8 @@ func TestGoldenClassifyCauseGuidance(t *testing.T) {
 		check(t, "classifyCause("+tc.msg+")", got, tc.want)
 	}
 }
+
+func TestGoldenUATSection(t *testing.T) {
+	check(t, "uatSection", uatSection("- [ ] Run the thing and see the thing."),
+		"<!-- loope:uat -->\n\n## 🤖 UAT checklist\n\n- [ ] Run the thing and see the thing.")
+}
