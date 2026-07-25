@@ -31,6 +31,8 @@ var promptTestData = map[string]map[string]any{
 	"guidance-interrupted": {},
 	"guidance-network":     {},
 	"uat-section":          {"Checklist": "- [ ] C"},
+	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md"},
+	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main"},
 }
 
 // skipTemplates are the two names in the set that are not prompts: the root

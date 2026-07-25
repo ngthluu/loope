@@ -243,3 +243,51 @@ func TestGoldenUATSection(t *testing.T) {
 	check(t, "uatSection", uatSection("- [ ] Run the thing and see the thing."),
 		"<!-- loope:uat -->\n\n## 🤖 UAT checklist\n\n- [ ] Run the thing and see the thing.")
 }
+
+func TestGoldenUATFeaturePrompt(t *testing.T) {
+	want := `Read the approved spec at docs/spec.md and write a UAT (user acceptance test)
+checklist for a human who will verify the shipped feature by hand.
+
+Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
+UAT_END. Print nothing before or after those two lines.
+
+Rules for the checklist:
+- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
+  more than one area to verify.
+- Each item is one concrete action a human performs plus the one observable
+  result they should see.
+- No implementation detail, no file paths, no code.
+- Short: aim for under 20 items. Cover every behavior the spec describes,
+  including the error and edge cases it specifies, but do not invent scope
+  beyond it.
+- Do not modify, create, or commit any file.`
+	check(t, "uatFeaturePrompt", uatFeaturePrompt("docs/spec.md"), want)
+}
+
+func TestGoldenUATBugPrompt(t *testing.T) {
+	want := `A bug fix has just been committed on this branch. Write a UAT (user acceptance
+test) checklist for a human who will verify the fix by hand.
+
+The GitHub issue being fixed:
+ISSUE BODY
+
+Read the issue above, then inspect what actually changed with
+` + "`git diff origin/main...HEAD`" + ` and ` + "`git log origin/main..HEAD`" + `, so the checklist
+describes the real fix. If that diff is empty — nothing was committed — print
+nothing at all: no markers, no checklist, no explanation.
+
+Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
+UAT_END. Print nothing before or after those two lines.
+
+Rules for the checklist:
+- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
+  more than one area to verify.
+- Each item is one concrete action a human performs plus the one observable
+  result they should see.
+- No implementation detail, no file paths, no code.
+- Short: aim for under 20 items. Cover the reported bug and every behavior the
+  fix touches, including its error and edge cases, but do not invent scope
+  beyond them.
+- Do not modify, create, or commit any file.`
+	check(t, "uatBugPrompt", uatBugPrompt("ISSUE BODY", "main"), want)
+}

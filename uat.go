@@ -48,3 +48,23 @@ func uatSection(checklist string) string {
 	d["Checklist"] = checklist
 	return mustRender("uat-section", d)
 }
+
+// uatFeaturePrompt drives the feature route's UAT session from the committed
+// spec: the checklist describes the behavior the spec promises, and is published
+// before any code exists.
+func uatFeaturePrompt(specPath string) string {
+	d := promptData()
+	d["SpecPath"] = specPath
+	return mustRender("uat-feature.md.tmpl", d)
+}
+
+// uatBugPrompt drives the bug route's UAT session from the issue plus the diff
+// the fix actually produced. An empty diff means the session prints nothing,
+// which parseUAT reads as "nothing to publish" — that is how the step self-skips
+// a branch with no commits, with no commit-count plumbing in the pipeline.
+func uatBugPrompt(issue, base string) string {
+	d := promptData()
+	d["Issue"] = issue
+	d["Base"] = base
+	return mustRender("uat-bug.md.tmpl", d)
+}
