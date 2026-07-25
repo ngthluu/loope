@@ -63,7 +63,12 @@ gh label create ai-wip        --repo your-org/your-repo
 gh label create ai-done       --repo your-org/your-repo
 gh label create ai-rework     --repo your-org/your-repo
 gh label create ai-needs-info --repo your-org/your-repo
+gh label create ai-stopped    --repo your-org/your-repo
 ```
+
+`ai-stopped` is what **Stop** on the dashboard swaps `ai-wip` for; without it the
+stop cannot land and the ticket keeps running. See [the status state
+machine](how-it-works.md#status-state-machine) for what each label means.
 
 ## Build from source
 
@@ -74,8 +79,9 @@ cp loope.json.example loope.json   # then edit repoPath / repoSlug / workDir
 ```
 
 `--config` is required — there is no default config path. The daemon shuts down
-gracefully on Ctrl-C / SIGTERM; if a pipeline is interrupted mid-issue, the
-failure path still cleans up labels and worktrees. To validate a new config
-without starting the loop, run `./loope --doctor --config loope.json`.
+gracefully on Ctrl-C / SIGTERM, draining in-flight pipelines first; a run killed
+outright is re-queued by the next startup's orphan sweep, with its worktree
+intact. To validate a new config without starting the loop, run
+`./loope --doctor --config loope.json`.
 
 See [Configuration](configuration.md) for every config field.

@@ -238,9 +238,11 @@ func clearState(logDir string) {
 	_ = os.Remove(filepath.Join(logDir, stateFile))
 }
 
-// parkCauseFile holds the failure text that parked the issue as ai-rework, so
-// the auto-resume scan can decide whether the cause is transient (usage limit,
-// budget ceiling, network outage) without re-deriving it from GitHub comments.
+// parkCauseFile holds the failure text that parked the issue as ai-rework. It is
+// a diagnostic left next to the logs for whoever inspects the workDir: nothing in
+// the daemon reads it back, because a parked issue only moves when a human
+// removes the label. It is cleared when the issue leaves the parked state, so a
+// stale cause can't outlive the failure it describes.
 const parkCauseFile = "park-cause"
 
 // recordParkCause writes the park cause to <logDir>/park-cause. Best-effort,
@@ -253,15 +255,6 @@ func recordParkCause(logDir, msg string) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(logDir, parkCauseFile), []byte(msg), 0o644)
-}
-
-// readParkCause returns the recorded park cause, or "" when none exists.
-func readParkCause(logDir string) string {
-	b, err := os.ReadFile(filepath.Join(logDir, parkCauseFile))
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // clearParkCause removes the park cause when the issue leaves the parked state.
@@ -314,8 +307,6 @@ func statusRank(cfg *Config, label string) int {
 		return 4 // unknown/other — don't let an empty config label alias this to "done"
 	}
 	switch stateKind(cfg, label) {
-	case "failed":
-		return 0
 	case "rework":
 		return 1
 	case "wip":
@@ -370,13 +361,10 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 				tk.LastActive = info.ModTime()
 			}
 		}
-		if name == "session" {
-			if data, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
-				var si SessionInfo
-				if json.Unmarshal(data, &si) == nil {
-					tk.Kind = si.Kind
-					tk.SessionID = si.SessionID
-				}
+		if name == sessionFile {
+			if si, rerr := readSession(dir); rerr == nil {
+				tk.Kind = si.Kind
+				tk.SessionID = si.SessionID
 			}
 			continue
 		}

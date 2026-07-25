@@ -21,12 +21,9 @@ func (o *Orchestrator) slots() int {
 // tryAcquire claims a slot for issue n, reporting whether it got one. It refuses
 // when n is already in flight or the budget is full.
 //
-// The already-in-flight check is not redundant with the ai-wip label check. It
-// closes two real windows: between launching a pipeline and its AddLabel(ai-wip)
-// landing the issue still looks eligible to ListEligibleIssues, and park swaps
-// ai-wip->ai-rework before the pipeline goroutine returns, so ResumeParked in the
-// same cycle could otherwise resume an issue whose goroutine still holds its
-// worktree.
+// The already-in-flight check is not redundant with the ai-wip label check: it
+// closes the window between launching a pipeline and its AddLabel(ai-wip)
+// landing, during which the issue still looks eligible to ListEligibleIssues.
 func (o *Orchestrator) tryAcquire(n int) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -79,7 +76,7 @@ func (o *Orchestrator) filterInactive(issues []Issue) []Issue {
 	return out
 }
 
-// Wait blocks until every in-flight pipeline and resume has finished. runLoop
+// Wait blocks until every in-flight pipeline has finished. runLoop
 // calls it before returning so the workDir lock outlives all work, exactly as it
 // did when ProcessOnce blocked on its own WaitGroup.
 func (o *Orchestrator) Wait() { o.inFlight.Wait() }

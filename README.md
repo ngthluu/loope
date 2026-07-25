@@ -62,7 +62,7 @@ loope --config loope.json          # polls for labeled issues, serves the dashbo
 | [Installation](docs/installation.md)     | Prerequisites, `--doctor`, label setup, building from source |
 | [Configuration](docs/configuration.md)   | Every config field — models, retries, confidence gate, persona |
 | [Dashboard](docs/dashboard.md)           | The live web dashboard and its embedded assets |
-| [Operations](docs/operations.md)         | Always-on behavior, auto-resume, running as a launchd service |
+| [Operations](docs/operations.md)         | Always-on behavior, failure handling, running as a launchd service |
 | [Development](docs/development.md)        | Testing, prompts, logs, releasing, contributing |
 
 ## Contributing

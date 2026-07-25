@@ -302,9 +302,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.mutate(w, r, func(n int) error { return s.orch.Stop(n) })
 }
 
-// handleContinue re-queues the posted stopped issue for a deferred resume and
-// re-renders the detail fragment (already showing the new ai-rework/eligible
-// state, since Continue rewrites the labels synchronously).
+// handleContinue re-queues the posted stopped issue and re-renders the detail
+// fragment (already showing it back in the eligible queue, since Continue
+// rewrites the labels synchronously).
 func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
 	s.mutate(w, r, func(n int) error { return s.orch.Continue(r.Context(), n) })
 }

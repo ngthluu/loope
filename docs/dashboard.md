@@ -30,7 +30,8 @@ content.
 
 A ticket the loop is actively working on (state `ai-wip`) shows a **Stop** button
 in its detail header; a stopped ticket (`ai-stopped`) shows **Continue**. Both
-prompt for confirmation before acting.
+prompt for confirmation before acting. These are the two user-driven edges of
+[the status state machine](how-it-works.md#status-state-machine).
 
 - **Stop** cancels the ticket's `claude` subprocess mid-turn and swaps `ai-wip` →
   `ai-stopped`. The in-progress turn is lost, but the worktree, branch, logs, and
@@ -38,9 +39,14 @@ prompt for confirmation before acting.
   is eventually consistent — it shows up on the next few-second poll. If the run
   finishes (ships or parks) in the instant before the stop lands, the stop is a
   no-op: nothing is relabelled and no stop notice is posted.
-- **Continue** re-queues the ticket for the next free slot (it never bypasses the
-  concurrency budget). With a saved session it resumes from that session id; with
-  none it restarts the pipeline from scratch, reusing any existing worktree.
+- **Continue** removes `ai-stopped`, putting the ticket back in the eligible
+  queue for the next free slot (it never bypasses the concurrency budget). The
+  next run is a fresh pipeline, but it runs in the preserved worktree, so the
+  commits the stopped run produced are built on rather than discarded.
+
+`ai-stopped` must exist in the repo for Stop to work — the swap out of `ai-wip`
+is what makes a stop real, and if it fails the run simply carries on. Preflight
+warns at boot if it's missing; see [Installation](installation.md).
 
 These buttons mutate state, so they exist **only when the dashboard runs inside
 the daemon** — the process that owns the worker loop. If you ever serve the

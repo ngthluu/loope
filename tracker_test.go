@@ -586,12 +586,11 @@ func TestSortTicketsAttentionTiers(t *testing.T) {
 		mkTicket(3, sl.WIP),
 		mkTicket(4, cfg.EligibleLabel), // queued
 		mkTicket(5, sl.Rework),
-		mkTicket(6, sl.Failed),
 	}
 	sortTickets(cfg, tickets)
 	got := numbers(tickets)
-	// failed -> rework -> wip -> queued -> unknown -> done
-	want := []int{6, 5, 3, 4, 2, 1}
+	// rework -> wip -> queued -> unknown -> done
+	want := []int{5, 3, 4, 2, 1}
 	if !equalInts(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
@@ -619,7 +618,6 @@ func TestSortTicketsCustomLabelsHonored(t *testing.T) {
 		EligibleLabel: "queued-please",
 		StateLabels: StateLabels{
 			WIP:    "in-progress",
-			Failed: "blocked",
 			Done:   "shipped",
 			Rework: "revise",
 		},
@@ -627,13 +625,12 @@ func TestSortTicketsCustomLabelsHonored(t *testing.T) {
 	tickets := []Ticket{
 		mkTicket(1, "shipped"),       // done -> rank 5
 		mkTicket(2, "in-progress"),   // wip  -> rank 2
-		mkTicket(3, "blocked"),       // failed -> rank 0
 		mkTicket(4, "queued-please"), // queued -> rank 3
 		mkTicket(5, "revise"),        // rework -> rank 1
 	}
 	sortTickets(cfg, tickets)
 	got := numbers(tickets)
-	want := []int{3, 5, 2, 4, 1} // blocked, revise, in-progress, queued, shipped
+	want := []int{5, 2, 4, 1} // revise, in-progress, queued, shipped
 	if !equalInts(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
@@ -643,7 +640,6 @@ func TestSortTicketsDeterministicNoOp(t *testing.T) {
 	cfg := &Config{EligibleLabel: "ai-agent", StateLabels: defaultStateLabels()}
 	sl := defaultStateLabels()
 	tickets := []Ticket{
-		mkTicket(6, sl.Failed),
 		mkTicket(5, sl.Rework),
 		mkTicket(3, sl.WIP),
 		mkTicket(4, cfg.EligibleLabel),
@@ -666,7 +662,6 @@ func TestStatusRank(t *testing.T) {
 		label string
 		want  int
 	}{
-		{sl.Failed, 0},
 		{sl.Rework, 1},
 		{sl.WIP, 2},
 		{cfg.EligibleLabel, 3},

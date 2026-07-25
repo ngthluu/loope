@@ -474,3 +474,63 @@ func TestClaudeResultLegacyNoUsageIsZero(t *testing.T) {
 			cr.NumTurns, cr.DurationMS, cr.Usage)
 	}
 }
+
+// A transport failure must report what actually went wrong: the exit error, the
+// captured stderr, and the partial stdout — the last of which is where claude
+// prints its own diagnostics when stderr is empty.
+func TestCallTransportErrorReportsStderrAndStdout(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{
+		stdout: `{"type":"system","subtype":"init"}` + "\nSTDOUT-MARKER\n",
+		stderr: "STDERR-MARKER: node: out of memory",
+		err:    fmt.Errorf("exit status 137"),
+	}}}
+	c := &Claude{runner: f}
+	_, err := c.Call(context.Background(), ClaudeCall{Label: "execute", Prompt: "x"})
+	if err == nil {
+		t.Fatal("want error")
+	}
+	for _, want := range []string{"execute", "exit status 137", "STDERR-MARKER", "STDOUT-MARKER"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+// With no stderr at all the message must say so rather than trailing off into a
+// bare "(stderr: )".
+func TestCallTransportErrorMarksEmptyStreams(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{err: fmt.Errorf("signal: killed")}}}
+	c := &Claude{runner: f}
+	_, err := c.Call(context.Background(), ClaudeCall{Label: "execute", Prompt: "x"})
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !strings.Contains(err.Error(), "(empty)") {
+		t.Errorf("error %q should mark the empty streams explicitly", err.Error())
+	}
+}
+
+// failureSummary is what lands in the GitHub park comment, so it carries every
+// field that explains an is_error run — not just the terminal reason.
+func TestFailureSummaryIsDetailed(t *testing.T) {
+	r := ClaudeResult{
+		Result: "Claude AI usage limit reached|1700000000", TerminalReason: "api_error",
+		APIErrorStatus: 429, NumTurns: 12, CostUSD: 3.5, DurationMS: 65000,
+	}
+	got := r.failureSummary()
+	for _, want := range []string{"api_error", "429", "12 turns", "$3.50", "usage limit reached"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failureSummary() = %q, missing %q", got, want)
+		}
+	}
+}
+
+// A long result is clipped from the middle, so both the opening context and the
+// closing message (where the real cause usually is) survive.
+func TestFailureSummaryKeepsHeadAndTailOfLongResult(t *testing.T) {
+	r := ClaudeResult{Result: "HEAD-MARKER" + strings.Repeat(" filler", 2000) + "TAIL-MARKER", IsError: true}
+	got := r.failureSummary()
+	if !strings.Contains(got, "HEAD-MARKER") || !strings.Contains(got, "TAIL-MARKER") {
+		t.Errorf("failureSummary() dropped an end of the result: %q", got)
+	}
+}

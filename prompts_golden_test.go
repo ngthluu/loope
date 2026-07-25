@@ -164,17 +164,6 @@ PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
 	check(t, "bugPrompt(threshold=0)", bugPrompt("ISSUE BODY", 0), want)
 }
 
-func TestGoldenReworkPrompt(t *testing.T) {
-	want := `Continue the work on this issue where the previous session left off.
-Complete the remaining implementation, make the full test suite pass, and commit
-all changes. HEADLESS: do not ask questions; make reasonable calls and note them
-in commit messages.
-
-If you find the work is already fully implemented, do not fabricate changes:
-print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
-	check(t, "reworkPrompt", reworkPrompt(), want)
-}
-
 func TestGoldenTriagePrompt(t *testing.T) {
 	want := `You are a triage agent for an automated development pipeline.
 
@@ -206,24 +195,27 @@ func TestGoldenNeedsInfoComment(t *testing.T) {
 		"🤖 Not confident enough to implement (confidence 42/100). Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
 }
 
+const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +
+	"Remove the `ai-rework` label to queue a fresh attempt — any worktree, branch and logs this run produced are preserved and reused, so no work is lost."
+
 func TestGoldenParkCommentFull(t *testing.T) {
-	check(t, "parkComment(guidance+error)", parkComment(12, "Cause: network outage — the loop auto-resumes when connectivity returns.", "dial tcp: i/o timeout"),
-		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nCause: network outage — the loop auto-resumes when connectivity returns.\nError: dial tcp: i/o timeout")
+	check(t, "parkComment(guidance+error)", parkComment("ai-rework", "Cause: network outage. Re-queue once connectivity is back.", "dial tcp: i/o timeout"),
+		parkHead+"\n\nCause: network outage. Re-queue once connectivity is back."+
+			"\n\n<details><summary>Error detail</summary>\n\n````\ndial tcp: i/o timeout\n````\n\n</details>")
 }
 
 func TestGoldenParkCommentNoGuidance(t *testing.T) {
-	check(t, "parkComment(error only)", parkComment(12, "", "boom"),
-		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nError: boom")
+	check(t, "parkComment(error only)", parkComment("ai-rework", "", "boom"),
+		parkHead+"\n\n<details><summary>Error detail</summary>\n\n````\nboom\n````\n\n</details>")
 }
 
 func TestGoldenParkCommentNoError(t *testing.T) {
-	check(t, "parkComment(guidance only)", parkComment(12, "Cause: x.", ""),
-		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.\nCause: x.")
+	check(t, "parkComment(guidance only)", parkComment("ai-rework", "Cause: x.", ""),
+		parkHead+"\n\nCause: x.")
 }
 
 func TestGoldenParkCommentBare(t *testing.T) {
-	check(t, "parkComment(bare)", parkComment(12, "", ""),
-		"🤖 Parked for rework — run `loop -rework 12 -config <cfg>`.")
+	check(t, "parkComment(bare)", parkComment("ai-rework", "", ""), parkHead)
 }
 
 func TestGoldenPRComment(t *testing.T) {
@@ -241,17 +233,12 @@ func TestGoldenPRBody(t *testing.T) {
 
 func TestGoldenClassifyCauseGuidance(t *testing.T) {
 	cases := []struct{ msg, want string }{
-		{"session limit reached", "Cause: Claude usage/rate limit — the loop auto-resumes it (with backoff) once the limit resets."},
-		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run — the loop auto-resumes where it stopped (raise the execute maxTurns/maxBudgetUSD if this recurs)."},
-		{"interrupted mid-run", "Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session."},
-		{"dial tcp: i/o timeout", "Cause: network outage — the loop auto-resumes when connectivity returns."},
+		{"session limit reached", "Cause: Claude usage/rate limit. Re-queue once the limit resets."},
+		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs."},
+		{"dial tcp: i/o timeout", "Cause: network outage. Re-queue once connectivity is back."},
 	}
 	for _, tc := range cases {
-		got, resumable := classifyCause(tc.msg)
-		if !resumable {
-			t.Errorf("classifyCause(%q) resumable = false, want true", tc.msg)
-		}
-		check(t, "classifyCause("+tc.msg+")", got, tc.want)
+		check(t, "classifyCause("+tc.msg+")", classifyCause(tc.msg), tc.want)
 	}
 }
 

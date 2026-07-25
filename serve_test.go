@@ -839,7 +839,7 @@ func serverWithOrch(t *testing.T, state string, session bool) (*Server, *fakeEnv
 	return s, env
 }
 
-func TestContinueRouteQueuesReworkAndRendersFragment(t *testing.T) {
+func TestContinueRouteRequeuesAndRendersFragment(t *testing.T) {
 	s, env := serverWithOrch(t, "ai-stopped", true /* session */)
 	code, body := post(t, s.Handler(), "/continue?issue=7")
 	if code != http.StatusOK {
@@ -848,9 +848,11 @@ func TestContinueRouteQueuesReworkAndRendersFragment(t *testing.T) {
 	if strings.Contains(body, "<html") {
 		t.Fatal("continue should return the detail fragment, not a full page")
 	}
-	swap := env.callsMatching("gh", "--remove-label ai-stopped")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
-		t.Fatalf("continue did not queue rework, got %v", swap)
+	// A bare ai-stopped removal: the ticket goes back to the eligible queue, even
+	// with a saved session, because the daemon has no resume path.
+	rm := env.callsMatching("gh", "--remove-label ai-stopped")
+	if len(rm) != 1 || strings.Contains(rm[0], "--add-label") {
+		t.Fatalf("continue did not re-queue the ticket, got %v", rm)
 	}
 }
 
