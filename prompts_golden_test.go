@@ -259,14 +259,11 @@ Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
-- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
-  more than one area to verify.
-- Each item is one concrete action a human performs plus the one observable
-  result they should see.
+- A single flat list of Markdown ` + "`- [ ]`" + ` checkboxes. No headings, no grouping, no intro line, no closing line.
+- Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
-- Short: aim for under 20 items. Cover every behavior the spec describes,
-  including the error and edge cases it specifies, but do not invent scope
-  beyond it.
+- One item per behavior. Cover every behavior the spec describes, including its error and edge cases, but do not invent scope beyond it.
+- Compress wording, never coverage. An item that runs long loses words, not the check it makes.
 - Do not modify, create, or commit any file.`
 	check(t, "uatFeaturePrompt", uatFeaturePrompt("docs/spec.md"), want)
 }
@@ -287,14 +284,11 @@ Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
-- Markdown ` + "`- [ ]`" + ` checkboxes, grouped under short ` + "`###`" + ` headings when there is
-  more than one area to verify.
-- Each item is one concrete action a human performs plus the one observable
-  result they should see.
+- A single flat list of Markdown ` + "`- [ ]`" + ` checkboxes. No headings, no grouping, no intro line, no closing line.
+- Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
-- Short: aim for under 20 items. Cover the reported bug and every behavior the
-  fix touches, including its error and edge cases, but do not invent scope
-  beyond them.
+- One item per behavior. Cover the reported bug and every behavior the fix touches, including its error and edge cases, but do not invent scope beyond it.
+- Compress wording, never coverage. An item that runs long loses words, not the check it makes.
 - Do not modify, create, or commit any file.`
 	check(t, "uatBugPrompt", uatBugPrompt("ISSUE BODY", "main"), want)
 }

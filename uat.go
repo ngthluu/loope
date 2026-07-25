@@ -169,6 +169,7 @@ func uatSection(checklist string) string {
 func uatFeaturePrompt(specPath string) string {
 	d := promptData()
 	d["SpecPath"] = specPath
+	d["UATCoverage"] = "every behavior the spec describes"
 	return mustRender("uat-feature.md.tmpl", d)
 }
 
@@ -180,5 +181,6 @@ func uatBugPrompt(issue, base string) string {
 	d := promptData()
 	d["Issue"] = issue
 	d["Base"] = base
+	d["UATCoverage"] = "the reported bug and every behavior the fix touches"
 	return mustRender("uat-bug.md.tmpl", d)
 }
