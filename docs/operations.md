@@ -12,7 +12,8 @@ covers what it means to operate, that page covers the full set of transitions.
   **not** touch it again. Retrying a failure every cycle re-ran the whole
   pipeline on the same broken issue and burned tokens on it indefinitely. To get
   another attempt, remove the `ai-rework` label: the issue becomes eligible again
-  and the next run reuses the preserved worktree and branch, so no work is lost.
+  and the next run reuses whatever worktree and branch the failed run produced,
+  so no work is lost.
 - **Crashes self-heal on restart.** On startup the daemon sweeps issues left in
   `ai-wip` by a crashed run: it strips the label so the issue is eligible again,
   and leaves the worktree, branch, logs and session exactly where they are. The

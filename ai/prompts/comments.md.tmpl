@@ -8,7 +8,7 @@
 
 {{define "park"}}🤖 Parked as `{{.Label}}` — this issue will not be retried automatically.
 
-Remove the `{{.Label}}` label to queue a fresh attempt — the preserved worktree, branch and logs are reused, so no work is lost.{{if .Guidance}}
+Remove the `{{.Label}}` label to queue a fresh attempt — any worktree, branch and logs this run produced are preserved and reused, so no work is lost.{{if .Guidance}}
 
 {{.Guidance}}{{end}}{{if .Error}}
 

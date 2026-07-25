@@ -196,7 +196,7 @@ func TestGoldenNeedsInfoComment(t *testing.T) {
 }
 
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +
-	"Remove the `ai-rework` label to queue a fresh attempt — the preserved worktree, branch and logs are reused, so no work is lost."
+	"Remove the `ai-rework` label to queue a fresh attempt — any worktree, branch and logs this run produced are preserved and reused, so no work is lost."
 
 func TestGoldenParkCommentFull(t *testing.T) {
 	check(t, "parkComment(guidance+error)", parkComment("ai-rework", "Cause: network outage. Re-queue once connectivity is back.", "dial tcp: i/o timeout"),
