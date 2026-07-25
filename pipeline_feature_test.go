@@ -598,8 +598,8 @@ func TestFeaturePipelineRunsUATOnTheCommittedSpec(t *testing.T) {
 	if uatModel != "sonnet" {
 		t.Errorf("UAT model = %q, want the models.uat block", uatModel)
 	}
-	if len(tgt.appended) != 1 {
-		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d UAT comments, want 1", len(tgt.posted))
 	}
 }
 
@@ -648,8 +648,8 @@ func TestFeaturePipelineRunsUATConcurrentlyWithPlan(t *testing.T) {
 		t.Error("the plan session did not start while the UAT session was still running — UAT is blocking the pipeline")
 	}
 	// Still published, and the pipeline waited for it before returning.
-	if len(tgt.appended) != 1 {
-		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d UAT comments, want 1", len(tgt.posted))
 	}
 }
 

@@ -10,14 +10,14 @@ Each poll cycle runs four steps:
      and, below `confidenceThreshold`, escalates to `ai-needs-info` instead of
      guessing (see [Confidence gate](configuration.md#confidence-gate));
      otherwise it reproduces with a failing test, fixes, and commits. A short
-     read-only session then reads the issue and the resulting diff and appends a
-     UAT checklist to the issue body.
+     read-only session then reads the issue and the resulting diff and posts a
+     UAT checklist as an issue comment.
    - **`feature`** — anything needing design → three sessions. An architect
      brainstorm session scores confidence and, below `confidenceThreshold`,
      escalates to `ai-needs-info`; otherwise it brainstorms with a cheaper
      "product owner proxy" agent in a Q&A loop, then writes and commits the
      spec. A short read-only session then turns that spec into a UAT checklist
-     appended to the issue body. A **fresh** session turns the spec into a
+     posted as an issue comment. A **fresh** session turns the spec into a
      committed implementation plan, and a third session executes the plan.
    - **`done`** — the work is already fully implemented in the codebase → the
      loop comments, applies `ai-done`, and closes the issue without opening a PR.
@@ -28,19 +28,21 @@ Each poll cycle runs four steps:
 
 ## UAT checklist
 
-Both routes publish a hand-verification checklist onto the **issue body** (not a
-comment), under a `## 🤖 UAT checklist` heading preceded by an invisible
+Both routes publish a hand-verification checklist as a **new issue comment**,
+leaving the issue's own body — the human's report — untouched. The comment
+carries a `## 🤖 UAT checklist` heading preceded by an invisible
 `<!-- loope:uat -->` marker. The marker is the idempotency key: an issue that
-already carries it is never given a second checklist, so a re-queued run leaves
-the first one in place.
+already carries it — in a comment, or in the body, where older versions
+published — is never given a second checklist, so a re-queued run leaves the
+first one in place.
 
 The step is deliberately non-blocking. It runs in its own ephemeral session
 (`models.uat`, no inheritance from `architect`) with `Write`, `Edit` and
 `NotebookEdit` disabled, and it never overwrites the issue's recorded session. If anything
-goes wrong — the body fetch fails, the session errors or hits its cap, the
-result carries no checklist, the body would grow past GitHub's size limit — the
-step logs the issue number and the reason and returns, and the pipeline carries
-on to plan/execute or to shipping. The session's full output is kept as
+goes wrong — the issue fetch fails, the session errors or hits its cap, the
+result carries no checklist, the comment is rejected — the step logs the issue
+number and the reason and returns, and the pipeline carries on to plan/execute
+or to shipping. The session's full output is kept as
 `<seq>-uat.output.md` in the issue's log directory either way.
 
 On the feature route it starts as soon as the spec is committed and then runs

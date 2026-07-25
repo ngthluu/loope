@@ -17,23 +17,25 @@ const (
 	uatEndSentinel   = "UAT_END"
 	// uatLabel is the Claude call label, and so the <seq>-uat.* log file prefix.
 	uatLabel = "uat"
-	// maxUATChars caps the checklist itself. maxIssueBodyChars keeps the resulting
-	// body clear of GitHub's 65536-character issue body limit: past it, the step
-	// skips rather than risk a rejected edit.
-	maxUATChars       = 8000
-	maxIssueBodyChars = 60000
+	// maxUATChars caps the checklist itself, keeping the comment well clear of
+	// GitHub's 65536-character limit.
+	maxUATChars = 8000
 )
 
 // UATTarget is the GitHub surface the UAT step reads from and publishes to.
 // *GitHub satisfies it; tests substitute a fake.
 type UATTarget interface {
-	IssueBody(ctx context.Context, n int) (string, error)
-	AppendIssueBody(ctx context.Context, n int, text string) error
+	// UATSurfaces returns every text on the issue that could carry uatMarker:
+	// the comments, plus the body, where loope published the checklist before it
+	// moved to a comment.
+	UATSurfaces(ctx context.Context, n int) ([]string, error)
+	Comment(ctx context.Context, n int, body string) error
 }
 
-// UAT publishes a human-verifiable acceptance checklist onto the issue body.
-// A nil *UAT (or one with no Target) disables the step entirely, so callers
-// never need a nil guard.
+// UAT publishes a human-verifiable acceptance checklist as a new issue comment,
+// leaving the issue's own body — the human's report — untouched. A nil *UAT (or
+// one with no Target) disables the step entirely, so callers never need a nil
+// guard.
 type UAT struct {
 	Target UATTarget
 	Num    int
@@ -81,23 +83,25 @@ func (u *UAT) RunBug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueC
 }
 
 // run is the whole sequence, shared by both routes: idempotency check, session,
-// extract, size guard, append. Every early return logs the issue number and the
+// extract, size guard, comment. Every early return logs the issue number and the
 // reason, so a missing checklist is diagnosable from the daemon log alone.
 func (u *UAT) run(ctx context.Context, c *Claude, cfg *Config, wtPath, label, prompt string) {
 	if u == nil || u.Target == nil {
 		return
 	}
 	// Check before spending a session. A failed fetch skips too: publishing a
-	// second UAT section is worse than publishing none, and the next run on this
+	// second UAT comment is worse than publishing none, and the next run on this
 	// issue gets another chance.
-	body, err := u.Target.IssueBody(ctx, u.Num)
+	surfaces, err := u.Target.UATSurfaces(ctx, u.Num)
 	if err != nil {
-		log.Printf("issue #%d: UAT skipped, issue body fetch failed: %v", u.Num, err)
+		log.Printf("issue #%d: UAT skipped, issue fetch failed: %v", u.Num, err)
 		return
 	}
-	if strings.Contains(body, uatMarker) {
-		log.Printf("issue #%d: UAT already present, skipping", u.Num)
-		return
+	for _, s := range surfaces {
+		if strings.Contains(s, uatMarker) {
+			log.Printf("issue #%d: UAT already present, skipping", u.Num)
+			return
+		}
 	}
 
 	// No RecordSession: the UAT session is ephemeral and must never overwrite the
@@ -125,16 +129,11 @@ func (u *UAT) run(ctx context.Context, c *Claude, cfg *Config, wtPath, label, pr
 		log.Printf("issue #%d: UAT checklist truncated to %d chars", u.Num, maxUATChars)
 	}
 
-	section := uatSection(checklist)
-	if len(body)+len(section) > maxIssueBodyChars {
-		log.Printf("issue #%d: UAT skipped, the resulting issue body would exceed %d chars", u.Num, maxIssueBodyChars)
+	if err := u.Target.Comment(ctx, u.Num, uatSection(checklist)); err != nil {
+		log.Printf("issue #%d: UAT comment failed: %v", u.Num, err)
 		return
 	}
-	if err := u.Target.AppendIssueBody(ctx, u.Num, section); err != nil {
-		log.Printf("issue #%d: UAT append failed: %v", u.Num, err)
-		return
-	}
-	log.Printf("issue #%d: UAT checklist published to the issue body", u.Num)
+	log.Printf("issue #%d: UAT checklist published as an issue comment", u.Num)
 }
 
 // parseUAT extracts the checklist from a UAT session's result: the text after
@@ -155,7 +154,7 @@ func parseUAT(s string) (string, bool) {
 	return rest, rest != ""
 }
 
-// uatSection renders the outbound issue-body section: the marker, the heading,
+// uatSection renders the outbound comment: the marker, the heading,
 // and the checklist. It lives with the other human-facing outbound text in
 // ai/prompts/comments.md.tmpl.
 func uatSection(checklist string) string {

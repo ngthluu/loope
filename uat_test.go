@@ -62,27 +62,31 @@ func TestUATSectionCarriesMarkerAndHeading(t *testing.T) {
 	}
 }
 
-// fakeUATTarget stands in for *GitHub: it records what was appended and can be
+// fakeUATTarget stands in for *GitHub: it records what was commented and can be
 // scripted to fail either operation.
 type fakeUATTarget struct {
-	body      string
-	bodyErr   error
-	appendErr error
-	bodyCalls int
-	appended  []string
+	body        string
+	comments    []string
+	surfacesErr error
+	commentErr  error
+	bodyCalls   int
+	posted      []string
 }
 
-func (f *fakeUATTarget) IssueBody(ctx context.Context, n int) (string, error) {
+func (f *fakeUATTarget) UATSurfaces(ctx context.Context, n int) ([]string, error) {
 	f.bodyCalls++
-	return f.body, f.bodyErr
+	if f.surfacesErr != nil {
+		return nil, f.surfacesErr
+	}
+	return append([]string{f.body}, f.comments...), nil
 }
 
-func (f *fakeUATTarget) AppendIssueBody(ctx context.Context, n int, text string) error {
-	if f.appendErr != nil {
-		return f.appendErr
+func (f *fakeUATTarget) Comment(ctx context.Context, n int, body string) error {
+	if f.commentErr != nil {
+		return f.commentErr
 	}
-	f.appended = append(f.appended, text)
-	f.body += "\n\n" + text
+	f.posted = append(f.posted, body)
+	f.comments = append(f.comments, body)
 	return nil
 }
 
@@ -102,11 +106,14 @@ func TestUATPublishesChecklist(t *testing.T) {
 	u := &UAT{Target: tgt, Num: 7}
 	u.RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 
-	if len(tgt.appended) != 1 {
-		t.Fatalf("appended %d sections, want 1", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Fatalf("posted %d comments, want 1", len(tgt.posted))
 	}
-	if !strings.Contains(tgt.appended[0], uatMarker) || !strings.Contains(tgt.appended[0], "- [ ] click it") {
-		t.Errorf("appended = %q", tgt.appended[0])
+	if !strings.Contains(tgt.posted[0], uatMarker) || !strings.Contains(tgt.posted[0], "- [ ] click it") {
+		t.Errorf("comment = %q", tgt.posted[0])
+	}
+	if tgt.body != "the original body" {
+		t.Errorf("issue body = %q, want it untouched — the checklist goes in a comment", tgt.body)
 	}
 	if len(f.calls) != 1 {
 		t.Fatalf("claude calls = %d, want 1", len(f.calls))
@@ -127,9 +134,25 @@ func TestUATPublishesChecklist(t *testing.T) {
 	}
 }
 
-// Idempotency: a body that already carries the marker costs nothing — no session,
-// no append.
-func TestUATSkipsWhenMarkerPresent(t *testing.T) {
+// Idempotency: a comment that already carries the marker costs nothing — no
+// session, no second comment.
+func TestUATSkipsWhenMarkerPresentInComment(t *testing.T) {
+	tgt := &fakeUATTarget{body: "body", comments: []string{"a human comment",
+		uatMarker + "\n\n## 🤖 UAT checklist\n\n- [ ] old"}}
+	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] new")}}}
+	c := &Claude{runner: f}
+	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
+	if len(f.calls) != 0 {
+		t.Errorf("claude calls = %d, want 0 — the marker check must run before the session", len(f.calls))
+	}
+	if len(tgt.posted) != 0 {
+		t.Errorf("posted %d comments, want 0", len(tgt.posted))
+	}
+}
+
+// A checklist published into the issue body by an older loope also counts: the
+// issue must not gain a duplicate as a comment.
+func TestUATSkipsWhenMarkerPresentInBody(t *testing.T) {
 	tgt := &fakeUATTarget{body: "body\n\n" + uatMarker + "\n\n## 🤖 UAT checklist\n\n- [ ] old"}
 	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] new")}}}
 	c := &Claude{runner: f}
@@ -137,23 +160,23 @@ func TestUATSkipsWhenMarkerPresent(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Errorf("claude calls = %d, want 0 — the marker check must run before the session", len(f.calls))
 	}
-	if len(tgt.appended) != 0 {
-		t.Errorf("appended %d sections, want 0", len(tgt.appended))
+	if len(tgt.posted) != 0 {
+		t.Errorf("posted %d comments, want 0", len(tgt.posted))
 	}
 }
 
 // A failed body fetch also skips: a duplicated UAT section is worse than a
 // missing one, and the next run gets another chance.
 func TestUATSkipsWhenBodyFetchFails(t *testing.T) {
-	tgt := &fakeUATTarget{bodyErr: fmt.Errorf("gh: 503")}
+	tgt := &fakeUATTarget{surfacesErr: fmt.Errorf("gh: 503")}
 	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] new")}}}
 	c := &Claude{runner: f}
 	(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
 	if len(f.calls) != 0 {
 		t.Errorf("claude calls = %d, want 0", len(f.calls))
 	}
-	if len(tgt.appended) != 0 {
-		t.Errorf("appended %d sections, want 0", len(tgt.appended))
+	if len(tgt.posted) != 0 {
+		t.Errorf("posted %d comments, want 0", len(tgt.posted))
 	}
 }
 
@@ -162,8 +185,8 @@ func TestUATSkipsWhenSessionErrors(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{err: fmt.Errorf("exit 1")}}}
 	c := &Claude{runner: f}
 	(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
-	if len(tgt.appended) != 0 {
-		t.Errorf("a failed session must publish nothing, got %q", tgt.appended)
+	if len(tgt.posted) != 0 {
+		t.Errorf("a failed session must publish nothing, got %q", tgt.posted)
 	}
 }
 
@@ -174,8 +197,8 @@ func TestUATSkipsWhenResultHasNoSentinel(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("", "uat-1")}}}
 	c := &Claude{runner: f}
 	(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
-	if len(tgt.appended) != 0 {
-		t.Errorf("appended %d sections, want 0", len(tgt.appended))
+	if len(tgt.posted) != 0 {
+		t.Errorf("posted %d comments, want 0", len(tgt.posted))
 	}
 }
 
@@ -223,26 +246,16 @@ func TestUATTruncatesOversizedChecklist(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: uatResult(huge)}}}
 	c := &Claude{runner: f}
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
-	if len(tgt.appended) != 1 {
-		t.Fatalf("appended %d sections, want 1 (oversized is truncated, not skipped)", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Fatalf("posted %d comments, want 1 (oversized is truncated, not skipped)", len(tgt.posted))
 	}
-	if n := strings.Count(tgt.appended[0], "x"); n != maxUATChars {
+	if n := strings.Count(tgt.posted[0], "x"); n != maxUATChars {
 		t.Errorf("checklist kept %d chars, want it truncated to %d", n, maxUATChars)
 	}
 }
 
-func TestUATSkipsWhenResultingBodyTooLarge(t *testing.T) {
-	tgt := &fakeUATTarget{body: strings.Repeat("y", maxIssueBodyChars)}
-	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] click it")}}}
-	c := &Claude{runner: f}
-	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
-	if len(tgt.appended) != 0 {
-		t.Errorf("a body that would exceed the cap must be skipped, not appended: %q", tgt.appended)
-	}
-}
-
-func TestUATSurvivesAppendFailure(t *testing.T) {
-	tgt := &fakeUATTarget{body: "body", appendErr: fmt.Errorf("gh: 422")}
+func TestUATSurvivesCommentFailure(t *testing.T) {
+	tgt := &fakeUATTarget{body: "body", commentErr: fmt.Errorf("gh: 422")}
 	f := &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] click it")}}}
 	c := &Claude{runner: f}
 	// No panic, no error to propagate: the pipeline continues.
@@ -262,13 +275,13 @@ func TestUATStartFeatureRunsInBackgroundAndWaitJoins(t *testing.T) {
 	wait := (&UAT{Target: tgt, Num: 7}).StartFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 	// The session is parked in the gate, so StartFeature plainly did not run it
 	// inline: control is back here with nothing published yet.
-	if len(tgt.appended) != 0 {
-		t.Fatalf("StartFeature ran the session inline: appended %d sections", len(tgt.appended))
+	if len(tgt.posted) != 0 {
+		t.Fatalf("StartFeature ran the session inline: posted %d comments", len(tgt.posted))
 	}
 	close(release)
 	wait()
-	if len(tgt.appended) != 1 {
-		t.Errorf("appended %d sections after wait(), want 1 — wait must join the session", len(tgt.appended))
+	if len(tgt.posted) != 1 {
+		t.Errorf("posted %d comments after wait(), want 1 — wait must join the session", len(tgt.posted))
 	}
 }
 
