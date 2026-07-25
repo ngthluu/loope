@@ -396,7 +396,7 @@ func (o *Orchestrator) pause(ctx context.Context, n int) {
 
 // stoppedComment is the fixed notice posted when a run is stopped by the user.
 func stoppedComment() string {
-	return "⏸ Stopped by user. Worktree, logs and session are preserved. Press Continue to re-queue it; the run continues in the same worktree."
+	return "⏸ Stopped by user. Worktree, logs and session are preserved. Press Continue to re-queue it; the run continues in the same worktree.\n\n" + botMarker
 }
 
 // Continue re-queues a stopped issue: it only rewrites labels/state on disk —
@@ -516,6 +516,44 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 func (o *Orchestrator) abort(ctx context.Context, n int, cause error) error {
 	log.Printf("issue #%d: tooling error, parking for a human: %v", n, cause)
 	return o.park(ctx, n, cause)
+}
+
+// botMarker tags the daemon's own status chatter — pickup, park, PR link,
+// already-done, stopped. Like uatMarker it is an HTML comment, so it is
+// invisible on GitHub while staying greppable in the raw body, and it lets
+// FetchIssueContent strip that chatter back out instead of feeding the model a
+// transcript of its own past runs (see isBotStatusComment).
+//
+// The needs-info comment is deliberately NOT tagged: it carries the numbered
+// questions a human answers in the next comment, so removing it would orphan
+// the answer.
+const botMarker = "<!-- loope:bot -->"
+
+// legacyBotStatusPrefixes recognise status comments posted before botMarker
+// existed. They are the exact opening text of each tagged template, so nothing
+// a human writes is mistaken for chatter, and needs-info ("🤖 Not confident
+// enough…") is left alone here too.
+var legacyBotStatusPrefixes = []string{
+	"🤖 Picked up (",
+	"🤖 Parked as `",
+	"🤖 PR: ",
+	"🤖 Already implemented — closing.",
+	"⏸ Stopped by user.",
+}
+
+// isBotStatusComment reports whether a comment is the daemon's own status
+// chatter and so should be kept out of the issue content handed to Claude.
+func isBotStatusComment(body string) bool {
+	if strings.Contains(body, botMarker) {
+		return true
+	}
+	trimmed := strings.TrimSpace(body)
+	for _, p := range legacyBotStatusPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func pickupComment(kind, branch string) string {

@@ -1,6 +1,10 @@
-{{define "pickup"}}🤖 Picked up ({{.Kind}} flow). Branch: `{{.Branch}}`{{end}}
+{{define "pickup"}}🤖 Picked up ({{.Kind}} flow). Branch: `{{.Branch}}`
 
-{{define "already-done"}}🤖 Already implemented — closing. {{.Reason}}{{end}}
+{{.BotMarker}}{{end}}
+
+{{define "already-done"}}🤖 Already implemented — closing. {{.Reason}}
+
+{{.BotMarker}}{{end}}
 
 {{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
 
@@ -18,9 +22,13 @@ Remove the `{{.Label}}` label to queue a fresh attempt — any worktree, branch 
 {{.Error}}
 ````
 
-</details>{{end}}{{end}}
+</details>{{end}}
 
-{{define "pr-comment"}}🤖 PR: {{.URL}}{{end}}
+{{.BotMarker}}{{end}}
+
+{{define "pr-comment"}}🤖 PR: {{.URL}}
+
+{{.BotMarker}}{{end}}
 
 {{define "pr-title"}}{{.Title}} (#{{.Number}}){{end}}
 

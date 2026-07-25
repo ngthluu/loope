@@ -154,10 +154,22 @@ func (g *GitHub) FetchIssueContent(ctx context.Context, num int) (string, error)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s (#%d)\n\n%s\n", detail.Title, num, detail.Body)
-	if len(detail.Comments) > 0 {
+	// The daemon comments on its own issues (pickup, park + error dump, PR link,
+	// ...), so without this filter every re-run feeds the model a growing
+	// transcript of the previous runs' status chatter as if it were part of the
+	// report. Only human-written comments — and the bot's needs-info questions,
+	// which the human's answer refers back to — are context.
+	var comments []string
+	for _, c := range detail.Comments {
+		if isBotStatusComment(c.Body) {
+			continue
+		}
+		comments = append(comments, fmt.Sprintf("\n@%s: %s\n", c.Author.Login, c.Body))
+	}
+	if len(comments) > 0 {
 		b.WriteString("\n## Comments\n")
-		for _, c := range detail.Comments {
-			fmt.Fprintf(&b, "\n@%s: %s\n", c.Author.Login, c.Body)
+		for _, c := range comments {
+			b.WriteString(c)
 		}
 	}
 	return b.String(), nil
