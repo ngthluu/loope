@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA"); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
@@ -177,7 +178,7 @@ func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 		return claudeJSON("Still thinking...", "s1"), "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "")
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "rounds") {
 		t.Errorf("want max-rounds error, got %v", err)
 	}
@@ -222,7 +223,7 @@ func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA"); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil); err != nil {
 		t.Fatalf("pipeline should succeed when the spec completes on the last permitted round, got %v", err)
 	}
 	if len(prompts) != 5 {
@@ -267,7 +268,7 @@ func TestFeaturePipelineAlreadyDoneConfirmedOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA")
+	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError when already-done claim arrives on the final permitted round, got %v", err)
@@ -289,7 +290,7 @@ func TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing(t *testing.T) {
 		return claudeJSON("SPEC_READY: nope.md", "s1"), "", nil // lies: no spec file exists
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", ""); err == nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil); err == nil {
 		t.Error("want error when spec sentinel appears but no spec file ever exists")
 	}
 	if count < 3 {
@@ -313,7 +314,7 @@ func TestFeaturePipelineArchitectDoneConfirmed(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA")
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError, got %v", err)
@@ -353,7 +354,7 @@ func TestFeaturePipelineArchitectDonePushbackContinues(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA"); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
@@ -383,7 +384,7 @@ func TestFeaturePipelineLowConfidenceEscalates(t *testing.T) {
 		return claudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-1"), "", nil
 	}}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "")
+	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -426,7 +427,7 @@ func TestFeaturePipelineHighConfidenceProceeds(t *testing.T) {
 		return "", "", nil
 	}}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "clear issue", ""); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "clear issue", "", nil); err != nil {
 		t.Fatalf("high confidence should proceed, got %v", err)
 	}
 	if len(prompts) != 3 {
@@ -455,7 +456,7 @@ func TestFeaturePipelineRecordsExecuteSession(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}, Answerer: ModelConfig{Model: "sonnet"}}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", ""); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	si, err := readSession(logDir)
@@ -475,7 +476,7 @@ func TestFeaturePipelineRecordsSessionOnError(t *testing.T) {
 	wt := t.TempDir()
 	f := &fakeRunner{queue: []rresp{{stdout: claudeErrorJSON("You've hit your session limit", "arch-429")}}}
 	c := &Claude{runner: f, logDir: logDir}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", ""); err == nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil); err == nil {
 		t.Fatal("want the error propagated so the issue is parked")
 	}
 	si, err := readSession(logDir)
@@ -515,7 +516,7 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 		Answerer:  ModelConfig{Model: "sonnet"},
 		Execute:   ModelConfig{Model: "opus", MaxTurns: 300},
 	}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", ""); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	var execArgs, brainArgs []string
@@ -546,5 +547,79 @@ func TestReadPersona(t *testing.T) {
 	os.WriteFile(p, []byte("prefer Go"), 0o644)
 	if got := readPersona(p); got != "prefer Go" {
 		t.Errorf("persona = %q", got)
+	}
+}
+
+// Decision 2, taken literally: the UAT session runs immediately after the spec,
+// before plan and execute.
+func TestFeaturePipelineRunsUATBeforePlan(t *testing.T) {
+	wt := t.TempDir()
+	var labels []string
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		labels = append(labels, argAfter(c.args, "--model"))
+		switch len(labels) {
+		case 1: // architect: commits the spec straight away
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		case 2: // the UAT session
+			if !strings.Contains(c.stdin, "2026-07-13-thing-design.md") {
+				t.Errorf("the second call should be the UAT session on the spec, got: %s", c.stdin)
+			}
+			return claudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
+		case 3: // plan
+			if !strings.Contains(c.stdin, "/superpowers:writing-plans") {
+				t.Errorf("the third call should be the plan session, got: %s", c.stdin)
+			}
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case 4: // execute
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d: %v", len(labels), c.args)
+		return "", "", nil
+	}
+	tgt := &fakeUATTarget{body: "the issue body"}
+	cfg := featureConfig()
+	cfg.Models.UAT = ModelConfig{Model: "sonnet"}
+	c := &Claude{runner: f}
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 4 {
+		t.Fatalf("calls = %d, want architect, uat, plan, execute", len(labels))
+	}
+	if len(tgt.appended) != 1 {
+		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	}
+}
+
+// Non-blocking: a UAT session that errors must not stop plan and execute.
+func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
+	wt := t.TempDir()
+	var n int
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		n++
+		switch {
+		case n == 1:
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		case n == 2:
+			return "", "boom", fmt.Errorf("exit 1") // the UAT session fails
+		case n == 3:
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		default:
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+	}
+	c := &Claude{runner: f}
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA",
+		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}); err != nil {
+		t.Fatalf("a failed UAT session must never block the pipeline: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("calls = %d, want the pipeline to have run plan and execute anyway", n)
 	}
 }

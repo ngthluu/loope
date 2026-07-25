@@ -31,6 +31,9 @@ var promptTestData = map[string]map[string]any{
 	"guidance-interrupted": {},
 	"guidance-network":     {},
 	"ask-format":           {},
+	"uat-section":          {"Checklist": "- [ ] C"},
+	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md"},
+	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
@@ -148,7 +151,8 @@ func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel}
+	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
+		uatBeginSentinel, uatEndSentinel, uatMarker}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())
 		if err != nil {

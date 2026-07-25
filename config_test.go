@@ -269,3 +269,41 @@ func TestLoadConfigAddrOverride(t *testing.T) {
 		t.Errorf("Addr = %q, want localhost:9000", cfg.Addr)
 	}
 }
+
+// The uat block is used exactly as written: unlike execute, it must NOT inherit
+// anything from architect. An absent block means the claude CLI's own defaults.
+func TestLoadConfigUATBlockRoundTrips(t *testing.T) {
+	p := writeTemp(t, `{
+		"repoPath": "/tmp/clone",
+		"repoSlug": "org/repo",
+		"workDir": "/tmp/work",
+		"models": {
+			"architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100},
+			"uat": {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 30}
+		}
+	}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ModelConfig{Model: "sonnet", Effort: "medium", MaxBudgetUSD: 2, MaxTurns: 30}
+	if cfg.Models.UAT != want {
+		t.Errorf("Models.UAT = %+v, want %+v", cfg.Models.UAT, want)
+	}
+}
+
+func TestLoadConfigUATDoesNotInheritFromArchitect(t *testing.T) {
+	p := writeTemp(t, `{
+		"repoPath": "/tmp/clone",
+		"repoSlug": "org/repo",
+		"workDir": "/tmp/work",
+		"models": {"architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100}}
+	}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.UAT != (ModelConfig{}) {
+		t.Errorf("Models.UAT = %+v, want the zero value — uat must not inherit from architect", cfg.Models.UAT)
+	}
+}

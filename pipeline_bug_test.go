@@ -12,7 +12,7 @@ func TestBugPipelineSingleDebugSession(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("Fixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus", Effort: "high"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -34,7 +34,7 @@ func TestBugPipelinePropagatesError(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{err: fmt.Errorf("exit 1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "issue"); err == nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "issue", "main", nil); err == nil {
 		t.Error("want error, got nil")
 	}
 }
@@ -44,7 +44,7 @@ func TestBugPipelineReturnsAlreadyDone(t *testing.T) {
 		"I reproduced nothing; the guard already exists.\nPIPELINE_ALREADY_DONE: fixed in guard.go", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE")
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError, got %v", err)
@@ -61,7 +61,7 @@ func TestBugPipelineRecordsSession(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "the issue"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "the issue", "main", nil); err != nil {
 		t.Fatal(err)
 	}
 	si, err := readSession(logDir)
@@ -82,7 +82,7 @@ func TestBugPipelineRecordsSessionOnError(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeErrorJSON("You've hit your session limit", "debug-429")}}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "the issue"); err == nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "the issue", "main", nil); err == nil {
 		t.Fatal("want the error propagated so the issue is parked")
 	}
 	si, err := readSession(logDir)
@@ -98,7 +98,7 @@ func TestBugPipelinePromptMentionsAlreadyDoneSentinel(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("Fixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(f.calls[0].stdin, alreadyDoneSentinel) {
@@ -114,7 +114,7 @@ func TestBugPipelineLowConfidenceEscalates(t *testing.T) {
 		"CONFIDENCE: 40\nNo stack trace and no repro steps.\nWhich command triggers the crash?", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "crashes sometimes on startup")
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "crashes sometimes on startup", "main", nil)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -134,7 +134,7 @@ func TestBugPipelineHighConfidenceProceeds(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 85\nFixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatalf("a score at or above the threshold must proceed: %v", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestBugPipelineConfidenceAtThresholdProceeds(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 70\nFixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatalf("score == threshold must proceed: %v", err)
 	}
 }
@@ -155,7 +155,7 @@ func TestBugPipelineZeroThresholdIgnoresScore(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 5\nFixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatalf("threshold 0 disables the gate: %v", err)
 	}
 }
@@ -165,7 +165,7 @@ func TestBugPipelineMissingSentinelFailsOpen(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("Fixed and committed.", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE"); err != nil {
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil); err != nil {
 		t.Fatalf("an absent score must fail open, got %v", err)
 	}
 }
@@ -177,7 +177,7 @@ func TestBugPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
 		"CONFIDENCE: 20\nI cannot tell what behavior is wrong.\nPIPELINE_ALREADY_DONE: looks fine to me", "s1")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE")
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %T (%v)", err, err)
@@ -190,5 +190,91 @@ func TestBugPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
 	// already-done claim must not leak into it.
 	if strings.Contains(lc.feedback, alreadyDoneSentinel) {
 		t.Errorf("needs-info feedback must not leak the already-done sentinel: %q", lc.feedback)
+	}
+}
+
+func TestBugPipelineRunsUATAfterDebug(t *testing.T) {
+	var prompts []string
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		if len(prompts) == 1 {
+			return claudeJSON("Fixed and committed.", "debug-1"), "", nil
+		}
+		return claudeJSON(uatBeginSentinel+"\n- [ ] reproduce the old crash and see it gone\n"+uatEndSentinel, "uat-1"), "", nil
+	}
+	tgt := &fakeUATTarget{body: "the issue body"}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}, UAT: ModelConfig{Model: "sonnet"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", &UAT{Target: tgt, Num: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("calls = %d, want debug then uat", len(prompts))
+	}
+	// The UAT prompt carries the issue content and names the base for the diff.
+	if !strings.Contains(prompts[1], "ISSUE") || !strings.Contains(prompts[1], "origin/main") {
+		t.Errorf("uat prompt = %s", prompts[1])
+	}
+	if argAfter(f.calls[1].args, "--model") != "sonnet" {
+		t.Errorf("the uat call must use models.uat, got %v", f.calls[1].args)
+	}
+	if len(tgt.appended) != 1 {
+		t.Errorf("appended %d sections, want 1", len(tgt.appended))
+	}
+}
+
+// A low-confidence outcome escalates to ai-needs-info with no fix, so there is
+// nothing to accept: the UAT step must not run.
+func TestBugPipelineSkipsUATOnLowConfidence(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 40\nNo repro steps.", "s1")}}}
+	tgt := &fakeUATTarget{body: "body"}
+	c := &Claude{runner: f}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", &UAT{Target: tgt, Num: 7})
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Errorf("calls = %d, want only the debug turn", len(f.calls))
+	}
+	if tgt.bodyCalls != 0 || len(tgt.appended) != 0 {
+		t.Error("the UAT step must not run on the low-confidence outcome")
+	}
+}
+
+// Already-done closes the issue without a fix — again nothing to accept.
+func TestBugPipelineSkipsUATOnAlreadyDone(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("PIPELINE_ALREADY_DONE: the guard already exists", "s1")}}}
+	tgt := &fakeUATTarget{body: "body"}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", &UAT{Target: tgt, Num: 7})
+	var done *alreadyDoneError
+	if !errors.As(err, &done) {
+		t.Fatalf("want *alreadyDoneError, got %v", err)
+	}
+	if tgt.bodyCalls != 0 || len(tgt.appended) != 0 {
+		t.Error("the UAT step must not run on the already-done outcome")
+	}
+}
+
+// Non-blocking: a UAT session that errors still leaves the pipeline successful.
+func TestBugPipelineReturnsNilWhenUATFails(t *testing.T) {
+	var n int
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		n++
+		if n == 1 {
+			return claudeJSON("Fixed and committed.", "debug-1"), "", nil
+		}
+		return "", "boom", fmt.Errorf("exit 1")
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main",
+		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}); err != nil {
+		t.Fatalf("a failed UAT session must never fail the pipeline: %v", err)
 	}
 }

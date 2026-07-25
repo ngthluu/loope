@@ -25,3 +25,9 @@ Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in thi
 {{define "guidance-interrupted"}}Cause: the daemon restarted while this issue was mid-run — the loop auto-resumes the preserved session.{{end}}
 
 {{define "guidance-network"}}Cause: network outage — the loop auto-resumes when connectivity returns.{{end}}
+
+{{define "uat-section"}}{{.UATMarker}}
+
+## 🤖 UAT checklist
+
+{{.Checklist}}{{end}}

@@ -273,11 +273,12 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	content = DownloadIssueImages(ctx, o.runner, content, o.issueLogDir(n))
 
 	c := &Claude{runner: o.runner, logDir: o.issueLogDir(n), configDir: o.cfg.ClaudeConfigDir}
+	uat := &UAT{Target: o.gh, Num: n}
 	var perr error
 	if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content)
+		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath))
+		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath), uat)
 	}
 	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
 	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause

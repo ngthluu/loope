@@ -16,6 +16,7 @@
     "architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100},
     "answerer":  {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 5},
     "triage":    {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 1, "maxTurns": 5},
-    "execute":   {"model": "opus", "effort": "high", "maxBudgetUSD": 40, "maxTurns": 400}
+    "execute":   {"model": "opus", "effort": "high", "maxBudgetUSD": 40, "maxTurns": 400},
+    "uat":       {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 30}
   }
 }
