@@ -22,6 +22,14 @@ below 70, the issue is too under-specified or ambiguous to implement
 responsibly: do NOT design or write a spec. Instead, list what is missing and
 the specific questions the author must answer, then stop.
 
+Write that reply as a short, skimmable list the author can answer in one comment:
+- Open with ONE sentence naming the single thing that blocks you most.
+- Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
+- At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
+- Under 200 words total.
+- Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
+
 HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
 Ask clarifying questions as plain text (AskUserQuestion is disabled).
 Follow the brainstorming flow to a committed spec: clarifying questions, design,
@@ -124,6 +132,14 @@ responsibly: change no file. Instead, list what is missing and the specific
 questions the author must answer, then stop.
 The CONFIDENCE: line comes first even when an instruction below tells you to
 print another sentinel and stop.
+
+Write that reply as a short, skimmable list the author can answer in one comment:
+- Open with ONE sentence naming the single thing that blocks you most.
+- Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
+- At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
+- Under 200 words total.
+- Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
 suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls

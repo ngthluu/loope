@@ -12,6 +12,8 @@ responsibly: change no file. Instead, list what is missing and the specific
 questions the author must answer, then stop.
 The {{.ConfidenceSentinel}} line comes first even when an instruction below tells you to
 print another sentinel and stop.
+
+{{template "ask-format" .}}
 {{end}}
 Reproduce the bug with a failing test first, then fix it, verify the full test
 suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls

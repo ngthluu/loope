@@ -89,6 +89,26 @@ func TestAskFormatBlockCarriesItsRules(t *testing.T) {
 	}
 }
 
+// Both routes must ask in the same shape, from the same source. This is what
+// catches an edit made to one prompt that should have been an edit to the
+// shared block — and, via the threshold=0 cases, that the instruction stays
+// inside the gate's guard.
+func TestBothRoutesShareTheAskFormatBlock(t *testing.T) {
+	block := mustRender("ask-format", promptData())
+	if !strings.Contains(brainstormPrompt("I", 70), block) {
+		t.Error("brainstormPrompt(threshold=70) does not contain the ask-format block")
+	}
+	if !strings.Contains(bugPrompt("I", 70), block) {
+		t.Error("bugPrompt(threshold=70) does not contain the ask-format block")
+	}
+	if strings.Contains(brainstormPrompt("I", 0), block) {
+		t.Error("brainstormPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
+	}
+	if strings.Contains(bugPrompt("I", 0), block) {
+		t.Error("bugPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
+	}
+}
+
 // Every .md.tmpl file on disk must have made it into the binary and been
 // parsed. This walks the real directory, not promptFS: reading the embedded FS
 // could only confirm what embed already put there, so it could never catch a
