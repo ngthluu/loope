@@ -22,7 +22,7 @@ var promptTestData = map[string]map[string]any{
 	"pickup":               {"Kind": "feature", "Branch": "b"},
 	"already-done":         {"Reason": "R"},
 	"needs-info":           {"Score": 1, "Label": "l", "Feedback": "F"},
-	"park":                 {"Number": 1, "Guidance": "G", "Error": "E"},
+	"park":                 {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
 	"pr-comment":           {"URL": "u"},
 	"pr-title":             {"Title": "T", "Number": 1},
 	"pr-body":              {"Number": 1, "Kind": "bug"},

@@ -4,17 +4,21 @@
 
 The daemon is designed to run until you stop it:
 
-- **Transient failures auto-resume.** An issue parked as `ai-rework` because of a
-  Claude usage/rate limit, a turn/budget ceiling, or a network outage is retried
-  automatically each poll cycle, with per-issue exponential backoff (5 min
-  doubling to 60 min). Only genuine errors — anything else — stay parked for a
-  human to inspect.
+- **Failures stop, they don't retry.** Whatever the cause — a Claude usage/rate
+  limit, a turn/budget ceiling, a network outage, a genuine error — the issue is
+  parked as `ai-rework` with the full error commented on it, and the daemon does
+  **not** touch it again. Retrying a failure every cycle re-ran the whole
+  pipeline on the same broken issue and burned tokens on it indefinitely. To get
+  another attempt, remove the `ai-rework` label: the issue becomes eligible again
+  and the next run reuses the preserved worktree and branch, so no work is lost.
 - **Crashes self-heal on restart.** On startup the daemon sweeps issues left in
   `ai-wip` by a crashed run. If the worktree and a recorded Claude session
   survived, the run is resumable: the issue is parked as `ai-rework` with its
-  worktree intact and auto-resumed, so the crash costs no pipeline work. Only
-  when nothing resumable remains are the leftover worktree/branch removed and the
-  label stripped to re-queue the issue from scratch. No manual cleanup.
+  worktree intact and resumed automatically — this is the one automatic resume
+  left, and it is a hand-off, not a failure retry — so the crash costs no
+  pipeline work. Only when nothing resumable remains are the leftover
+  worktree/branch removed and the label stripped to re-queue the issue from
+  scratch. No manual cleanup.
 - **One daemon per workDir.** A pid lock at `<workDir>/logs/daemon.lock` refuses a
   second instance while one is alive and is taken over when stale.
 - **Panics don't kill the loop.** A panic in one issue's pipeline parks that issue
@@ -25,8 +29,8 @@ GitHub stays current throughout: labels, comments, and PRs are retried with
 backoff (see [`githubRetry`](configuration.md#githubretry)) until connectivity
 returns.
 
-Parked issues are resumed by the daemon that owns the workDir; there is no manual
-resume entry point to race it.
+Resumes are driven by the daemon that owns the workDir; there is no manual resume
+entry point to race it.
 
 ## Run as a service (macOS)
 

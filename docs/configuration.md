@@ -11,7 +11,7 @@ with `~/`.
 | `eligibleLabel`       | no       | `ai-agent`       | Label that marks an issue as available to the loop      |
 | `pollIntervalSec`     | no       | `60`             | Seconds between poll cycles                             |
 | `addr`                | no       | `localhost:8080` | Address the progress dashboard listens on               |
-| `ticketsPerCycle`     | no       | `1`              | Maximum pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Auto-resumes of parked issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
+| `ticketsPerCycle`     | no       | `1`              | Maximum pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Resumes of interrupted issues draw from the same limit and claim from it first. Values below 1 are treated as 1 |
 | `personaPath`         | no       | —                | Markdown persona for the answerer agent (see `persona.example.md`) |
 | `claudeConfigDir`     | no       | —                | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call ([details](#claudeconfigdir)) |
 | `maxQARounds`         | no       | `20`             | Max architect↔answerer rounds before a feature fails    |
@@ -99,9 +99,10 @@ Four roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
 caps per session; `0` omits the cap. `effort` maps to `--effort`.
 
 When a session hits one of these caps (`terminal_reason: max_turns`) or a Claude
-usage/rate limit, the loop parks the issue as `ai-rework` with the cause noted in
-the issue comment, and the daemon auto-resumes it (with backoff) once the limit
-resets.
+usage/rate limit, the loop parks the issue as `ai-rework` with the cause and the
+full error noted in the issue comment, and stops. It is not retried
+automatically: remove the `ai-rework` label once the limit resets (or the cap is
+raised) to queue another attempt.
 
 ## Persona
 

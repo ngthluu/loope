@@ -629,14 +629,18 @@ func TestClassifyCause(t *testing.T) {
 		name, errMsg, wantSub string
 		wantResumable         bool
 	}{
-		{"session limit", "claude debug: terminated: api_error; api status 429; You've hit your session limit", "usage", true},
-		{"max turns", "claude execute: terminated: max_turns", "turn", true},
-		{"network down", "claude execute: exec: could not resolve host api.anthropic.com", "network", true},
-		{"timeout", "claude execute: request timed out", "network", true},
+		// Failures are explained but never auto-resumed: the guidance is for the
+		// human who has to remove the label.
+		{"session limit", "claude debug: terminated: api_error; api status 429; You've hit your session limit", "usage", false},
+		{"max turns", "claude execute: terminated: max_turns", "turn", false},
+		{"network down", "claude execute: exec: could not resolve host api.anthropic.com", "network", false},
+		{"timeout", "claude execute: request timed out", "network", false},
 		{"unknown", "git push: permission denied", "", false},
 		{"panic", "panic: runtime error: index out of range", "", false},
 		{"panic with transient text", "panic: nil result after client call: i/o timeout", "", false},
-		{"mixed case", "API STATUS 429: Usage Limit", "usage", true},
+		{"mixed case", "API STATUS 429: Usage Limit", "usage", false},
+		// The deliberate hand-off (daemon restart / Continue) is the one resume.
+		{"interrupted", interruptedCause, "restart", true},
 	}
 	for _, tc := range cases {
 		got, resumable := classifyCause(tc.errMsg)
@@ -698,25 +702,6 @@ func prepParked(t *testing.T, env *fakeEnv, cause string) {
 	recordParkCause(logDir, cause)
 }
 
-func TestReparkResumableCauseSkipsComment(t *testing.T) {
-	env := newFakeEnv(t)
-	prepParked(t, env, "usage limit reached")
-	// The resumed claude call fails with a usage limit again.
-	base := env.f.handler
-	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "claude" {
-			return claudeErrorJSON("You've hit your usage limit; resets 5pm", "s2"), "", nil
-		}
-		return base(c)
-	}
-	if err := env.orchestrator().Rework(context.Background(), 7); err == nil {
-		t.Fatal("want rework failure")
-	}
-	if got := env.callsMatching("gh", "issue comment"); len(got) != 0 {
-		t.Errorf("resumable re-park must not comment again, got %v", got)
-	}
-}
-
 func TestReparkNewErrorStillComments(t *testing.T) {
 	env := newFakeEnv(t)
 	prepParked(t, env, "usage limit reached")
@@ -776,7 +761,7 @@ func reworkHandler(env *fakeEnv) func(rcall) (string, string, error) {
 
 func TestResumeParkedResumesAndShips(t *testing.T) {
 	env := newFakeEnv(t)
-	prepParked(t, env, "api status 429: usage limit")
+	prepParked(t, env, interruptedCause)
 	env.f.handler = reworkHandler(env)
 	o := env.orchestrator()
 	if err := resumeCycle(o); err != nil {
@@ -806,7 +791,7 @@ func TestResumeParkedSkipsNonResumable(t *testing.T) {
 func TestResumeParkedSkipsMissingWorktree(t *testing.T) {
 	env := newFakeEnv(t)
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
-	recordParkCause(logDir, "usage limit") // cause resumable, but no worktree/session
+	recordParkCause(logDir, interruptedCause) // cause resumable, but no worktree/session
 	env.f.handler = reworkHandler(env)
 	if err := resumeCycle(env.orchestrator()); err != nil {
 		t.Fatal(err)
@@ -816,13 +801,16 @@ func TestResumeParkedSkipsMissingWorktree(t *testing.T) {
 	}
 }
 
+// A resume that fails WITHOUT re-parking (an infra error before the session is
+// touched, so the resumable cause survives) is retried on the next cycle — but
+// only after its backoff window, so a broken environment isn't hammered.
 func TestResumeParkedBacksOffAfterFailure(t *testing.T) {
 	env := newFakeEnv(t)
-	prepParked(t, env, "usage limit reached")
+	prepParked(t, env, interruptedCause)
 	base := reworkHandler(env)
 	env.f.handler = func(c rcall) (string, string, error) {
-		if c.name == "claude" {
-			return claudeErrorJSON("still over the usage limit", "s2"), "", nil
+		if c.name == "gh" && strings.HasPrefix(strings.Join(c.args, " "), "issue view") {
+			return "", "not found", fmt.Errorf("exit 1")
 		}
 		return base(c)
 	}
@@ -833,22 +821,22 @@ func TestResumeParkedBacksOffAfterFailure(t *testing.T) {
 	if err := resumeCycle(o); err != nil {
 		t.Fatalf("listing succeeded, want nil error, got %v", err)
 	}
-	first := len(env.callsMatching("claude", "--resume"))
-	if first != 1 {
-		t.Fatalf("claude resume calls = %d, want 1", first)
+	first := len(env.callsMatching("gh", "issue view"))
+	if first == 0 {
+		t.Fatal("want a first resume attempt")
 	}
 
 	// Same instant: still inside the 5-minute backoff window.
 	_ = resumeCycle(o)
-	if got := len(env.callsMatching("claude", "--resume")); got != first {
+	if got := len(env.callsMatching("gh", "issue view")); got != first {
 		t.Errorf("resume inside backoff window: calls = %d, want %d", got, first)
 	}
 
 	// Past the window: retries.
 	now = now.Add(6 * time.Minute)
 	_ = resumeCycle(o)
-	if got := len(env.callsMatching("claude", "--resume")); got != first+1 {
-		t.Errorf("resume after backoff: calls = %d, want %d", got, first+1)
+	if got := len(env.callsMatching("gh", "issue view")); got <= first {
+		t.Errorf("resume after backoff: calls = %d, want more than %d", got, first)
 	}
 }
 

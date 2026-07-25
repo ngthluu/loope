@@ -30,10 +30,10 @@ A poll cycle does **not** wait for the pipelines it starts. It fills the free
 labelled while other pipelines are running is picked up as soon as a slot frees,
 rather than at the end of a batch.
 
-Within a cycle, auto-resumes of parked issues claim slots **before** new eligible
+Within a cycle, resumes of interrupted issues claim slots **before** new eligible
 issues: continuing work that already has a worktree and session on disk outranks
-starting more of it, so a permanently busy queue can't starve a parked issue.
-Resumes are backoff-gated, so they leave the rest of the budget for new work.
+starting more of it, so a permanently busy queue can't starve it. Resumes are
+backoff-gated, so they leave the rest of the budget for new work.
 
 On shutdown (Ctrl-C / SIGTERM) the daemon stops polling and waits for in-flight
 pipelines to finish, so the `workDir` lock is never released while a pipeline is
@@ -48,7 +48,7 @@ Label names are configurable — see [`stateLabels`](configuration.md#statelabel
 | `ai-agent`      | You add this: the issue is eligible for the loop                  |
 | `ai-wip`        | The loop is working on it                                         |
 | `ai-done`       | PR created; issue leaves the queue                                |
-| `ai-rework`     | Pipeline hit an error; progress preserved for manual rework       |
+| `ai-rework`     | Pipeline hit an error; progress preserved, waiting for you        |
 | `ai-needs-info` | Brainstorm wasn't confident enough; awaiting author clarification |
 | `ai-stopped`    | You stopped the run from the dashboard; preserved, awaiting Continue |
 
@@ -57,17 +57,19 @@ On failure the loop comments the error on the issue, swaps `ai-wip` →
 id (saved in `logs/issue-<N>/session`). Nothing is deleted, so no progress is
 lost.
 
-Parked issues recover automatically: each poll cycle the daemon auto-resumes
-resumable `ai-rework` issues (backoff-gated), continuing the saved Claude session
-in the preserved worktree, finishing the work, and shipping the PR (swapping
-`ai-rework` → `ai-done`). If the worktree or session file is gone, remove the
-`ai-rework` label to re-queue the issue from scratch.
+A parked issue then **waits for you** — nothing is retried automatically, not
+even a usage limit or a network blip. The comment carries the full error, and the
+way forward is to remove the `ai-rework` label: the issue is eligible again and
+the next run reuses the preserved worktree and branch rather than starting over.
+
+The one exception is an interrupted run: when a daemon restart lands mid-pipeline
+the sweep parks the issue with an "interrupted mid-run" cause, and that — being a
+hand-off rather than a failure — the daemon does resume on its own.
 
 You can also **Stop** a running ticket from the dashboard and **Continue** it
 later — see [the dashboard docs](dashboard.md#stop-and-continue-a-ticket). A stop
 swaps `ai-wip` → `ai-stopped` and preserves everything; because `ai-stopped` is
-neither `ai-wip` nor `ai-rework`, no auto-resume or crash-sweep path ever touches
-it, so a stopped ticket stays put (even across a daemon restart) until you hit
+neither `ai-wip` nor `ai-rework`, no resume or crash-sweep path ever touches it, so a stopped ticket stays put (even across a daemon restart) until you hit
 Continue.
 
 > `ai-failed` is deprecated: the loop no longer applies it, though existing

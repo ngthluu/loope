@@ -239,8 +239,8 @@ func clearState(logDir string) {
 }
 
 // parkCauseFile holds the failure text that parked the issue as ai-rework, so
-// the auto-resume scan can decide whether the cause is transient (usage limit,
-// budget ceiling, network outage) without re-deriving it from GitHub comments.
+// the resume scan can decide whether it is a hand-off it may continue or a
+// failure that waits for a human, without re-deriving it from GitHub comments.
 const parkCauseFile = "park-cause"
 
 // recordParkCause writes the park cause to <logDir>/park-cause. Best-effort,

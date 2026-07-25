@@ -67,7 +67,7 @@ func (g *GitHub) ListEligibleIssues(ctx context.Context, label string) ([]Issue,
 
 // ListIssuesWithLabel returns every open issue carrying label, with no state
 // filtering — unlike ListEligibleIssues, which drops issues already in a state.
-// Used by the auto-resume scan (rework label) and the startup orphan sweep
+// Used by the resume scan (rework label) and the startup orphan sweep
 // (wip label), where the state label IS the query.
 //
 // State labels (ai-wip/ai-rework/…) are shared by everyone running the tool

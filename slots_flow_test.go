@@ -161,7 +161,7 @@ func TestProcessOnceFiltersInFlightIssues(t *testing.T) {
 func TestResumeParkedYieldsToFullBudget(t *testing.T) {
 	env := newSlotEnv(t, 7)
 	env.setRework(11)
-	prepParkedIn(t, env.fakeEnv, 11, "api status 429: usage limit")
+	prepParkedIn(t, env.fakeEnv, 11, interruptedCause)
 	o := env.orchestrator() // budget clamps to 1
 	started, release := gatePipelines(o, env.f)
 
@@ -186,7 +186,7 @@ func TestResumeParkedYieldsToFullBudget(t *testing.T) {
 func TestResumeParkedSkipsIssueStillInFlight(t *testing.T) {
 	env := newSlotEnv(t, 7)
 	env.setRework(7)
-	prepParkedIn(t, env.fakeEnv, 7, "api status 429: usage limit")
+	prepParkedIn(t, env.fakeEnv, 7, interruptedCause)
 	o := env.orchestrator()
 	o.cfg.TicketsPerCycle = 3
 	started, release := gatePipelines(o, env.f)
@@ -212,7 +212,7 @@ func TestResumeParkedSkipsIssueStillInFlight(t *testing.T) {
 func TestResumeParkedRunsConcurrently(t *testing.T) {
 	env := newSlotEnv(t) // nothing eligible
 	env.setRework(11)
-	prepParkedIn(t, env.fakeEnv, 11, "api status 429: usage limit")
+	prepParkedIn(t, env.fakeEnv, 11, interruptedCause)
 	o := env.orchestrator()
 	started, release := gatePipelines(o, env.f)
 

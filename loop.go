@@ -19,7 +19,7 @@ type Orchestrator struct {
 	gh     *GitHub
 	wt     *Worktree
 
-	// Auto-resume bookkeeping: per-issue backoff between resume attempts and
+	// Resume bookkeeping: per-issue backoff between resume attempts and
 	// once-per-process skip logging. In-memory only — a restart retrying
 	// immediately costs at most one extra attempt.
 	//
@@ -47,8 +47,9 @@ const (
 )
 
 // interruptedCause is the park cause SweepOrphans records for a run a daemon
-// restart interrupted mid-pipeline. classifyCause treats it as resumable so the
-// preserved worktree/session is auto-resumed (with backoff) rather than re-run.
+// restart interrupted mid-pipeline. It is the ONLY cause classifyCause still
+// treats as resumable, so the preserved worktree/session is resumed rather than
+// re-run — an interruption is a hand-off, not a failure.
 const interruptedCause = "interrupted mid-run by a daemon restart"
 
 // errNotRunning is returned by Stop when no pipeline is in flight for the issue
@@ -264,11 +265,11 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
 	if err != nil {
-		return o.abort(ctx, n, "", "", err)
+		return o.abort(ctx, n, err)
 	}
 	content, err := o.gh.FetchIssueContent(ctx, n)
 	if err != nil {
-		return o.abort(ctx, n, wtPath, branch, err)
+		return o.abort(ctx, n, err)
 	}
 	content = DownloadIssueImages(ctx, o.runner, content, o.issueLogDir(n))
 
@@ -326,7 +327,7 @@ func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, fr
 // under-specified to implement. Modeled on finishDone: nothing was built, so
 // remove the worktree and branch, comment the score and the architect's
 // questions, swap fromLabel->NeedsInfo, and record state. It does NOT close the
-// issue and records no park cause, so the auto-resume scan never touches it —
+// issue and records no park cause, so the resume scan never touches it —
 // the issue waits out of the queue until a human removes the needs-info label,
 // which re-queues it. Returns nil: escalation is a clean terminal outcome, not a
 // pipeline failure. Uses a cancellation-proof context so a Ctrl-C mid-pipeline
@@ -348,14 +349,21 @@ func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, wtPath, branc
 	return nil
 }
 
-// classifyCause inspects a park cause and reports whether the daemon may
-// auto-resume it (usage/rate limits, turn/budget ceilings, network outages),
-// plus a one-line human explanation for the park comment. Non-resumable causes
-// get no guidance — a genuine error the operator should investigate. It matches
-// on the failure text produced by ClaudeResult.failureSummary and the runner.
-// A panic is never resumable, full stop: it's checked first so a panic message
-// that happens to embed a transient-looking substring (e.g. "i/o timeout")
-// can't slip through to auto-resume.
+// classifyCause inspects a park cause and reports a one-line human explanation
+// for the park comment, plus whether the daemon may resume it on its own.
+//
+// A FAILURE is never auto-resumed, however transient it looks. Retrying a
+// usage-limit or network park every cycle meant one broken issue re-ran the
+// whole pipeline indefinitely, burning tokens on work nobody was watching. A
+// parked issue now waits for a human, who removes the rework label to queue
+// another attempt (which reuses the preserved worktree and branch). Recognizing
+// the cause still matters — it is what the park comment explains.
+//
+// The single resumable cause left is not a failure at all: interruptedCause is
+// the deliberate hand-off written by SweepOrphans (a daemon restart landed
+// mid-run) and by Continue, where resuming is precisely the requested action.
+// A panic is checked first and is never resumable, so a panic message embedding
+// a transient-looking substring can't slip through.
 func classifyCause(msg string) (guidance string, resumable bool) {
 	m := strings.ToLower(strings.TrimSpace(msg))
 	if strings.HasPrefix(m, "panic: ") {
@@ -364,16 +372,16 @@ func classifyCause(msg string) (guidance string, resumable bool) {
 	switch {
 	case strings.Contains(m, "session limit") || strings.Contains(m, "usage limit") ||
 		strings.Contains(m, "rate limit") || strings.Contains(m, "api status 429"):
-		return mustRender("guidance-usage-limit", promptData()), true
+		return mustRender("guidance-usage-limit", promptData()), false
 	case strings.Contains(m, "max_turns") || strings.Contains(m, "max turns") ||
 		strings.Contains(m, "max-budget") || strings.Contains(m, "budget"):
-		return mustRender("guidance-budget", promptData()), true
+		return mustRender("guidance-budget", promptData()), false
 	case strings.Contains(m, "interrupted mid-run"):
 		return mustRender("guidance-interrupted", promptData()), true
 	}
 	for _, sig := range transientSignatures {
 		if strings.Contains(m, sig) {
-			return mustRender("guidance-network", promptData()), true
+			return mustRender("guidance-network", promptData()), false
 		}
 	}
 	return "", false
@@ -389,24 +397,19 @@ func failureGuidance(cause error) string {
 	return g
 }
 
-// park moves an issue into the rework state and PRESERVES all progress so
-// `loop -rework <N>` can resume it: comment guidance plus the error, then swap
-// fromLabel->Rework (skipped when already in rework, to avoid a self-relabel).
-// The comment itself is skipped on a repeated resumable re-park (already parked
-// with guidance posted and nothing new for the operator to see), but a
-// non-resumable cause always comments. The worktree, branch, logs, and session
-// file are left untouched. Uses a cancellation-proof context so a Ctrl-C
+// park moves an issue into the rework state and PRESERVES all progress: comment
+// the guidance plus the full error, then swap fromLabel->Rework (skipped when
+// already in rework, to avoid a self-relabel). The worktree, branch, logs, and
+// session file are left untouched. Uses a cancellation-proof context so a Ctrl-C
 // mid-pipeline still records the state.
+//
+// Parking is terminal — nothing retries this issue automatically (see
+// classifyCause) — so every park comments: the error text IS the handover to the
+// human, and there is no longer a backoff loop that would spam the issue.
 func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause error) error {
 	cctx := context.WithoutCancel(ctx)
-	guidance, resumable := classifyCause(cause.Error())
-	// A repeated resumable failure while already parked re-parks silently: the
-	// guidance is on the issue from the first park, and the auto-resume scan
-	// retrying on backoff would otherwise post a comment per attempt. A
-	// non-resumable cause is new information for the operator, so it comments.
-	if !(fromLabel == o.cfg.StateLabels.Rework && resumable) {
-		_ = o.gh.Comment(cctx, n, parkComment(n, guidance, tail(cause.Error(), 800)))
-	}
+	guidance, _ := classifyCause(cause.Error())
+	_ = o.gh.Comment(cctx, n, parkComment(o.cfg.StateLabels.Rework, guidance, clip(cause.Error(), 6000)))
 	if fromLabel != o.cfg.StateLabels.Rework {
 		_ = o.gh.SwapLabels(cctx, n, fromLabel, o.cfg.StateLabels.Rework)
 	}
@@ -419,7 +422,7 @@ func (o *Orchestrator) park(ctx context.Context, n int, fromLabel string, cause 
 // record the state, and comment. It runs on the LIVE parent ctx (the pipeline's
 // child ctx is already cancelled, so its GitHub calls would fail). It
 // deliberately does NOT touch the worktree, branch, logs, or session file, and
-// records NO park cause — so no auto-resume path (SweepOrphans queries ai-wip,
+// records NO park cause — so no resume path (SweepOrphans queries ai-wip,
 // ResumeParked queries ai-rework) will ever act on a stopped ticket. It stays
 // put until the user hits Continue. If the swap fails, it records nothing and
 // does not comment: local state must never claim ai-stopped while the real label
@@ -449,7 +452,7 @@ func stoppedComment() string {
 // Continue re-queues a stopped issue for a deferred resume: it only rewrites
 // labels/state on disk, and the next runLoop cycle picks it up when a slot is
 // free (never synchronously, never bypassing the concurrency budget). With a
-// preserved session it hands the issue to the auto-resume path (ai-stopped ->
+// preserved session it hands the issue to the resume path (ai-stopped ->
 // ai-rework + a resumable park cause, so ResumeParked -> Rework resumes from the
 // session id). Without a session it re-queues from scratch (remove ai-stopped,
 // clear state/cause, so the issue is eligible again and ProcessOnce runs a fresh
@@ -482,11 +485,14 @@ func (o *Orchestrator) Continue(ctx context.Context, n int) error {
 	return nil
 }
 
-// ResumeParked scans ai-rework issues and re-runs Rework on the ones parked for
-// a transient, resumable cause (usage/rate limit, turn/budget ceiling, network
-// outage). Genuine errors have no resumable park cause and stay parked for a
-// human. Each issue backs off exponentially between attempts (5m doubling to
-// 60m) so a still-active usage limit isn't hammered every poll cycle.
+// ResumeParked scans ai-rework issues and re-runs Rework on the ones whose park
+// cause is resumable — which, since failures stopped being retried, means only
+// the deliberate hand-off: a run interrupted by a daemon restart, or a ticket the
+// user pressed Continue on. A FAILED run is never picked up here; it waits for a
+// human to remove the label (see classifyCause). Each issue still backs off
+// exponentially between attempts (5m doubling to 60m), which covers a resume that
+// fails before it re-parks (e.g. GitHub unreachable) and so keeps its resumable
+// cause on disk.
 //
 // Resumes draw from the same TicketsPerCycle budget as new work and run
 // concurrently with it. A cycle runs this BEFORE ProcessOnce so continuing
@@ -528,9 +534,9 @@ func (o *Orchestrator) ResumeParked(ctx context.Context) error {
 					_ = o.park(ctx, n, o.cfg.StateLabels.Rework, fmt.Errorf("panic: %v", r))
 				}
 			}()
-			log.Printf("issue #%d: auto-resuming parked work", n)
+			log.Printf("issue #%d: resuming interrupted work", n)
 			if err := o.Rework(ctx, n); err != nil {
-				log.Printf("auto-resume #%d failed: %v", n, err)
+				log.Printf("resume #%d failed: %v", n, err)
 				o.noteResumeFailure(n)
 				return
 			}
@@ -540,17 +546,17 @@ func (o *Orchestrator) ResumeParked(ctx context.Context) error {
 	return nil
 }
 
-// shouldResume reports whether issue n is auto-resumable right now: parked for
-// a resumable cause, with its worktree and session intact, and past its backoff
+// shouldResume reports whether issue n may be resumed right now: parked for a
+// resumable cause, with its worktree and session intact, and past its backoff
 // window. Missing prerequisites are logged once per process per issue, so a
-// permanently human-owned park doesn't spam the daemon log every cycle.
+// park waiting on a human doesn't spam the daemon log every cycle.
 func (o *Orchestrator) shouldResume(n int) bool {
 	logDir := o.issueLogDir(n)
 	reason := ""
 	if cause := readParkCause(logDir); cause == "" {
-		reason = "no recorded park cause; waiting for a human (`loop -rework`)"
+		reason = "no recorded park cause; waiting for a human"
 	} else if _, resumable := classifyCause(cause); !resumable {
-		reason = "cause needs a human; fix it and run `loop -rework`"
+		reason = "parked after a failure; remove the rework label to try again"
 	} else if _, err := os.Stat(worktreePath(o.cfg.WorkDir, n)); err != nil {
 		reason = "no preserved worktree (remove the rework label to re-queue)"
 	} else if si, err := readSession(logDir); err != nil || si.SessionID == "" {
@@ -607,7 +613,7 @@ func (o *Orchestrator) clearResumeState(n int) {
 // It prefers to build on whatever the crash left behind: if the worktree
 // survived and a Claude session was recorded, the run is resumable, so it parks
 // the issue for rework (worktree, branch, logs, and session left intact) with a
-// resumable cause the auto-resume scan continues — rather than re-running the
+// resumable cause the resume scan continues — rather than re-running the
 // whole pipeline from zero. Only when there is no resumable state left does it
 // reclaim: force-remove the leftover worktree/branch (best-effort — they may
 // already be gone) and strip the WIP label so the normal cycle re-queues the
@@ -692,26 +698,20 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	return nil
 }
 
-// abort backs out after a deterministic tooling failure (git/gh: worktree,
-// fetch, push, PR create, ...). These are infrastructure or transient problems,
-// not the AI failing the task, so the issue is NOT marked ai-failed. Instead the
-// WIP label is removed to leave the issue eligible for a fresh attempt next
-// cycle, any worktree/branch is cleaned up, and the error is returned so the
-// cycle logs it. No issue comment is posted, to avoid spamming the issue on a
-// persistent infra failure that retries every poll.
-func (o *Orchestrator) abort(ctx context.Context, n int, wtPath, branch string, cause error) error {
-	cctx := context.WithoutCancel(ctx)
-	log.Printf("issue #%d: tooling error, leaving eligible to retry next cycle: %v", n, cause)
-	_ = o.gh.RemoveLabel(cctx, n, o.cfg.StateLabels.WIP)
-	clearState(o.issueLogDir(n))
-	clearParkCause(o.issueLogDir(n))
-	if wtPath != "" {
-		_ = o.wt.Remove(cctx, wtPath)
-	}
-	if branch != "" {
-		_ = o.wt.DeleteBranch(cctx, branch)
-	}
-	return cause
+// abort backs out after a deterministic tooling failure (git/gh: worktree add,
+// fetch, ...) before the pipeline ever started. Every gh/git call is already
+// retried in-band (see githubRetry), so reaching here means the failure is
+// persistent, not a blip.
+//
+// It used to strip ai-wip and leave the issue eligible, which re-triaged and
+// re-attempted the issue every single cycle — the unattended retry loop this
+// flow exists to avoid, paid for in triage tokens. So it parks like any other
+// failure: labelled ai-rework with the full error commented, waiting for a human
+// to remove the label. Whatever the failing step managed to create (worktree,
+// branch) is preserved, not deleted, so the next attempt builds on it.
+func (o *Orchestrator) abort(ctx context.Context, n int, cause error) error {
+	log.Printf("issue #%d: tooling error, parking for a human: %v", n, cause)
+	return o.park(ctx, n, o.cfg.StateLabels.WIP, cause)
 }
 
 func pickupComment(kind, branch string) string {
@@ -735,9 +735,9 @@ func needsInfoComment(score int, label, feedback string) string {
 	return mustRender("needs-info", d)
 }
 
-func parkComment(n int, guidance, errText string) string {
+func parkComment(label, guidance, errText string) string {
 	d := promptData()
-	d["Number"] = n
+	d["Label"] = label
 	d["Guidance"] = guidance
 	d["Error"] = errText
 	return mustRender("park", d)

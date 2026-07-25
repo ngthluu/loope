@@ -68,7 +68,7 @@ func TestResumeIsNotStarvedByAFullEligibleQueue(t *testing.T) {
 	o := env.orchestrator()
 	o.cfg.TicketsPerCycle = 2
 	env.setRework(5)
-	prepParkedIn(t, env.fakeEnv, 5, "usage limit reached")
+	prepParkedIn(t, env.fakeEnv, 5, interruptedCause)
 	// A long poll interval keeps the loop to a single cycle so cancellation is
 	// the only wake-up after the slots fill.
 	o.cfg.PollIntervalSec = 3600
@@ -108,7 +108,7 @@ func TestResumeAndNewWorkShareTheBudget(t *testing.T) {
 	o := env.orchestrator()
 	o.cfg.TicketsPerCycle = 2
 	env.setRework(5)
-	prepParkedIn(t, env.fakeEnv, 5, "usage limit reached")
+	prepParkedIn(t, env.fakeEnv, 5, interruptedCause)
 	// A long poll interval keeps the loop to a single cycle so cancellation is
 	// the only wake-up after the slots fill.
 	o.cfg.PollIntervalSec = 3600

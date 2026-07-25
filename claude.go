@@ -39,8 +39,13 @@ type ClaudeResult struct {
 
 // failureSummary describes why an is_error result terminated, for the wrapped
 // error, park comments, and logs. It leads with the terminal reason and API
-// status (present even when Result is empty, as on a max_turns cutoff), then
-// appends the result tail when there is one.
+// status (present even when Result is empty, as on a max_turns cutoff), adds the
+// run's accounting (turns, cost, wall time — how far the session got before it
+// died), then appends the result text when there is one.
+//
+// It is the text a human reads on the parked issue, so it errs towards saying
+// too much: the result is clipped, not truncated, so a long transcript keeps
+// both its opening context and its closing error message.
 func (r ClaudeResult) failureSummary() string {
 	var parts []string
 	if r.TerminalReason != "" {
@@ -49,7 +54,16 @@ func (r ClaudeResult) failureSummary() string {
 	if r.APIErrorStatus != 0 {
 		parts = append(parts, fmt.Sprintf("api status %d", r.APIErrorStatus))
 	}
-	if msg := tail(strings.TrimSpace(r.Result), 500); msg != "" {
+	if r.NumTurns > 0 {
+		parts = append(parts, fmt.Sprintf("%d turns", r.NumTurns))
+	}
+	if r.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f", r.CostUSD))
+	}
+	if r.DurationMS > 0 {
+		parts = append(parts, duration(r.DurationMS))
+	}
+	if msg := clip(strings.TrimSpace(r.Result), 4000); msg != "" {
 		parts = append(parts, msg)
 	}
 	if len(parts) == 0 {
@@ -119,11 +133,11 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 	}
 	stderr, err := c.runner.RunStream(ctx, call.Dir, env, call.Prompt, sink, "claude", args...)
 	if err != nil {
-		return nil, fmt.Errorf("claude %s: %w (stderr: %s)", call.Label, err, tail(stderr, 500))
+		return nil, fmt.Errorf("claude %s: %w\n%s", call.Label, err, streamDetail(stderr, buf.String()))
 	}
 	res, terminal, perr := parseStreamResult(buf.String())
 	if perr != nil {
-		return nil, fmt.Errorf("claude %s: parse output: %w (stdout: %s)", call.Label, perr, tail(buf.String(), 500))
+		return nil, fmt.Errorf("claude %s: parse output: %w\n%s", call.Label, perr, streamDetail(stderr, buf.String()))
 	}
 	c.saveLog(seq, call.Label, terminal)
 	c.saveOutput(seq, call.Label, res.Result)
@@ -297,4 +311,34 @@ func tail(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// clip shortens s to at most max runes while keeping BOTH ends, noting how much
+// was dropped. A failure's head names the failing step and its tail carries the
+// API's own message, so tail() alone threw away half the diagnosis — which is
+// how a parked issue ended up commented with a generic, contextless snippet.
+func clip(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max || max <= 0 {
+		return s
+	}
+	head := max / 2
+	tailN := max - head
+	return string(r[:head]) + fmt.Sprintf("\n…[%d chars omitted]…\n", len(r)-max) + string(r[len(r)-tailN:])
+}
+
+// streamDetail renders a failed claude invocation's captured output for the
+// error message: both streams, each labelled and explicitly marked when empty.
+// claude writes its diagnostics to stdout as often as to stderr, and a bare
+// "(stderr: )" told the operator nothing at all.
+func streamDetail(stderr, stdout string) string {
+	return "stderr: " + orEmpty(clip(strings.TrimSpace(stderr), 2000)) +
+		"\nstdout: " + orEmpty(clip(strings.TrimSpace(stdout), 2000))
+}
+
+func orEmpty(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	return s
 }
