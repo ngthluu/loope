@@ -29,9 +29,10 @@ var promptTestData = map[string]map[string]any{
 	"guidance-budget":      {},
 	"guidance-network":     {},
 	"ask-format":           {},
+	"uat-format":           {"UATCoverage": "C"},
 	"uat-section":          {"Checklist": "- [ ] C"},
-	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md"},
-	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main"},
+	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
+	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main", "UATCoverage": "C"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
@@ -41,6 +42,7 @@ var skipTemplates = map[string]bool{
 	"prompts":            true,
 	"comments.md.tmpl":   true,
 	"ask-format.md.tmpl": true,
+	"uat-format.md.tmpl": true,
 }
 
 func TestEveryTemplateRenders(t *testing.T) {
@@ -107,6 +109,51 @@ func TestBothRoutesShareTheAskFormatBlock(t *testing.T) {
 	}
 	if strings.Contains(bugPrompt("I", 0), block) {
 		t.Error("bugPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
+	}
+}
+
+// The checklist-format instruction lives in exactly one place. This asserts the
+// block exists and still carries the rules that keep the published checklist
+// scannable — a silent deletion of one bullet would otherwise pass every other
+// test in this file.
+func TestUATFormatBlockCarriesItsRules(t *testing.T) {
+	d := promptData()
+	d["UATCoverage"] = "every behavior the spec describes"
+	got := mustRender("uat-format", d)
+	for _, want := range []string{
+		"single flat list",
+		"No headings",
+		"`Action → expected result`",
+		"15 words or fewer",
+		"Compress wording, never coverage",
+		"every behavior the spec describes",
+		"Do not modify, create, or commit any file.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("uat-format block is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "###") {
+		t.Errorf("uat-format block still asks for `###` group headings:\n%s", got)
+	}
+	if strings.Contains(got, "under 20 items") {
+		t.Errorf("uat-format block still caps the item count:\n%s", got)
+	}
+}
+
+// Both routes must ask in the same shape, from the same source. This is what
+// catches an edit made to one UAT prompt that should have been an edit to the
+// shared block.
+func TestBothRoutesShareTheUATFormatBlock(t *testing.T) {
+	feature := promptData()
+	feature["UATCoverage"] = "every behavior the spec describes"
+	if block := mustRender("uat-format", feature); !strings.Contains(uatFeaturePrompt("docs/spec.md"), block) {
+		t.Error("uatFeaturePrompt does not contain the uat-format block")
+	}
+	bug := promptData()
+	bug["UATCoverage"] = "the reported bug and every behavior the fix touches"
+	if block := mustRender("uat-format", bug); !strings.Contains(uatBugPrompt("I", "main"), block) {
+		t.Error("uatBugPrompt does not contain the uat-format block")
 	}
 }
 

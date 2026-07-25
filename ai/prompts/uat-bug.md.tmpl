@@ -12,13 +12,4 @@ nothing at all: no markers, no checklist, no explanation.
 Output ONLY the checklist, between a line reading {{.UATBeginSentinel}} and a line reading
 {{.UATEndSentinel}}. Print nothing before or after those two lines.
 
-Rules for the checklist:
-- Markdown `- [ ]` checkboxes, grouped under short `###` headings when there is
-  more than one area to verify.
-- Each item is one concrete action a human performs plus the one observable
-  result they should see.
-- No implementation detail, no file paths, no code.
-- Short: aim for under 20 items. Cover the reported bug and every behavior the
-  fix touches, including its error and edge cases, but do not invent scope
-  beyond them.
-- Do not modify, create, or commit any file.
+{{template "uat-format" .}}
