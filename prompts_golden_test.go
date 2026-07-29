@@ -21,6 +21,8 @@ written and print CONFIDENCE: <0-100> as the FIRST line of your reply. If that s
 below 70, the issue is too under-specified or ambiguous to implement
 responsibly: do NOT design or write a spec. Instead, list what is missing and
 the specific questions the author must answer, then stop.
+The CONFIDENCE: line comes first even when an instruction below tells you to
+print another sentinel and stop.
 
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
@@ -142,8 +144,7 @@ Write that reply as a short, skimmable list the author can answer in one comment
 - Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
 
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print
@@ -155,8 +156,7 @@ func TestGoldenBugPromptWithoutThreshold(t *testing.T) {
 	want := `/superpowers:systematic-debugging ISSUE BODY
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
 
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print
@@ -174,6 +174,8 @@ Decide from the issue text alone — do NOT read the repository. Pick the single
 best issue to work on next and classify it:
 - "bug": a small, well-scoped defect that can be fixed by reproducing and debugging
 - "feature": anything that needs design work (new functionality, refactors, unclear scope)
+If an issue plausibly fits both, classify it "bug" when the fix needs no design
+decision, otherwise "feature".
 
 Respond with ONLY a JSON object, no other text:
 {"issueNumber": <int>, "kind": "bug" or "feature", "reason": "<one sentence>"}`
@@ -254,6 +256,10 @@ func TestGoldenUATSection(t *testing.T) {
 func TestGoldenUATFeaturePrompt(t *testing.T) {
 	want := `Read the approved spec at docs/spec.md and write a UAT (user acceptance test)
 checklist for a human who will verify the shipped feature by hand.
+
+Inspect the repository with ` + "`git log`" + ` and ` + "`git diff`" + ` first. If nothing was
+committed, or the shipped changes don't actually implement the spec's
+feature, print nothing at all: no markers, no checklist, no explanation.
 
 Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.

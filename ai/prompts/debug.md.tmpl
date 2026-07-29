@@ -16,8 +16,7 @@ print another sentinel and stop.
 {{template "ask-format" .}}
 {{end}}
 Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
+suite passes, and commit. {{template "headless-commit-notes" .}}
 
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print

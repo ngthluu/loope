@@ -1,7 +1,8 @@
 Read the approved spec at {{.SpecPath}} and write a UAT (user acceptance test)
 checklist for a human who will verify the shipped feature by hand.
 
-Output ONLY the checklist, between a line reading {{.UATBeginSentinel}} and a line reading
-{{.UATEndSentinel}}. Print nothing before or after those two lines.
+Inspect the repository with `git log` and `git diff` first. If nothing was
+committed, or the shipped changes don't actually implement the spec's
+feature, print nothing at all: no markers, no checklist, no explanation.
 
 {{template "uat-format" .}}

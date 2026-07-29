@@ -11,38 +11,42 @@ import (
 // prompt file or {{define}} block with no entry here fails TestEveryTemplateRenders —
 // which is the point: it catches a prompt that was added but never wired up.
 var promptTestData = map[string]map[string]any{
-	"brainstorm.md.tmpl":   {"Issue": "I", "Threshold": 70},
-	"answerer.md.tmpl":     {"Issue": "I", "Persona": "P", "ArchitectMsg": "A"},
-	"done-confirm.md.tmpl": {"Issue": "I", "Persona": "P", "Reason": "R"},
-	"plan.md.tmpl":         {"SpecPath": "docs/spec.md"},
-	"execute.md.tmpl":      {"PlanPath": "docs/plan.md"},
-	"debug.md.tmpl":        {"Issue": "I", "Threshold": 70},
-	"triage.md.tmpl":       {"List": "[]"},
-	"pickup":               {"Kind": "feature", "Branch": "b"},
-	"already-done":         {"Reason": "R"},
-	"needs-info":           {"Score": 1, "Label": "l", "Feedback": "F"},
-	"park":                 {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
-	"pr-comment":           {"URL": "u"},
-	"pr-title":             {"Title": "T", "Number": 1},
-	"pr-body":              {"Number": 1, "Kind": "bug"},
-	"guidance-usage-limit": {},
-	"guidance-budget":      {},
-	"guidance-network":     {},
-	"ask-format":           {},
-	"uat-format":           {"UATCoverage": "C"},
-	"uat-section":          {"Checklist": "- [ ] C"},
-	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
-	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main", "UATCoverage": "C"},
+	"brainstorm.md.tmpl":    {"Issue": "I", "Threshold": 70},
+	"answerer.md.tmpl":      {"Issue": "I", "Persona": "P", "ArchitectMsg": "A"},
+	"done-confirm.md.tmpl":  {"Issue": "I", "Persona": "P", "Reason": "R"},
+	"plan.md.tmpl":          {"SpecPath": "docs/spec.md"},
+	"execute.md.tmpl":       {"PlanPath": "docs/plan.md"},
+	"debug.md.tmpl":         {"Issue": "I", "Threshold": 70},
+	"triage.md.tmpl":        {"List": "[]"},
+	"pickup":                {"Kind": "feature", "Branch": "b"},
+	"already-done":          {"Reason": "R"},
+	"needs-info":            {"Score": 1, "Label": "l", "Feedback": "F"},
+	"park":                  {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
+	"pr-comment":            {"URL": "u"},
+	"pr-title":              {"Title": "T", "Number": 1},
+	"pr-body":               {"Number": 1, "Kind": "bug"},
+	"guidance-usage-limit":  {},
+	"guidance-budget":       {},
+	"guidance-network":      {},
+	"ask-format":            {},
+	"proxy-preamble":        {"Issue": "I", "Persona": "P"},
+	"headless-commit-notes": {},
+	"uat-format":            {"UATCoverage": "C"},
+	"uat-section":           {"Checklist": "- [ ] C"},
+	"uat-feature.md.tmpl":   {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
+	"uat-bug.md.tmpl":       {"Issue": "I", "Base": "main", "UATCoverage": "C"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
 // template ParseFS was seeded with, and the container files whose own bodies
 // are just the whitespace between their {{define}} blocks.
 var skipTemplates = map[string]bool{
-	"prompts":            true,
-	"comments.md.tmpl":   true,
-	"ask-format.md.tmpl": true,
-	"uat-format.md.tmpl": true,
+	"prompts":                       true,
+	"comments.md.tmpl":              true,
+	"ask-format.md.tmpl":            true,
+	"uat-format.md.tmpl":            true,
+	"proxy-preamble.md.tmpl":        true,
+	"headless-commit-notes.md.tmpl": true,
 }
 
 func TestEveryTemplateRenders(t *testing.T) {
@@ -121,6 +125,7 @@ func TestUATFormatBlockCarriesItsRules(t *testing.T) {
 	d["UATCoverage"] = "every behavior the spec describes"
 	got := mustRender("uat-format", d)
 	for _, want := range []string{
+		"Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading",
 		"single flat list",
 		"No headings",
 		"`Action → expected result`",
@@ -154,6 +159,38 @@ func TestBothRoutesShareTheUATFormatBlock(t *testing.T) {
 	bug["UATCoverage"] = "the reported bug and every behavior the fix touches"
 	if block := mustRender("uat-format", bug); !strings.Contains(uatBugPrompt("I", "main"), block) {
 		t.Error("uatBugPrompt does not contain the uat-format block")
+	}
+}
+
+// Both routes must open with the same preamble, from the same source. This is
+// what catches an edit made to one prompt that should have been an edit to
+// the shared block.
+func TestBothRoutesShareTheProxyPreambleBlock(t *testing.T) {
+	d := promptData()
+	d["Issue"] = "I"
+	d["Persona"] = "P"
+	block := mustRender("proxy-preamble", d)
+	if !strings.Contains(answererPrompt("I", "P", "A"), block) {
+		t.Error("answererPrompt does not contain the proxy-preamble block")
+	}
+	if !strings.Contains(doneConfirmPrompt("I", "P", "R"), block) {
+		t.Error("doneConfirmPrompt does not contain the proxy-preamble block")
+	}
+}
+
+// Both routes must carry the same headless-mode instruction, from the same
+// source. This is what catches an edit made to one prompt that should have
+// been an edit to the shared block.
+func TestBothRoutesShareTheHeadlessCommitNotesBlock(t *testing.T) {
+	block := mustRender("headless-commit-notes", promptData())
+	if !strings.Contains(bugPrompt("I", 70), block) {
+		t.Error("bugPrompt(threshold=70) does not contain the headless-commit-notes block")
+	}
+	if !strings.Contains(bugPrompt("I", 0), block) {
+		t.Error("bugPrompt(threshold=0) does not contain the headless-commit-notes block")
+	}
+	if !strings.Contains(executePrompt("docs/plan.md"), block) {
+		t.Error("executePrompt does not contain the headless-commit-notes block")
 	}
 }
 

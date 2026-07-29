@@ -1,4 +1,7 @@
-{{define "uat-format"}}Rules for the checklist:
+{{define "uat-format"}}Output ONLY the checklist, between a line reading {{.UATBeginSentinel}} and a line reading
+{{.UATEndSentinel}}. Print nothing before or after those two lines.
+
+Rules for the checklist:
 - A single flat list of Markdown `- [ ]` checkboxes. No headings, no grouping, no intro line, no closing line.
 - Each item is `Action → expected result`: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
