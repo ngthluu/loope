@@ -9,12 +9,14 @@ import (
 	"time"
 )
 
-// ai-rework is a TERMINAL state: the daemon must not even look at the label. A
-// parked issue moves only when a human removes it, which puts it back in the
-// eligible queue the normal cycle already reads. Retrying failures automatically
-// is what re-ran the whole pipeline on one broken issue every cycle, burning
-// tokens on work nobody was watching.
-func TestDaemonNeverScansOrResumesParkedIssues(t *testing.T) {
+// ai-rework is a TERMINAL state: the daemon must not scan the label or act on
+// a parked issue on its own. It moves only when a human removes it, which puts
+// it back in the eligible queue the normal cycle already reads — that pickup
+// resumes the preserved session instead of scanning/polling ai-rework itself,
+// so this stays a one-shot reaction to the human's own edit, not the
+// every-cycle automatic retry that used to burn tokens on work nobody was
+// watching.
+func TestDaemonNeverScansParkedIssuesButResumesOnceRequeued(t *testing.T) {
 	env := newFakeEnv(t)
 	prepParked(t, env, "claude debug: terminated: api_error; api status 429; You've hit your usage limit")
 	shipped := make(chan struct{}, 1)
@@ -37,7 +39,13 @@ func TestDaemonNeverScansOrResumesParkedIssues(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runLoop(ctx, o, o.cfg, true /* sweep */)
+		// sweep=false: the fake's "issue list" stub answers every query with the
+		// same issue-7 payload regardless of --label, so a startup sweep for
+		// ai-wip would "find" issue 7 and clear the park cause this test set up
+		// before the cycle even runs. Sweeping stale ai-wip is exercised
+		// elsewhere (TestSweepOrphansRequeuesStaleWIP); this test is only about
+		// the pickup that follows a human removing ai-rework.
+		runLoop(ctx, o, o.cfg, false /* sweep */)
 		close(done)
 	}()
 	select {
@@ -55,8 +63,33 @@ func TestDaemonNeverScansOrResumesParkedIssues(t *testing.T) {
 	if got := env.callsMatching("gh", "--label ai-rework"); len(got) != 0 {
 		t.Errorf("a cycle must never scan the rework label, got %v", got)
 	}
-	if got := env.callsMatching("claude", "--resume"); len(got) != 0 {
-		t.Errorf("a cycle must never resume a saved session, got %v", got)
+	if got := env.callsMatching("claude", "--resume s1"); len(got) == 0 {
+		t.Error("the requeued pickup must resume the session prepParked left behind")
+	}
+}
+
+// Reproduces #49: a rework pickup whose resumed session's final reply reads
+// like an already-done claim (plausible — a resumed session mid-implementation
+// looking at its own partially-landed code can sound like that) must still
+// ship a PR from whatever it committed, not close the issue with none.
+func TestReworkPickupShipsEvenWhenReplyLooksAlreadyDone(t *testing.T) {
+	env := newFakeEnv(t)
+	prepParked(t, env, "claude execute: terminated: max_turns")
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "rework pickup") {
+			return claudeJSON("PIPELINE_ALREADY_DONE: this looks finished already", "s2"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatalf("cycle error = %v", err)
+	}
+	if len(env.callsMatching("gh", "pr create")) == 0 {
+		t.Error("a rework pickup must ship a PR even when the resumed reply looks already-done")
+	}
+	if len(env.callsMatching("gh", "issue close")) != 0 {
+		t.Error("a rework pickup must not close the issue as already implemented")
 	}
 }
 

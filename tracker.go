@@ -238,11 +238,12 @@ func clearState(logDir string) {
 	_ = os.Remove(filepath.Join(logDir, stateFile))
 }
 
-// parkCauseFile holds the failure text that parked the issue as ai-rework. It is
-// a diagnostic left next to the logs for whoever inspects the workDir: nothing in
-// the daemon reads it back, because a parked issue only moves when a human
-// removes the label. It is cleared when the issue leaves the parked state, so a
-// stale cause can't outlive the failure it describes.
+// parkCauseFile holds the failure text that parked the issue as ai-rework. It
+// doubles as the on-disk marker handleIssue reads back (via hasParkCause) to
+// tell a rework pickup — a human removed the label, so the issue is eligible
+// again — apart from a genuinely fresh issue. It is cleared when the issue
+// leaves the parked state, so a stale cause can't outlive the failure it
+// describes and can't wrongly mark the issue's next fresh pickup as a rework.
 const parkCauseFile = "park-cause"
 
 // recordParkCause writes the park cause to <logDir>/park-cause. Best-effort,
@@ -263,6 +264,17 @@ func clearParkCause(logDir string) {
 		return
 	}
 	_ = os.Remove(filepath.Join(logDir, parkCauseFile))
+}
+
+// hasParkCause reports whether logDir still carries a park cause, i.e. this
+// issue was parked as ai-rework and never reached a terminal outcome since —
+// the signal handleIssue uses to tell a rework pickup from a fresh one.
+func hasParkCause(logDir string) bool {
+	if logDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(logDir, parkCauseFile))
+	return err == nil
 }
 
 // scanLogs reads cfg.WorkDir/logs and returns one Ticket per issue-<N> dir,

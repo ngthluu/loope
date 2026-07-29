@@ -222,32 +222,58 @@ func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue, limit i
 func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base string) error {
 	n := issue.Number
 	branch := branchName(n)
+	logDir := o.issueLogDir(n)
+	// A park cause still on disk means this issue was parked as ai-rework and a
+	// human just removed the label — the ONLY way it re-enters ListEligibleIssues
+	// from that state. Nothing scans ai-rework or acts on it automatically; this
+	// only fires on the pickup that follows a human's own action. Resolve the
+	// resumable session (and its pipeline kind) before ai-wip overwrites nothing
+	// on disk that readSession needs.
+	resumeSession, resumeKind := "", ""
+	if hasParkCause(logDir) {
+		if si, err := readSession(logDir); err == nil {
+			resumeSession, resumeKind = si.SessionID, si.Kind
+		}
+	}
+	if resumeSession != "" && resumeKind != "" {
+		kind = resumeKind
+	}
+
 	if err := o.gh.AddLabel(ctx, n, o.cfg.StateLabels.WIP); err != nil {
 		return err
 	}
-	recordState(o.issueLogDir(n), o.cfg.StateLabels.WIP)
+	recordState(logDir, o.cfg.StateLabels.WIP)
 	// Mirror the title next to the state marker: the dashboard otherwise knows
 	// it only for as long as the issue keeps matching its label-scoped query.
-	recordTitle(o.issueLogDir(n), issue.Title)
+	recordTitle(logDir, issue.Title)
 	_ = o.gh.Comment(ctx, n, pickupComment(kind, branch))
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
 	if err != nil {
 		return o.abort(ctx, n, err)
 	}
-	content, err := o.gh.FetchIssueContent(ctx, n)
-	if err != nil {
-		return o.abort(ctx, n, err)
-	}
-	content = DownloadIssueImages(ctx, o.runner, content, o.issueLogDir(n))
 
-	c := &Claude{runner: o.runner, logDir: o.issueLogDir(n), configDir: o.cfg.ClaudeConfigDir}
+	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
 	uat := &UAT{Target: o.gh, Num: n}
 	var perr error
-	if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
+	if resumeSession != "" {
+		// A rework pickup resumes the exact prior session in its preserved
+		// worktree instead of fetching the issue content and running a fresh
+		// session — a fresh session only sees the worktree's current contents
+		// and can mistake the partial progress already there for a finished
+		// feature, closing the issue with no PR (the bug this branch fixes).
+		perr = RunResumePipeline(ctx, c, o.cfg, wtPath, kind, resumeSession)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath), uat)
+		content, err := o.gh.FetchIssueContent(ctx, n)
+		if err != nil {
+			return o.abort(ctx, n, err)
+		}
+		content = DownloadIssueImages(ctx, o.runner, content, logDir)
+		if kind == "bug" {
+			perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
+		} else {
+			perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath), uat)
+		}
 	}
 	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
 	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
