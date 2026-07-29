@@ -7,6 +7,8 @@ Decide from the issue text alone — do NOT read the repository. Pick the single
 best issue to work on next and classify it:
 - "bug": a small, well-scoped defect that can be fixed by reproducing and debugging
 - "feature": anything that needs design work (new functionality, refactors, unclear scope)
+If an issue plausibly fits both, classify it "bug" when the fix needs no design
+decision, otherwise "feature".
 
 Respond with ONLY a JSON object, no other text:
 {"issueNumber": <int>, "kind": "bug" or "feature", "reason": "<one sentence>"}
