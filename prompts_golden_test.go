@@ -196,7 +196,7 @@ func TestGoldenNeedsInfoComment(t *testing.T) {
 }
 
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +
-	"Remove the `ai-rework` label to queue a fresh attempt — any worktree, branch and logs this run produced are preserved and reused, so no work is lost."
+	"Remove the `ai-rework` label to resume this run in the same Claude session — the worktree, branch, logs and session are preserved, so nothing is redone from zero."
 
 // parkTail is the hidden marker every status comment ends with, so
 // FetchIssueContent can strip it back out of the next run's issue content.
