@@ -125,6 +125,7 @@ func TestUATFormatBlockCarriesItsRules(t *testing.T) {
 	d["UATCoverage"] = "every behavior the spec describes"
 	got := mustRender("uat-format", d)
 	for _, want := range []string{
+		"Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading",
 		"single flat list",
 		"No headings",
 		"`Action → expected result`",
