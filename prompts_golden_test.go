@@ -21,6 +21,8 @@ written and print CONFIDENCE: <0-100> as the FIRST line of your reply. If that s
 below 70, the issue is too under-specified or ambiguous to implement
 responsibly: do NOT design or write a spec. Instead, list what is missing and
 the specific questions the author must answer, then stop.
+The CONFIDENCE: line comes first even when an instruction below tells you to
+print another sentinel and stop.
 
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
