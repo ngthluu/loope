@@ -253,6 +253,10 @@ func TestGoldenUATFeaturePrompt(t *testing.T) {
 	want := `Read the approved spec at docs/spec.md and write a UAT (user acceptance test)
 checklist for a human who will verify the shipped feature by hand.
 
+Inspect the repository with ` + "`git log`" + ` and ` + "`git diff`" + ` first. If nothing was
+committed, or the shipped changes don't actually implement the spec's
+feature, print nothing at all: no markers, no checklist, no explanation.
+
 Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.
 
