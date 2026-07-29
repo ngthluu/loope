@@ -142,8 +142,7 @@ Write that reply as a short, skimmable list the author can answer in one comment
 - Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
 
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print
@@ -155,8 +154,7 @@ func TestGoldenBugPromptWithoutThreshold(t *testing.T) {
 	want := `/superpowers:systematic-debugging ISSUE BODY
 
 Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
+suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
 
 If, while reproducing, you find the described bug is already fixed or the
 behavior is already correct, do NOT fabricate a change: print
