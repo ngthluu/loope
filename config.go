@@ -92,6 +92,15 @@ func (rc RetryConfig) policy() RetryPolicy {
 	}
 }
 
+// TelemetryConfig opts this daemon in to pushing its status, log tail, and
+// Claude usage to a `loope telemetry-server`. Absent from the config, no
+// exporter goroutine starts and nothing about daemon behavior changes.
+type TelemetryConfig struct {
+	ServerURL       string `json:"serverURL"`
+	Token           string `json:"token"`
+	PushIntervalSec int    `json:"pushIntervalSec"`
+}
+
 type Config struct {
 	RepoPath            string `json:"repoPath"`
 	RepoSlug            string `json:"repoSlug"`
@@ -113,6 +122,9 @@ type Config struct {
 	StateLabels     StateLabels `json:"stateLabels"`
 	GitHubRetry     RetryConfig `json:"githubRetry"`
 	Models          Models      `json:"models"`
+	// Telemetry is nil unless the config file has a "telemetry" block —
+	// participation is opt-in.
+	Telemetry *TelemetryConfig `json:"telemetry"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -140,6 +152,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg.PersonaPath = expandHome(cfg.PersonaPath)
 	cfg.ClaudeConfigDir = expandHome(cfg.ClaudeConfigDir)
+	if cfg.Telemetry != nil && cfg.Telemetry.PushIntervalSec == 0 {
+		cfg.Telemetry.PushIntervalSec = 15
+	}
 	return cfg, nil
 }
 

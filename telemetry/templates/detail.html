@@ -1,0 +1,25 @@
+{{define "tdetail"}}<div class="max-w-[1000px] px-8 py-6">
+{{with .Selected}}
+ <div class="mb-4 flex items-center gap-2">
+  <span class="inline-block h-2.5 w-2.5 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
+  <h1 class="font-mono text-lg font-semibold text-text">{{.Hostname}}</h1>
+  <span class="font-mono text-[11px] text-faint">{{.WorkDir}}</span>
+  <span class="ml-auto font-mono text-[11px] text-faint">v{{.Version}}</span>
+ </div>
+ <dl class="mb-5 grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line bg-line">
+  <div class="bg-panel px-4 py-3">
+   <dt class="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">5-hour usage</dt>
+   {{if .UsageUnknown}}<dd class="mt-1.5 font-mono text-sm text-faint">unknown</dd>
+   {{else}}<dd class="mt-1.5 font-mono text-xl font-semibold tabular-nums text-text">{{printf "%.1f%%" .FiveHourPct}} <span class="text-[11px] font-normal text-faint">resets {{.FiveHourReset.Format "Jan 2 15:04"}}</span></dd>{{end}}
+  </div>
+  <div class="bg-panel px-4 py-3">
+   <dt class="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">7-day usage</dt>
+   {{if .UsageUnknown}}<dd class="mt-1.5 font-mono text-sm text-faint">unknown</dd>
+   {{else}}<dd class="mt-1.5 font-mono text-xl font-semibold tabular-nums text-text">{{printf "%.1f%%" .SevenDayPct}} <span class="text-[11px] font-normal text-faint">resets {{.SevenDayReset.Format "Jan 2 15:04"}}</span></dd>{{end}}
+  </div>
+ </dl>
+ <div class="rounded-md border border-line bg-ink/40 p-3 font-mono text-[11px] leading-relaxed text-muted">
+  {{range .Logs}}<div>{{.}}</div>{{else}}<div class="text-faint">No log lines yet.</div>{{end}}
+ </div>
+{{else}}<div class="flex h-full items-center justify-center py-20 font-mono text-[12px] text-faint">No worker selected.</div>{{end}}
+</div>{{end}}
