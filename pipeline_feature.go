@@ -306,5 +306,20 @@ func planPrompt(specPath string) string {
 func executePrompt(planPath string) string {
 	d := promptData()
 	d["PlanPath"] = planPath
+	d["StepsPerSession"] = 0
 	return mustRender("execute.md.tmpl", d)
+}
+
+// executeGroupPrompt renders the same execute.md.tmpl template as
+// executePrompt, but with StepsPerSession set so the conditional grouped-
+// execution block (and its sentinel instructions) is included.
+func executeGroupPrompt(planPath string, stepsPerSession int) string {
+	d := promptData()
+	d["PlanPath"] = planPath
+	d["StepsPerSession"] = stepsPerSession
+	return mustRender("execute.md.tmpl", d)
+}
+
+func executeContinuePrompt() string {
+	return mustRender("execute-continue.md.tmpl", promptData())
 }
