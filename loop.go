@@ -275,11 +275,11 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	}
 	var done *alreadyDoneError
 	if errors.As(perr, &done) {
-		return o.finishDone(ctx, n, wtPath, branch, done.reason)
+		return o.finishDone(ctx, n, done.reason)
 	}
 	var lowConf *lowConfidenceError
 	if errors.As(perr, &lowConf) {
-		return o.finishNeedsInfo(ctx, n, wtPath, branch, lowConf)
+		return o.finishNeedsInfo(ctx, n, lowConf)
 	}
 	if perr != nil {
 		return o.park(ctx, n, perr)
@@ -288,19 +288,14 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 }
 
 // finishDone closes an issue a pipeline judged already implemented. It runs on
-// the handleIssue path, so ai-wip is already applied and a worktree exists:
-// clean both up, comment the reason, swap WIP->Done, and close the issue. Uses a
-// cancellation-proof context so a Ctrl-C still finishes cleanup and labeling.
+// the handleIssue path, so ai-wip is already applied: comment the reason, swap
+// WIP->Done, and close the issue. The worktree and branch are left in place
+// (never deleted — spec Decision 3), same as every other terminal outcome. Uses
+// a cancellation-proof context so a Ctrl-C still finishes cleanup and labeling.
 // The Done label is swapped in before the close, so even if the close fails the
 // issue is de-queued (hasStateLabel) and won't be re-picked.
-func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, reason string) error {
+func (o *Orchestrator) finishDone(ctx context.Context, n int, reason string) error {
 	cctx := context.WithoutCancel(ctx)
-	if wtPath != "" {
-		_ = o.wt.Remove(cctx, wtPath)
-	}
-	if branch != "" {
-		_ = o.wt.DeleteBranch(cctx, branch)
-	}
 	_ = o.gh.Comment(cctx, n, alreadyDoneComment(reason))
 	if err := o.gh.SwapLabels(cctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Done); err != nil {
 		return fmt.Errorf("issue #%d: already implemented but marking done failed: %w", n, err)
@@ -311,21 +306,16 @@ func (o *Orchestrator) finishDone(ctx context.Context, n int, wtPath, branch, re
 }
 
 // finishNeedsInfo escalates an issue the brainstorm session judged too
-// under-specified to implement. Modeled on finishDone: nothing was built, so
-// remove the worktree and branch, comment the score and the architect's
-// questions, swap WIP->NeedsInfo, and record state. It does NOT close the
-// issue: it waits out of the queue until a human removes the needs-info label,
-// which re-queues it. Returns nil: escalation is a clean terminal outcome, not a
-// pipeline failure. Uses a cancellation-proof context so a Ctrl-C mid-pipeline
-// still records the state.
-func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, wtPath, branch string, lc *lowConfidenceError) error {
+// under-specified to implement. Modeled on finishDone: comment the score and
+// the architect's questions, swap WIP->NeedsInfo, and record state. It does
+// NOT close the issue: it waits out of the queue until a human removes the
+// needs-info label, which re-queues it — into the SAME worktree and branch,
+// left untouched here (never deleted — spec Decision 3), so the answer resumes
+// the paused session instead of starting over. Returns nil: escalation is a
+// clean terminal outcome, not a pipeline failure. Uses a cancellation-proof
+// context so a Ctrl-C mid-pipeline still records the state.
+func (o *Orchestrator) finishNeedsInfo(ctx context.Context, n int, lc *lowConfidenceError) error {
 	cctx := context.WithoutCancel(ctx)
-	if wtPath != "" {
-		_ = o.wt.Remove(cctx, wtPath)
-	}
-	if branch != "" {
-		_ = o.wt.DeleteBranch(cctx, branch)
-	}
 	_ = o.gh.Comment(cctx, n, needsInfoComment(lc.score, o.cfg.StateLabels.NeedsInfo, lc.feedback))
 	if err := o.gh.SwapLabels(cctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.NeedsInfo); err != nil {
 		return fmt.Errorf("issue #%d: low confidence but marking needs-info failed: %w", n, err)
@@ -485,7 +475,10 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // for rework — preserving the worktree, branch, and session, so a human who
 // removes the label gets a run that builds on those commits instead of
 // re-running the whole pipeline from zero. A pipeline that produced no commits
-// also parks. Returns nil only when fully shipped.
+// also parks. The worktree and branch are never removed here either (spec
+// Decision 3): a shipped issue's worktree sits on disk permanently, same as a
+// parked or stopped one already does — an accepted, explicit trade-off with no
+// cleanup mechanism in scope. Returns nil only when fully shipped.
 func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, base, kind string) error {
 	n := issue.Number
 	onInfra := func(err error) error {
@@ -510,13 +503,11 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Done); err != nil {
 		// PR is up but the Done swap failed. Surface it; leave ai-wip in place so
 		// the issue isn't re-run just to retry a label swap (CreatePR is
-		// idempotent). Clean up the worktree regardless.
-		_ = o.wt.Remove(ctx, wtPath)
+		// idempotent).
 		return fmt.Errorf("issue #%d: PR created (%s) but marking done failed: %w", n, url, err)
 	}
 	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
 	clearParkCause(o.issueLogDir(n))
-	_ = o.wt.Remove(ctx, wtPath)
 	return nil
 }
 

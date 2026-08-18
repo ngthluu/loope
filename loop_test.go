@@ -130,9 +130,10 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	if len(env.callsMatching("gh", "--add-label ai-rework")) != 0 {
 		t.Error("needs-info must not park as rework")
 	}
-	// Worktree was created for the pipeline, then removed (no progress to keep).
-	if len(env.callsMatching("git", "worktree remove")) == 0 {
-		t.Error("needs-info path should remove the worktree")
+	// Worktree is preserved (never-delete): a human answering needs-info must
+	// resume into it, not restart from zero.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("needs-info path must preserve the worktree, not remove it")
 	}
 }
 
@@ -200,11 +201,13 @@ func TestProcessOnceHappyPathBug(t *testing.T) {
 		{"gh", "pr create"},
 		{"gh", "--remove-label ai-wip"},
 		{"gh", "--add-label ai-done"},
-		{"git", "worktree remove"},
 	} {
 		if len(env.callsMatching(want.name, want.substr)) == 0 {
 			t.Errorf("missing call %s %q", want.name, want.substr)
 		}
+	}
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("a shipped issue must preserve its worktree, not remove it")
 	}
 	// wip->done swap must be a single atomic gh call, not two separate calls.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
@@ -412,9 +415,9 @@ func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 	if len(env.callsMatching("gh", "issue close")) == 0 {
 		t.Error("done path should close the issue")
 	}
-	// Worktree was created for the pipeline, then cleaned up.
-	if len(env.callsMatching("git", "worktree remove")) == 0 {
-		t.Error("done path should remove the worktree")
+	// Worktree is preserved (never-delete), even for a closed/already-done issue.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("already-done path must preserve the worktree, not remove it")
 	}
 	// It must not ship anything.
 	if len(env.callsMatching("gh", "pr create")) != 0 {
@@ -1093,5 +1096,25 @@ func TestHandleIssueNoSessionUsesFreshPath(t *testing.T) {
 		if call.name == "claude" && argAfter(call.args, "--resume") != "" {
 			t.Errorf("a first-ever attempt must never use --resume, got call: %+v", call)
 		}
+	}
+}
+
+// TestFinishDoneAndNeedsInfoPreserveBranch is a direct regression test for the
+// spec's "never delete" rule: finishDone and finishNeedsInfo must not delete
+// the branch any more than they delete the worktree.
+func TestFinishDoneAndNeedsInfoPreserveBranch(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && !strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("git", "branch -D")) != 0 {
+		t.Error("finishDone must not delete the branch")
 	}
 }
