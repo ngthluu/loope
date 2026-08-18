@@ -307,3 +307,42 @@ func TestLoadConfigUATDoesNotInheritFromArchitect(t *testing.T) {
 		t.Errorf("Models.UAT = %+v, want the zero value — uat must not inherit from architect", cfg.Models.UAT)
 	}
 }
+
+func TestLoadConfigTelemetryAbsentByDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath":"/r","repoSlug":"o/r","workDir":"/w"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telemetry != nil {
+		t.Fatalf("Telemetry = %+v, want nil when the block is absent", cfg.Telemetry)
+	}
+}
+
+func TestLoadConfigTelemetryPushIntervalDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath":"/r","repoSlug":"o/r","workDir":"/w","telemetry":{"serverURL":"http://host:9090","token":"secret"}}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telemetry == nil {
+		t.Fatal("Telemetry = nil, want a populated block")
+	}
+	if cfg.Telemetry.PushIntervalSec != 15 {
+		t.Fatalf("PushIntervalSec = %d, want the 15s default", cfg.Telemetry.PushIntervalSec)
+	}
+	if cfg.Telemetry.ServerURL != "http://host:9090" || cfg.Telemetry.Token != "secret" {
+		t.Fatalf("Telemetry = %+v", cfg.Telemetry)
+	}
+}
+
+func TestLoadConfigTelemetryPushIntervalOverride(t *testing.T) {
+	p := writeTemp(t, `{"repoPath":"/r","repoSlug":"o/r","workDir":"/w","telemetry":{"serverURL":"http://host:9090","token":"secret","pushIntervalSec":30}}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telemetry.PushIntervalSec != 30 {
+		t.Fatalf("PushIntervalSec = %d, want 30", cfg.Telemetry.PushIntervalSec)
+	}
+}

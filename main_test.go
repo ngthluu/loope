@@ -156,3 +156,33 @@ func TestResolveMode(t *testing.T) {
 		}
 	}
 }
+
+func TestDispatchSubcommandTelemetryServerRequiresToken(t *testing.T) {
+	code, handled := dispatchSubcommand([]string{"loope", "telemetry-server"}, strings.NewReader(""))
+	if !handled {
+		t.Fatal("expected telemetry-server to be handled")
+	}
+	if code != 2 {
+		t.Fatalf("code = %d, want 2 (missing -token)", code)
+	}
+}
+
+func TestDispatchSubcommandClaudeUsageHook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	input := `{"rate_limits":{"five_hour":{"used_percentage":10},"seven_day":{"used_percentage":20}}}`
+	code, handled := dispatchSubcommand([]string{"loope", "claude-usage-hook"}, strings.NewReader(input))
+	if !handled {
+		t.Fatal("expected claude-usage-hook to be handled")
+	}
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+}
+
+func TestDispatchSubcommandFallsThroughForDaemonInvocation(t *testing.T) {
+	for _, args := range [][]string{{"loope"}, {"loope", "--config", "x.json"}, {"loope", "--version"}} {
+		if _, handled := dispatchSubcommand(args, strings.NewReader("")); handled {
+			t.Fatalf("args %v: expected handled=false", args)
+		}
+	}
+}

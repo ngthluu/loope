@@ -1,0 +1,17 @@
+{{define "trail"}}<div class="p-3">
+{{range .Groups}}
+ <div class="mb-4">
+  <div class="mb-1.5 px-1 font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-faint">{{.RepoSlug}}</div>
+  {{range .Workers}}
+   <a href="?worker={{.MachineID}}" hx-get="/detail?worker={{.MachineID}}" hx-target="#main" hx-swap="morph:innerHTML"
+      class="mb-1 flex items-center gap-2 rounded border border-line2 bg-panel2 px-2.5 py-2 font-mono text-[11px] text-text hover:border-live/40">
+    <span class="inline-block h-2 w-2 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
+    <span class="truncate">{{.Hostname}}</span>
+    {{if .UsageUnknown}}<span class="ml-auto text-faint">usage: unknown</span>{{else}}<span class="ml-auto tabular-nums">{{printf "%.0f%%" .FiveHourPct}} / 5h</span>{{end}}
+   </a>
+  {{end}}
+ </div>
+{{else}}
+ <div class="p-4 font-mono text-[12px] text-faint">No workers have reported yet.</div>
+{{end}}
+</div>{{end}}
