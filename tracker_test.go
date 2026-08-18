@@ -452,6 +452,21 @@ func TestRecordPRWritesFile(t *testing.T) {
 	recordPR(dir, "")
 }
 
+func TestHasPRRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if hasPR(dir) {
+		t.Error("no pr file recorded yet: hasPR should be false")
+	}
+	recordPR(dir, "https://github.com/o/r/pull/3")
+	if !hasPR(dir) {
+		t.Error("pr file recorded: hasPR should be true")
+	}
+	// Matches the other readers: an empty logDir is never mistaken for "has a PR".
+	if hasPR("") {
+		t.Error("empty logDir should never report hasPR")
+	}
+}
+
 func TestParkCauseRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "issue-7")
 	if got := readParkCause(dir); got != "" {
