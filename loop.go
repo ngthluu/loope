@@ -222,13 +222,19 @@ func (o *Orchestrator) selectIssues(ctx context.Context, issues []Issue, limit i
 func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base string) error {
 	n := issue.Number
 	branch := branchName(n)
+	logDir := o.issueLogDir(n)
+	// Captured BEFORE recordState below overwrites it with ai-wip: this is the
+	// state the issue was in immediately prior to this re-entry (e.g.
+	// ai-needs-info, if a human's answer is what re-queued it), which decides
+	// the resume-prompt strategy a few lines down.
+	priorState := readState(logDir)
 	if err := o.gh.AddLabel(ctx, n, o.cfg.StateLabels.WIP); err != nil {
 		return err
 	}
-	recordState(o.issueLogDir(n), o.cfg.StateLabels.WIP)
+	recordState(logDir, o.cfg.StateLabels.WIP)
 	// Mirror the title next to the state marker: the dashboard otherwise knows
 	// it only for as long as the issue keeps matching its label-scoped query.
-	recordTitle(o.issueLogDir(n), issue.Title)
+	recordTitle(logDir, issue.Title)
 	_ = o.gh.Comment(ctx, n, pickupComment(kind, branch))
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
@@ -239,15 +245,27 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	if err != nil {
 		return o.abort(ctx, n, err)
 	}
-	content = DownloadIssueImages(ctx, o.runner, content, o.issueLogDir(n))
+	content = DownloadIssueImages(ctx, o.runner, content, logDir)
 
-	c := &Claude{runner: o.runner, logDir: o.issueLogDir(n), configDir: o.cfg.ClaudeConfigDir}
+	c := &Claude{runner: o.runner, logDir: logDir, configDir: o.cfg.ClaudeConfigDir}
 	uat := &UAT{Target: o.gh, Num: n}
+	persona := readPersona(o.cfg.PersonaPath)
 	var perr error
-	if kind == "bug" {
+	if session, ok := loadResumableSession(logDir); ok {
+		// A session already exists for this ticket's worktree — every re-entry
+		// trigger (rework removed, needs-info answered, dashboard Continue, a
+		// daemon-restart requeue via SweepOrphans) converges on this same check,
+		// so there is no separate code path per trigger (spec §1).
+		prompt := resumePrompt(logDir, priorState, o.cfg.StateLabels.NeedsInfo, content)
+		if session.Kind == "bug" {
+			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, session, prompt)
+		} else {
+			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, session, prompt)
+		}
+	} else if kind == "bug" {
 		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, readPersona(o.cfg.PersonaPath), uat)
+		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat)
 	}
 	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
 	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause

@@ -973,3 +973,125 @@ func TestStopFlagConsumedWhenPipelinePanics(t *testing.T) {
 		t.Fatalf("local state = %q, want ai-rework (parked after panic)", got)
 	}
 }
+
+// TestHandleIssueResumesPersistedFeatureSession simulates a rework-then-removed
+// re-entry: a first cycle parks the issue with a recorded brainstorm session,
+// then a second cycle (the label removed, same worktree/logs preserved) must
+// call the architect with --resume and prompt "continue" instead of
+// brainstorm-0.
+func TestHandleIssueResumesPersistedFeatureSession(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "brainstorming") {
+			// First (fresh) attempt fails outright (e.g. a session-limit 429) but
+			// still returns a session id, so the issue parks with a recorded
+			// session and the worktree preserved.
+			return claudeErrorJSON("session limit hit", "arch-sess"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	if err := runCycle(o); err != nil {
+		t.Fatalf("park is a clean cycle outcome, got %v", err)
+	}
+	if len(env.callsMatching("gh", "--add-label ai-rework")) == 0 {
+		t.Fatal("setup: first attempt must park as ai-rework")
+	}
+
+	// Second cycle: the architect now resumes instead of failing, and the fake
+	// triage still returns the same issue as eligible (no state-label filtering
+	// in this harness, mirroring "label removed -> eligible again").
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "resumed"}`, "t1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var resumed bool
+	for _, call := range env.f.calls {
+		if call.name == "claude" && call.stdin == "continue" && argAfter(call.args, "--resume") != "" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Error("second attempt must resume the architect session with --resume and prompt \"continue\", not restart brainstorm-0")
+	}
+	// The park-then-resume cycle must never have deleted the worktree.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("resuming must never have deleted the worktree along the way")
+	}
+}
+
+// TestHandleIssueResumesWithDiffAfterNeedsInfo simulates the ai-needs-info
+// answered trigger: the first cycle escalates to needs-info (recording the
+// snapshot and a brainstorm session); the second cycle, with a new human
+// comment in the fetched issue content, must resume with a prompt containing
+// the diffed comment, not the bare literal "continue".
+func TestHandleIssueResumesWithDiffAfterNeedsInfo(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "brainstorming") {
+			return claudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	o.cfg.ConfidenceThreshold = 70
+	if err := runCycle(o); err != nil {
+		t.Fatalf("needs-info is a clean outcome, want nil error, got %v", err)
+	}
+
+	// Second cycle: the issue now carries a human's answer in its comments, and
+	// the architect resumes instead of scoring low again.
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue view") {
+			return `{"title": "Fix crash", "body": "boom", "comments": [{"author": {"login": "alice"}, "body": "export should include CSV rows only"}]}`, "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "answered"}`, "t1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var diffPrompt string
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") == "arch-1" {
+			diffPrompt = call.stdin
+		}
+	}
+	if diffPrompt == "" {
+		t.Fatal("want a resumed architect call with --resume arch-1")
+	}
+	if diffPrompt == "continue" || !strings.Contains(diffPrompt, "export should include CSV rows only") {
+		t.Errorf("resume prompt = %q, want the diffed new comment, not a bare continue", diffPrompt)
+	}
+}
+
+// TestHandleIssueNoSessionUsesFreshPath is the control: an issue with no
+// session file at all (first-ever attempt) must call brainstorm-0/debug
+// exactly as today, with no --resume anywhere.
+func TestHandleIssueNoSessionUsesFreshPath(t *testing.T) {
+	env := newFakeEnv(t)
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") != "" {
+			t.Errorf("a first-ever attempt must never use --resume, got call: %+v", call)
+		}
+	}
+}
