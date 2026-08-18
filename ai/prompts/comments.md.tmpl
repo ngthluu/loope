@@ -47,3 +47,8 @@ Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in thi
 ## 🤖 UAT checklist
 
 {{.Checklist}}{{end}}
+
+{{define "codereview-comment"}}<!-- loope:codereview:{{.Round}} -->
+🤖 Code review round {{.Round}}/{{.Rounds}}: {{.Status}}
+
+{{.Summary}}{{end}}

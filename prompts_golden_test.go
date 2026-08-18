@@ -294,3 +294,22 @@ Rules for the checklist:
 - Do not modify, create, or commit any file.`
 	check(t, "uatBugPrompt", uatBugPrompt("ISSUE BODY", "main"), want)
 }
+
+func TestGoldenCodeReviewPrompt(t *testing.T) {
+	want := `Run /code-review against origin/main...HEAD with --fix applied (round 1 of 2), then commit any changes it makes.
+
+Output ONLY a status line and summary between a line reading CODEREVIEW_BEGIN and a line reading
+CODEREVIEW_END. Print nothing before or after those two lines. The
+first line between them is one of:
+- STATUS: clean — /code-review found nothing to fix.
+- STATUS: fixed — followed by a short bullet summary of what was fixed.
+- STATUS: blocked — followed by a short explanation of what can't be safely auto-fixed.
+
+HEADLESS MODE: do not ask questions; make reasonable calls.`
+	check(t, "codeReviewPrompt", codeReviewPrompt(1, 2, "main"), want)
+}
+
+func TestGoldenCodeReviewComment(t *testing.T) {
+	check(t, "codeReviewComment", codeReviewComment(1, 2, codeReviewFixed, "- Fixed a null check."),
+		"<!-- loope:codereview:1 -->\n🤖 Code review round 1/2: fixed\n\n- Fixed a null check.")
+}
