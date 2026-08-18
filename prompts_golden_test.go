@@ -25,6 +25,7 @@ the specific questions the author must answer, then stop.
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
 - Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
 - Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
 - At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
 - Under 200 words total.
@@ -136,6 +137,7 @@ print another sentinel and stop.
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
 - Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
 - Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
 - At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
 - Under 200 words total.

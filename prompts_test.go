@@ -81,6 +81,7 @@ func TestAskFormatBlockCarriesItsRules(t *testing.T) {
 	got := mustRender("ask-format", promptData())
 	for _, want := range []string{
 		"numbered list of questions",
+		"Write each question in short, plain sentences",
 		"At most 5 questions",
 		"MERGE related gaps",
 		"Under 200 words",
