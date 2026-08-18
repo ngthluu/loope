@@ -284,7 +284,7 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	if perr != nil {
 		return o.park(ctx, n, perr)
 	}
-	return o.ship(ctx, issue, wtPath, branch, base, kind)
+	return o.ship(ctx, issue, c, wtPath, branch, base, kind)
 }
 
 // finishDone closes an issue a pipeline judged already implemented. It runs on
@@ -469,17 +469,20 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 	return nil
 }
 
-// ship pushes the branch, opens (or recovers) the PR, comments the URL, and
-// swaps WIP->Done. A deterministic tooling failure here (commit count, push, PR
-// create) happens AFTER the pipeline has already produced commits, so it parks
-// for rework — preserving the worktree, branch, and session, so a human who
-// removes the label gets a run that builds on those commits instead of
-// re-running the whole pipeline from zero. A pipeline that produced no commits
-// also parks. The worktree and branch are never removed here either (spec
-// Decision 3): a shipped issue's worktree sits on disk permanently, same as a
-// parked or stopped one already does — an accepted, explicit trade-off with no
-// cleanup mechanism in scope. Returns nil only when fully shipped.
-func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, base, kind string) error {
+// ship pushes the branch, opens (or recovers) the PR, comments the URL, runs
+// the optional post-ship code review loop, and swaps WIP->Done. A
+// deterministic tooling failure here (commit count, push, PR create) happens
+// AFTER the pipeline has already produced commits, so it parks for rework —
+// preserving the worktree, branch, and session, so a human who removes the
+// label gets a run that builds on those commits instead of re-running the
+// whole pipeline from zero. A pipeline that produced no commits also parks.
+// The worktree and branch are never removed here either (spec Decision 3): a
+// shipped issue's worktree sits on disk permanently, same as a parked or
+// stopped one already does — an accepted, explicit trade-off with no cleanup
+// mechanism in scope. The code review loop's own errors are logged, never
+// propagated: it is a quality pass layered on top of a successful ship, not a
+// gate on it. Returns nil only when fully shipped.
+func (o *Orchestrator) ship(ctx context.Context, issue Issue, c *Claude, wtPath, branch, base, kind string) error {
 	n := issue.Number
 	onInfra := func(err error) error {
 		return o.park(ctx, n, err)
@@ -500,6 +503,12 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, wtPath, branch, ba
 	}
 	_ = o.gh.Comment(ctx, n, prComment(url))
 	recordPR(o.issueLogDir(n), url)
+	cr := &CodeReview{Target: o.gh, Push: o.wt.Push, Num: n}
+	if err := cr.Run(ctx, c, o.cfg, wtPath, branch, base, o.issueLogDir(n)); err != nil {
+		// The review loop's own errors never revert or re-park a successful
+		// ship — it is a quality pass layered on top, not a gate on shipping.
+		log.Printf("issue #%d: code review loop error: %v", n, err)
+	}
 	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Done); err != nil {
 		// PR is up but the Done swap failed. Surface it; leave ai-wip in place so
 		// the issue isn't re-run just to retry a label swap (CreatePR is
