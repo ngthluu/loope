@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
-// ai-rework is a TERMINAL state: the daemon must not even look at the label. A
-// parked issue moves only when a human removes it, which puts it back in the
-// eligible queue the normal cycle already reads. Retrying failures automatically
-// is what re-ran the whole pipeline on one broken issue every cycle, burning
-// tokens on work nobody was watching.
+// ai-rework is a TERMINAL state: the daemon must not even look at the label —
+// a parked issue moves only when a human removes it, which puts it back in the
+// eligible queue the normal cycle already reads. Once it's back in that queue,
+// though, a recorded session must resume rather than restart the whole
+// pipeline from scratch (that repeated-from-zero behavior is what used to burn
+// tokens on work nobody was watching; resuming in place is the fix, not a
+// regression of this guarantee).
 func TestDaemonNeverScansOrResumesParkedIssues(t *testing.T) {
 	env := newFakeEnv(t)
 	prepParked(t, env, "claude debug: terminated: api_error; api status 429; You've hit your usage limit")
@@ -55,8 +57,10 @@ func TestDaemonNeverScansOrResumesParkedIssues(t *testing.T) {
 	if got := env.callsMatching("gh", "--label ai-rework"); len(got) != 0 {
 		t.Errorf("a cycle must never scan the rework label, got %v", got)
 	}
-	if got := env.callsMatching("claude", "--resume"); len(got) != 0 {
-		t.Errorf("a cycle must never resume a saved session, got %v", got)
+	// Once back in the eligible queue (a human removed ai-rework), the
+	// pre-existing session must resume instead of restarting from brainstorm-0.
+	if got := env.callsMatching("claude", "--resume"); len(got) == 0 {
+		t.Error("a re-queued issue with a recorded session must resume it, not restart the pipeline")
 	}
 }
 

@@ -236,25 +236,39 @@ func (c *Claude) writeLog(seq int, label, ext, content string) {
 const sessionFile = "session"
 
 // SessionInfo is persisted to <logDir>/session so the dashboard can show which
-// Claude session did the work. It holds the latest primary session for the issue.
+// Claude session did the work, and so a re-entry into the pipeline can resume
+// it. It holds the latest primary session for the issue and the pipeline stage
+// that session belongs to.
 type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	Kind      string `json:"kind"`
+	Stage     string `json:"stage"`
 }
 
-// RecordSession writes the latest primary working session id (and pipeline kind)
-// for this issue to <logDir>/session. Best-effort, like the other log-writers:
-// a no-op when logDir or id is empty, so an ephemeral answerer call (empty here
-// because callers only invoke it for architect/debug/execute sessions) or a
-// logless Claude never clobbers a recorded session.
-func (c *Claude) RecordSession(id, kind string) {
+// Recognized SessionInfo.Stage values — the pipeline entry point a persisted
+// session resumes into. Every recorded stage is a real Claude.Call site with a
+// natural resume point (see Resume*Pipeline); there is no stage with none.
+const (
+	stageBrainstorm = "brainstorm"
+	stagePlan       = "plan"
+	stageExecute    = "execute"
+	stageDebug      = "debug"
+)
+
+// RecordSession writes the latest primary working session id, pipeline kind,
+// and pipeline stage for this issue to <logDir>/session. Best-effort, like the
+// other log-writers: a no-op when logDir or id is empty, so an ephemeral
+// answerer call (empty here because callers only invoke it for
+// architect/debug/execute sessions) or a logless Claude never clobbers a
+// recorded session.
+func (c *Claude) RecordSession(id, kind, stage string) {
 	if c.logDir == "" || id == "" {
 		return
 	}
 	if err := os.MkdirAll(c.logDir, 0o755); err != nil {
 		return
 	}
-	b, err := json.Marshal(SessionInfo{SessionID: id, Kind: kind})
+	b, err := json.Marshal(SessionInfo{SessionID: id, Kind: kind, Stage: stage})
 	if err != nil {
 		return
 	}
@@ -272,6 +286,34 @@ func readSession(logDir string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	return s, nil
+}
+
+// snapshotFile holds the exact issue content (title + body + non-bot comments,
+// as FetchIssueContent produces it) the pipeline last read. It lets a resumed
+// session's prompt be built from what's NEW since the paused session saw the
+// issue, rather than a bare "continue" — see resumePrompt in resume.go.
+const snapshotFile = "issue-snapshot"
+
+// RecordSnapshot writes the issue content this call site read to
+// <logDir>/issue-snapshot, overwriting whatever was there. Best-effort, like
+// RecordSession: a no-op on an empty logDir or content.
+func (c *Claude) RecordSnapshot(content string) {
+	if c.logDir == "" || content == "" {
+		return
+	}
+	if err := os.MkdirAll(c.logDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(c.logDir, snapshotFile), []byte(content), 0o644)
+}
+
+// readSnapshot reads the issue content written by RecordSnapshot from logDir.
+func readSnapshot(logDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(logDir, snapshotFile))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // parseStreamResult extracts the terminal result event from a stream-json

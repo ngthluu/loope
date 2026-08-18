@@ -302,23 +302,23 @@ func TestTail(t *testing.T) {
 func TestRecordAndReadSession(t *testing.T) {
 	dir := t.TempDir()
 	c := &Claude{logDir: dir}
-	c.RecordSession("sess-123", "feature")
+	c.RecordSession("sess-123", "feature", "brainstorm")
 
 	si, err := readSession(dir)
 	if err != nil {
 		t.Fatalf("readSession: %v", err)
 	}
-	if si.SessionID != "sess-123" || si.Kind != "feature" {
-		t.Errorf("session = %+v, want sess-123/feature", si)
+	if si.SessionID != "sess-123" || si.Kind != "feature" || si.Stage != "brainstorm" {
+		t.Errorf("session = %+v, want sess-123/feature/brainstorm", si)
 	}
 }
 
 func TestRecordSessionOverwritesAndSkipsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	c := &Claude{logDir: dir}
-	c.RecordSession("first", "bug")
-	c.RecordSession("", "bug") // empty id must not overwrite
-	c.RecordSession("second", "bug")
+	c.RecordSession("first", "bug", "debug")
+	c.RecordSession("", "bug", "debug") // empty id must not overwrite
+	c.RecordSession("second", "bug", "debug")
 
 	si, err := readSession(dir)
 	if err != nil {
@@ -332,6 +332,36 @@ func TestRecordSessionOverwritesAndSkipsEmpty(t *testing.T) {
 func TestReadSessionMissing(t *testing.T) {
 	if _, err := readSession(t.TempDir()); err == nil {
 		t.Error("want error reading a missing session file")
+	}
+}
+
+func TestRecordAndReadSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	c := &Claude{logDir: dir}
+	c.RecordSnapshot("# Title (#7)\n\nbody text\n")
+
+	got, err := readSnapshot(dir)
+	if err != nil {
+		t.Fatalf("readSnapshot: %v", err)
+	}
+	if got != "# Title (#7)\n\nbody text\n" {
+		t.Errorf("snapshot = %q", got)
+	}
+}
+
+func TestRecordSnapshotSkipsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	c := &Claude{logDir: dir}
+	c.RecordSnapshot("first")
+	c.RecordSnapshot("") // empty content must not overwrite
+	if got, _ := readSnapshot(dir); got != "first" {
+		t.Errorf("snapshot = %q, want first", got)
+	}
+}
+
+func TestReadSnapshotMissing(t *testing.T) {
+	if _, err := readSnapshot(t.TempDir()); err == nil {
+		t.Error("want error reading a missing snapshot file")
 	}
 }
 

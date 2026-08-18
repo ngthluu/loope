@@ -675,3 +675,18 @@ func TestStatusRank(t *testing.T) {
 		}
 	}
 }
+
+func TestReadState(t *testing.T) {
+	dir := t.TempDir()
+	if got := readState(dir); got != "" {
+		t.Errorf("readState on an empty dir = %q, want empty", got)
+	}
+	recordState(dir, "ai-needs-info")
+	if got := readState(dir); got != "ai-needs-info" {
+		t.Errorf("readState = %q, want ai-needs-info", got)
+	}
+	clearState(dir)
+	if got := readState(dir); got != "" {
+		t.Errorf("readState after clearState = %q, want empty", got)
+	}
+}

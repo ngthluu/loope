@@ -36,11 +36,12 @@ already carries it — in a comment, or in the body, where older versions
 published — is never given a second checklist, so a re-queued run leaves the
 first one in place.
 
-The checklist itself is a single flat list of `- [ ]` items — no group headings —
-each written as `Action → expected result` in 15 words or fewer, so the whole
-verification pass fits on one screen. Both routes render the same rules from
-`ai/prompts/uat-format.md.tmpl`; brevity is a prompt rule, not a length cap in
-code, and coverage is never traded for it.
+The checklist is grouped into exactly two headings, `### Happy path` then
+`### Edge cases` — a group with no items is omitted, never invented — with
+each item written as `Action → expected result` in 15 words or fewer, so the
+whole verification pass fits on one screen. Both routes render the same rules
+from `ai/prompts/uat-format.md.tmpl`; brevity is a prompt rule, not a length
+cap in code, and coverage is never traded for it.
 
 The step is deliberately non-blocking. It runs in its own ephemeral session
 (`models.uat`, no inheritance from `architect`) with `Write`, `Edit` and

@@ -25,6 +25,7 @@ the specific questions the author must answer, then stop.
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
 - Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
 - Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
 - At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
 - Under 200 words total.
@@ -163,6 +164,7 @@ print another sentinel and stop.
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
 - Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
+- Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
 - Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
 - At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
 - Under 200 words total.
@@ -286,7 +288,7 @@ Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
-- A single flat list of Markdown ` + "`- [ ]`" + ` checkboxes. No headings, no grouping, no intro line, no closing line.
+- Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
 - Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
 - One item per behavior. Cover every behavior the spec describes, including its error and edge cases, but do not invent scope beyond it.
@@ -311,7 +313,7 @@ Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
 UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
-- A single flat list of Markdown ` + "`- [ ]`" + ` checkboxes. No headings, no grouping, no intro line, no closing line.
+- Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
 - Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
 - One item per behavior. Cover the reported bug and every behavior the fix touches, including its error and edge cases, but do not invent scope beyond it.

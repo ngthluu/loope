@@ -464,8 +464,8 @@ func TestFeaturePipelineRecordsExecuteSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session not recorded: %v", err)
 	}
-	if si.SessionID != "execute-sess" || si.Kind != "feature" {
-		t.Errorf("session = %+v, want execute-sess/feature (latest primary session)", si)
+	if si.SessionID != "execute-sess" || si.Kind != "feature" || si.Stage != stageExecute {
+		t.Errorf("session = %+v, want execute-sess/feature/execute (latest primary session)", si)
 	}
 }
 
@@ -484,8 +484,8 @@ func TestFeaturePipelineRecordsSessionOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("architect session must be recorded even when its call errors: %v", err)
 	}
-	if si.SessionID != "arch-429" || si.Kind != "feature" {
-		t.Errorf("session = %+v, want arch-429/feature", si)
+	if si.SessionID != "arch-429" || si.Kind != "feature" || si.Stage != stageBrainstorm {
+		t.Errorf("session = %+v, want arch-429/feature/brainstorm", si)
 	}
 }
 
@@ -869,5 +869,129 @@ func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 	}
 	if seen["plan"] != 1 || seen["execute"] != 1 {
 		t.Errorf("sessions = %v, want the pipeline to have run plan and execute anyway", seen)
+	}
+}
+
+// TestResumeFeaturePipelineBrainstormStage resumes an architect session with
+// --resume and the trigger prompt instead of calling brainstorm-0, then
+// continues through the ordinary round loop to a fresh plan+execute.
+func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case c.stdin == "continue":
+			if c.args[len(c.args)-1] != "arch-sess" {
+				// --resume <id> is always the last two args; spot-check via ClaudeCall instead below.
+			}
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
+		case strings.Contains(c.stdin, "writing-plans"):
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+		default: // execute
+			return claudeJSON("executed", "execute-sess"), "", nil
+		}
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := featureConfig()
+	session := SessionInfo{SessionID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	// The resumed architect call must carry --resume arch-sess and prompt "continue".
+	found := false
+	for _, call := range f.calls {
+		if call.name == "claude" && call.stdin == "continue" && argAfter(call.args, "--resume") == "arch-sess" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("want a claude call with --resume arch-sess and prompt \"continue\"")
+	}
+	si, err := readSession(logDir)
+	if err != nil || si.SessionID != "execute-sess" || si.Stage != stageExecute {
+		t.Errorf("session = %+v, err = %v, want execute-sess/execute after resuming through to execute", si, err)
+	}
+}
+
+// TestResumeFeaturePipelinePlanStage resumes the plan session directly,
+// skipping brainstorm entirely, then runs execute fresh.
+func TestResumeFeaturePipelinePlanStage(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if argAfter(c.args, "--resume") == "plan-sess" {
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-sess-2"), "", nil
+		}
+		return claudeJSON("executed", "execute-sess"), "", nil
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := featureConfig()
+	session := SessionInfo{SessionID: "plan-sess", Kind: "feature", Stage: stagePlan}
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	si, err := readSession(logDir)
+	if err != nil || si.Stage != stageExecute {
+		t.Errorf("session = %+v, err = %v, want stage execute", si, err)
+	}
+}
+
+// TestResumeFeaturePipelineExecuteStage resumes the execute session directly
+// with the trigger prompt.
+func TestResumeFeaturePipelineExecuteStage(t *testing.T) {
+	logDir := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if argAfter(c.args, "--resume") == "exec-sess" && c.stdin == "continue" {
+			return claudeJSON("executed more", "exec-sess-2"), "", nil
+		}
+		return "", "unexpected call", fmt.Errorf("unexpected call: %+v", c)
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := featureConfig()
+	session := SessionInfo{SessionID: "exec-sess", Kind: "feature", Stage: stageExecute}
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	si, err := readSession(logDir)
+	if err != nil || si.SessionID != "exec-sess-2" || si.Stage != stageExecute {
+		t.Errorf("session = %+v, err = %v, want exec-sess-2/execute", si, err)
+	}
+}
+
+// TestResumeFeaturePipelineUnknownStageFallsBackToFresh is the safety net: a
+// stage value that isn't one of the three known ones re-enters at brainstorm-0
+// exactly like a fresh pipeline, rather than erroring.
+func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "brainstorming"):
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "fresh-arch"), "", nil
+		case strings.Contains(c.stdin, "writing-plans"):
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+		default:
+			return claudeJSON("executed", "execute-sess"), "", nil
+		}
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := featureConfig()
+	session := SessionInfo{SessionID: "stale-sess", Kind: "feature", Stage: "bogus"}
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh brainstorm-0 call must have fired with no --resume.
+	for _, call := range f.calls {
+		if call.name == "claude" && strings.Contains(call.stdin, "brainstorming") && argAfter(call.args, "--resume") != "" {
+			t.Error("unknown stage must fall back to a FRESH brainstorm-0 call, not resume the stale session")
+		}
 	}
 }

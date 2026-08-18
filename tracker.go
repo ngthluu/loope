@@ -196,6 +196,18 @@ func recordState(logDir, label string) {
 	_ = os.WriteFile(filepath.Join(logDir, stateFile), []byte(label), 0o644)
 }
 
+// readState returns the issue's local state marker (e.g. "ai-needs-info"), or
+// "" if none is recorded. Used by handleIssue to learn what state an issue was
+// last in — and so which resume-prompt strategy applies (spec §4) — BEFORE it
+// overwrites the marker with ai-wip for the new attempt.
+func readState(logDir string) string {
+	b, err := os.ReadFile(filepath.Join(logDir, stateFile))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // titleFile holds the issue's GitHub title, mirrored to disk the moment the
 // loop (or the dashboard) learns it. Without it the title lives only in the
 // label-scoped `gh issue list` the dashboard runs, so any issue that drops out

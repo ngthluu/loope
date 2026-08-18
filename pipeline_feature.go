@@ -33,35 +33,70 @@ const planCompleteSentinel = "PLAN_COMPLETE"
 // non-blocking UAT step publishes a human-verifiable checklist onto the issue.
 func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT) error {
 	start := time.Now()
-	architect := func(label, prompt, resume string) (*ClaudeResult, error) {
-		return c.Call(ctx, ClaudeCall{
-			Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
-			Model:           cfg.Models.Architect,
-			SkipPermissions: true,
-			DisallowedTools: []string{"AskUserQuestion"},
-		})
-	}
-
-	res, err := architect("brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
+	res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
 	// Record before the error check: an errored call (e.g. a 429 session limit)
 	// still returns a session id, and the dashboard shows it on the parked ticket.
 	if res != nil {
-		c.RecordSession(res.SessionID, "feature")
+		c.RecordSession(res.SessionID, "feature", stageBrainstorm)
+		c.RecordSnapshot(issueContent)
 	}
 	if err != nil {
 		return err
 	}
-	session := res.SessionID
-	output := res.Result
 
 	// Upfront confidence gate: judged once, on the first brainstorm turn only.
 	// A threshold <= 0 disables it. Fail open on an unparseable score.
 	if cfg.ConfidenceThreshold > 0 {
-		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(output)}
+		if score, ok := parseConfidence(res.Result); ok && score < cfg.ConfidenceThreshold {
+			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(res.Result)}
 		}
 	}
+	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start)
+}
 
+// ResumeFeaturePipeline re-enters a persisted feature-pipeline session at its
+// recorded stage, with --resume and the trigger prompt (spec §2), instead of
+// starting a fresh brainstorm-0. An unrecognized stage — the only case with no
+// natural resume point, expected to never happen in practice — falls back to a
+// fully fresh RunFeaturePipeline as a safety net.
+func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, session SessionInfo, prompt string) error {
+	start := time.Now()
+	switch session.Stage {
+	case stagePlan:
+		return runPlanThenExecute(ctx, c, cfg, wtPath, prompt, session.SessionID, start)
+	case stageExecute:
+		return resumeExecutePlan(ctx, c, cfg, wtPath, prompt, session.SessionID)
+	case stageBrainstorm:
+		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", prompt, session.SessionID)
+		if res != nil {
+			c.RecordSession(res.SessionID, "feature", stageBrainstorm)
+			c.RecordSnapshot(issueContent)
+		}
+		if err != nil {
+			return err
+		}
+		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start)
+	default:
+		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat)
+	}
+}
+
+// architectCall runs one architect-model turn: the brainstorm-0/brainstorm-N
+// call when resume is "", or a --resume turn (round call or resumed re-entry)
+// when it isn't.
+func architectCall(ctx context.Context, c *Claude, cfg *Config, wtPath, label, prompt, resume string) (*ClaudeResult, error) {
+	return c.Call(ctx, ClaudeCall{
+		Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
+		Model:           cfg.Models.Architect,
+		SkipPermissions: true,
+		DisallowedTools: []string{"AskUserQuestion"},
+	})
+}
+
+// brainstormLoop is the architect Q&A round loop shared by a fresh brainstorm-0
+// call and a resumed brainstorm session: sessionID/output are the id and result
+// text of whichever call preceded it (brainstorm-0, or the resume turn).
+func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, sessionID, output string, start time.Time) error {
 	for round := 1; ; round++ {
 		// The architect signals a committed spec: hand off to the fresh plan
 		// session, then execute. If it claims a spec but none is on disk, fall
@@ -75,7 +110,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 				// context the caller tears down on return.
 				wait := uat.StartFeature(ctx, c, cfg, wtPath, specPath)
 				defer wait()
-				return runPlanThenExecute(ctx, c, cfg, wtPath, specPath, start)
+				return runPlanThenExecute(ctx, c, cfg, wtPath, planPrompt(specPath), "", start)
 			}
 		}
 
@@ -118,9 +153,9 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 			reply = ans.Result
 		}
 
-		res, err := architect(fmt.Sprintf("brainstorm-%d", round), reply, session)
+		res, err := architectCall(ctx, c, cfg, wtPath, fmt.Sprintf("brainstorm-%d", round), reply, sessionID)
 		if res != nil {
-			c.RecordSession(res.SessionID, "feature")
+			c.RecordSession(res.SessionID, "feature", stageBrainstorm)
 		}
 		if err != nil {
 			return err
@@ -129,18 +164,21 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 	}
 }
 
-// runPlanThenExecute runs the fresh plan session (session B) that turns the
-// approved spec into a committed plan, then executes it (session C). Both are
-// fresh sessions — the plan session must not carry brainstorm context.
-func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, specPath string, start time.Time) error {
+// runPlanThenExecute runs the plan session (session B) that turns the approved
+// spec into a committed plan, then executes it (session C). Both are fresh
+// sessions on a first pass — the plan session must not carry brainstorm
+// context — but the SAME entry point serves a resumed plan session too: resume
+// is "" on a fresh call (prompt is planPrompt(specPath)) and the persisted plan
+// session's id when re-entering (prompt is the trigger prompt instead).
+func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string, start time.Time) error {
 	res, err := c.Call(ctx, ClaudeCall{
-		Dir: wtPath, Label: "plan", Prompt: planPrompt(specPath),
+		Dir: wtPath, Label: "plan", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
 	if res != nil {
-		c.RecordSession(res.SessionID, "feature")
+		c.RecordSession(res.SessionID, "feature", stagePlan)
 	}
 	if err != nil {
 		return err
@@ -164,10 +202,13 @@ const maxExecuteGroups = 20
 // (via --resume with a continuation prompt) before the pipeline fails.
 const maxGroupRetries = 2
 
+// executePlan runs the execute session (session C) fresh, immediately after
+// the plan file is written. StepsPerSession <= 0 keeps the original
+// single-session behavior with no sentinel required; StepsPerSession > 0
+// spans the plan across several bounded, brand-new sessions via
+// executePlanGrouped.
 func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath string) error {
 	if cfg.StepsPerSession <= 0 {
-		// Unchanged: one fresh session implements the whole plan, no
-		// sentinel required.
 		res, err := c.Call(ctx, ClaudeCall{
 			Dir: wtPath, Label: "execute", Prompt: executePrompt(planPath),
 			Model:           cfg.Models.executeConfig(),
@@ -175,11 +216,30 @@ func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath s
 			DisallowedTools: []string{"AskUserQuestion"},
 		})
 		if res != nil {
-			c.RecordSession(res.SessionID, "feature")
+			c.RecordSession(res.SessionID, "feature", stageExecute)
 		}
 		return err
 	}
 	return executePlanGrouped(ctx, c, cfg, wtPath, planPath)
+}
+
+// resumeExecutePlan re-enters a persisted execute session (session C) at
+// exactly the recorded session, with --resume and the trigger prompt — used
+// by ResumeFeaturePipeline. It never spans multiple sessions even when
+// StepsPerSession > 0: grouped execution deliberately never --resumes
+// between groups (see executePlanGrouped), so resuming one persisted session
+// id only makes sense as a single ungrouped call.
+func resumeExecutePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string) error {
+	res, err := c.Call(ctx, ClaudeCall{
+		Dir: wtPath, Label: "execute", Prompt: prompt, Resume: resume,
+		Model:           cfg.Models.executeConfig(),
+		SkipPermissions: true,
+		DisallowedTools: []string{"AskUserQuestion"},
+	})
+	if res != nil {
+		c.RecordSession(res.SessionID, "feature", stageExecute)
+	}
+	return err
 }
 
 // executePlanGrouped implements the plan across several bounded, brand-new
@@ -224,7 +284,7 @@ func runGroupWithRetry(ctx context.Context, c *Claude, cfg *Config, wtPath, labe
 			DisallowedTools: []string{"AskUserQuestion"},
 		})
 		if res != nil {
-			c.RecordSession(res.SessionID, "feature")
+			c.RecordSession(res.SessionID, "feature", stageExecute)
 		}
 		if err != nil {
 			if res == nil || res.SessionID == "" {
