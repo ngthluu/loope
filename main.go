@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -47,6 +48,10 @@ func resolveMode(configPath string, showVersion, doctor bool) cliMode {
 }
 
 func main() {
+	if code, handled := dispatchSubcommand(os.Args, os.Stdin); handled {
+		os.Exit(code)
+	}
+
 	fs := flag.NewFlagSet("loope", flag.ContinueOnError)
 	var help bytes.Buffer
 	fs.SetOutput(&help)
@@ -85,6 +90,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	daemonLogPath := filepath.Join(cfg.WorkDir, "logs", "daemon.log")
+	logFile, err := NewRotatingFile(daemonLogPath, rotatingFileMaxBytes)
+	if err != nil {
+		log.Fatalf("daemon log: %v", err)
+	}
+	defer logFile.Close()
+	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// Shutdown drains in-flight pipelines, which can take as long as the work
@@ -134,7 +148,30 @@ func main() {
 		}
 	}()
 
+	if cfg.Telemetry != nil {
+		exp := NewTelemetryExporter(cfg, daemonLogPath)
+		go exp.Run(ctx)
+	}
+
 	runLoop(ctx, o, cfg, true /* sweep */)
+}
+
+// dispatchSubcommand handles the `telemetry-server` and `claude-usage-hook`
+// subcommands, which take over the whole process instead of running the
+// daemon. handled is false for every other invocation (the normal
+// --config-driven daemon, bare --version/--help), so main falls through to
+// its existing flag-based dispatch unchanged.
+func dispatchSubcommand(args []string, stdin io.Reader) (code int, handled bool) {
+	if len(args) < 2 {
+		return 0, false
+	}
+	switch args[1] {
+	case "telemetry-server":
+		return runTelemetryServerCmd(args[2:]), true
+	case "claude-usage-hook":
+		return runClaudeUsageHookCmd(stdin), true
+	}
+	return 0, false
 }
 
 // usage prints a one-line description and the flag defaults to w. It backs the
