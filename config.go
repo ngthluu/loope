@@ -39,6 +39,21 @@ type Models struct {
 	// means the claude CLI's own defaults with no budget or turn cap. The session
 	// is short and read-only, so a cheap model with a low cap is the right shape.
 	UAT ModelConfig `json:"uat"`
+	// CodeReview is the config for the post-ship review-and-fix loop. Unlike
+	// Execute it has no fallback to Architect: a real model choice here matters
+	// (the session must both find and fix issues), so an absent block means the
+	// whole step is skipped, not "use defaults" — hence the pointer, mirroring
+	// Telemetry rather than UAT's always-constructed value field.
+	CodeReview *CodeReviewConfig `json:"codeReview"`
+}
+
+// CodeReviewConfig is the config for the post-ship review-and-fix loop.
+// Rounds <= 0 is treated as 1 by CodeReview.Run — LoadConfig does not apply
+// that default itself, so a config that never sets rounds and one that
+// explicitly sets "rounds": 0 are indistinguishable, and both mean "run once".
+type CodeReviewConfig struct {
+	ModelConfig
+	Rounds int `json:"rounds"`
 }
 
 // executeConfig returns the model config for the plan-execution step, filling
