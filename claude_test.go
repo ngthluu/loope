@@ -335,6 +335,36 @@ func TestReadSessionMissing(t *testing.T) {
 	}
 }
 
+func TestRecordAndReadSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	c := &Claude{logDir: dir}
+	c.RecordSnapshot("# Title (#7)\n\nbody text\n")
+
+	got, err := readSnapshot(dir)
+	if err != nil {
+		t.Fatalf("readSnapshot: %v", err)
+	}
+	if got != "# Title (#7)\n\nbody text\n" {
+		t.Errorf("snapshot = %q", got)
+	}
+}
+
+func TestRecordSnapshotSkipsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	c := &Claude{logDir: dir}
+	c.RecordSnapshot("first")
+	c.RecordSnapshot("") // empty content must not overwrite
+	if got, _ := readSnapshot(dir); got != "first" {
+		t.Errorf("snapshot = %q, want first", got)
+	}
+}
+
+func TestReadSnapshotMissing(t *testing.T) {
+	if _, err := readSnapshot(t.TempDir()); err == nil {
+		t.Error("want error reading a missing snapshot file")
+	}
+}
+
 func TestClaudeResultParsesUsage(t *testing.T) {
 	raw := `{"result":"ok","session_id":"s1","is_error":false,"total_cost_usd":2.63,
 	  "num_turns":23,"duration_ms":206302,

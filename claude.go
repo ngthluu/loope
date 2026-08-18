@@ -288,6 +288,34 @@ func readSession(logDir string) (SessionInfo, error) {
 	return s, nil
 }
 
+// snapshotFile holds the exact issue content (title + body + non-bot comments,
+// as FetchIssueContent produces it) the pipeline last read. It lets a resumed
+// session's prompt be built from what's NEW since the paused session saw the
+// issue, rather than a bare "continue" — see resumePrompt in resume.go.
+const snapshotFile = "issue-snapshot"
+
+// RecordSnapshot writes the issue content this call site read to
+// <logDir>/issue-snapshot, overwriting whatever was there. Best-effort, like
+// RecordSession: a no-op on an empty logDir or content.
+func (c *Claude) RecordSnapshot(content string) {
+	if c.logDir == "" || content == "" {
+		return
+	}
+	if err := os.MkdirAll(c.logDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(c.logDir, snapshotFile), []byte(content), 0o644)
+}
+
+// readSnapshot reads the issue content written by RecordSnapshot from logDir.
+func readSnapshot(logDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(logDir, snapshotFile))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // parseStreamResult extracts the terminal result event from a stream-json
 // transcript and returns its raw line so the caller can persist it as the .json
 // postmortem in the same shape --output-format json used to produce.
