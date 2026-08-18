@@ -102,20 +102,26 @@ type TelemetryConfig struct {
 }
 
 type Config struct {
-	RepoPath            string      `json:"repoPath"`
-	RepoSlug            string      `json:"repoSlug"`
-	EligibleLabel       string      `json:"eligibleLabel"`
-	PollIntervalSec     int         `json:"pollIntervalSec"`
-	TicketsPerCycle     int         `json:"ticketsPerCycle"`
-	WorkDir             string      `json:"workDir"`
-	Addr                string      `json:"addr"`
-	PersonaPath         string      `json:"personaPath"`
-	ClaudeConfigDir     string      `json:"claudeConfigDir"`
-	MaxQARounds         int         `json:"maxQARounds"`
-	ConfidenceThreshold int         `json:"confidenceThreshold"`
-	StateLabels         StateLabels `json:"stateLabels"`
-	GitHubRetry         RetryConfig `json:"githubRetry"`
-	Models              Models      `json:"models"`
+	RepoPath            string `json:"repoPath"`
+	RepoSlug            string `json:"repoSlug"`
+	EligibleLabel       string `json:"eligibleLabel"`
+	PollIntervalSec     int    `json:"pollIntervalSec"`
+	TicketsPerCycle     int    `json:"ticketsPerCycle"`
+	WorkDir             string `json:"workDir"`
+	Addr                string `json:"addr"`
+	PersonaPath         string `json:"personaPath"`
+	ClaudeConfigDir     string `json:"claudeConfigDir"`
+	MaxQARounds         int    `json:"maxQARounds"`
+	ConfidenceThreshold int    `json:"confidenceThreshold"`
+	// StepsPerSession caps how many plan steps one feature-pipeline execute
+	// session attempts before handing off to a fresh session. 0 (the zero
+	// value, and the default when the key is absent) means "unbounded": one
+	// execute session implements the whole plan, exactly as before this field
+	// existed. See executePlan in pipeline_feature.go.
+	StepsPerSession int         `json:"stepsPerSession"`
+	StateLabels     StateLabels `json:"stateLabels"`
+	GitHubRetry     RetryConfig `json:"githubRetry"`
+	Models          Models      `json:"models"`
 	// Telemetry is nil unless the config file has a "telemetry" block —
 	// participation is opt-in.
 	Telemetry *TelemetryConfig `json:"telemetry"`

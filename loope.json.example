@@ -10,6 +10,7 @@
   "claudeConfigDir": "~/.claude-personal",
   "maxQARounds": 20,
   "confidenceThreshold": 70,
+  "stepsPerSession": 0,
   "stateLabels": {"wip": "ai-wip", "done": "ai-done", "rework": "ai-rework", "needsInfo": "ai-needs-info", "stopped": "ai-stopped"},
   "githubRetry": {"maxAttempts": 0, "baseDelaySec": 2, "maxDelaySec": 60},
   "models": {
