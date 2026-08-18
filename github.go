@@ -260,3 +260,27 @@ func (g *GitHub) existingPRURL(ctx context.Context, branch string) (string, erro
 func (g *GitHub) PRURLForBranch(ctx context.Context, branch string) (string, error) {
 	return g.existingPRURL(ctx, branch)
 }
+
+// PRNumberForBranch returns the number of the open PR whose head is branch,
+// for CodeReview.Run to know where to post review findings.
+func (g *GitHub) PRNumberForBranch(ctx context.Context, branch string) (int, error) {
+	out, err := g.gh(ctx, "pr", "view", branch, "--repo", g.slug, "--json", "number")
+	if err != nil {
+		return 0, err
+	}
+	var v struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		return 0, fmt.Errorf("parse pr view: %w", err)
+	}
+	return v.Number, nil
+}
+
+// ReviewComment posts a top-level PR review comment via `gh pr review
+// --comment`, distinct from Comment (an issue-style comment): the post-ship
+// code review loop's findings belong on the PR, not the issue.
+func (g *GitHub) ReviewComment(ctx context.Context, prNumber int, body string) error {
+	_, err := g.gh(ctx, "pr", "review", strconv.Itoa(prNumber), "--repo", g.slug, "--comment", "--body", body)
+	return err
+}
