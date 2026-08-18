@@ -53,14 +53,16 @@ func mustRender(name string, data map[string]any) string {
 // them in the prompts would let the instruction and the parser drift apart.
 func promptData() map[string]any {
 	return map[string]any{
-		"ConfidenceSentinel":  confidenceSentinel,
-		"SpecReadySentinel":   specReadySentinel,
-		"ReadySentinel":       readySentinel,
-		"AlreadyDoneSentinel": alreadyDoneSentinel,
-		"DoneConfirmSentinel": doneConfirmSentinel,
-		"UATBeginSentinel":    uatBeginSentinel,
-		"UATEndSentinel":      uatEndSentinel,
-		"UATMarker":           uatMarker,
-		"BotMarker":           botMarker,
+		"ConfidenceSentinel":   confidenceSentinel,
+		"SpecReadySentinel":    specReadySentinel,
+		"ReadySentinel":        readySentinel,
+		"AlreadyDoneSentinel":  alreadyDoneSentinel,
+		"DoneConfirmSentinel":  doneConfirmSentinel,
+		"UATBeginSentinel":     uatBeginSentinel,
+		"UATEndSentinel":       uatEndSentinel,
+		"UATMarker":            uatMarker,
+		"BotMarker":            botMarker,
+		"GroupDoneSentinel":    groupDoneSentinel,
+		"PlanCompleteSentinel": planCompleteSentinel,
 	}
 }

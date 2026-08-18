@@ -14,6 +14,14 @@ const readySentinel = "PIPELINE_READY"
 
 const specReadySentinel = "SPEC_READY:"
 
+// groupDoneSentinel/planCompleteSentinel are emitted by a grouped execute
+// session (see executePlanGrouped) to tell the daemon whether more of the
+// plan remains for a later fresh session or the whole plan is now done.
+// Both only ever appear when cfg.StepsPerSession > 0 — the ungrouped execute
+// path never requires or checks either sentinel.
+const groupDoneSentinel = "GROUP_DONE"
+const planCompleteSentinel = "PLAN_COMPLETE"
+
 // RunFeaturePipeline drives three sessions: an architect brainstorm session
 // (session A) that scores its confidence up front and, above the threshold,
 // works with a sonnet product-owner proxy to a committed spec (SPEC_READY); a
