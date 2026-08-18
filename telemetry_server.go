@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html/template"
 	"net/http"
 	"strings"
 	"sync"
@@ -52,22 +53,31 @@ func (w *WorkerState) usableUsage(now time.Time) *UsageSnapshot {
 type TelemetryServer struct {
 	token string
 	now   func() time.Time
+	tmpl  *template.Template
 
 	mu      sync.Mutex
 	workers map[string]*WorkerState // keyed by Resource.MachineID
 }
 
 // NewTelemetryServer returns a server that authenticates pushes against
-// token.
-func NewTelemetryServer(token string) *TelemetryServer {
-	return &TelemetryServer{token: token, now: time.Now, workers: map[string]*WorkerState{}}
+// token and has its dashboard templates parsed and ready. It errors only if
+// the embedded templates fail to parse, which a passing build already rules
+// out — kept as a returned error (rather than a panic) to match NewServer's
+// convention in serve.go.
+func NewTelemetryServer(token string) (*TelemetryServer, error) {
+	tmpl, err := template.New("telemetry").ParseFS(telemetryFS, "telemetry/templates/*.html")
+	if err != nil {
+		return nil, err
+	}
+	return &TelemetryServer{token: token, now: time.Now, tmpl: tmpl, workers: map[string]*WorkerState{}}, nil
 }
 
 // Handler returns the telemetry server's HTTP routes: POST /v1/push (worker
-// ingest).
+// ingest) plus the dashboard routes registered by registerWebHandlers.
 func (s *TelemetryServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/push", s.handlePush)
+	s.registerWebHandlers(mux)
 	return mux
 }
 

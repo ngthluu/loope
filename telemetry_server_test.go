@@ -25,7 +25,10 @@ func doPush(t *testing.T, h http.Handler, token string, req PushRequest) *httpte
 }
 
 func TestHandlePushAuth(t *testing.T) {
-	s := NewTelemetryServer("secret")
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := s.Handler()
 	req := PushRequest{Resource: Resource{MachineID: "m1"}}
 
@@ -41,7 +44,10 @@ func TestHandlePushAuth(t *testing.T) {
 }
 
 func TestHandlePushRequiresMachineID(t *testing.T) {
-	s := NewTelemetryServer("secret")
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := doPush(t, s.Handler(), "secret", PushRequest{})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -49,7 +55,10 @@ func TestHandlePushRequiresMachineID(t *testing.T) {
 }
 
 func TestHandlePushStoresWorkerAndAppendsLogs(t *testing.T) {
-	s := NewTelemetryServer("secret")
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := s.Handler()
 	req1 := PushRequest{
 		Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
