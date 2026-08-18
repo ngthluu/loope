@@ -1118,3 +1118,44 @@ func TestFinishDoneAndNeedsInfoPreserveBranch(t *testing.T) {
 		t.Error("finishDone must not delete the branch")
 	}
 }
+
+// TestSweepOrphansThenNextCycleResumesSession is the daemon-restart case (spec
+// §5): an issue stranded in ai-wip by a crash, with a session already recorded
+// from before the crash, must have that session resumed on the very next cycle
+// after SweepOrphans requeues it — with no bespoke "was this a restart" signal
+// anywhere, just the ordinary loadResumableSession check in handleIssue.
+func TestSweepOrphansThenNextCycleResumesSession(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+
+	// Simulate a crash: ai-wip is set, and a brainstorm session was recorded
+	// before the process died mid-pipeline.
+	n := 7
+	if err := o.gh.AddLabel(context.Background(), n, o.cfg.StateLabels.WIP); err != nil {
+		t.Fatal(err)
+	}
+	logDir := o.issueLogDir(n)
+	c := &Claude{logDir: logDir}
+	c.RecordSession("stranded-sess", "feature", stageBrainstorm)
+	c.RecordSnapshot("# Fix crash (#7)\n\nboom\n")
+
+	if err := o.SweepOrphans(context.Background()); err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	if len(env.callsMatching("gh", "--remove-label ai-wip")) == 0 {
+		t.Fatal("setup: SweepOrphans must strip the stale ai-wip label")
+	}
+
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var resumed bool
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") == "stranded-sess" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Error("the next cycle after a sweep must resume the crash-stranded session, not restart brainstorm-0")
+	}
+}
