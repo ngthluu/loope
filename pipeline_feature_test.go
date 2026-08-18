@@ -537,6 +537,192 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 	}
 }
 
+// TestExecutePlanUngroupedUnchanged locks in that StepsPerSession == 0 keeps
+// today's exact behavior: one call, label "execute", no sentinel required.
+func TestExecutePlanUngroupedUnchanged(t *testing.T) {
+	wt := t.TempDir()
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		return claudeJSON("Executed, no sentinel here.", "exec-1"), "", nil
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := executePlan(context.Background(), c, cfg, wt, "docs/plan.md"); err != nil {
+		t.Fatalf("ungrouped execute must succeed without any sentinel, got %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(f.calls))
+	}
+	if got := argAfter(f.calls[0].args, "--resume"); got != "" {
+		t.Error("ungrouped execute must be a fresh session")
+	}
+}
+
+// TestExecutePlanGroupedRunsFreshSessionPerGroup verifies executePlanGrouped
+// spawns one brand-new session per group (never resumed) and stops as soon as
+// PLAN_COMPLETE arrives.
+func TestExecutePlanGroupedRunsFreshSessionPerGroup(t *testing.T) {
+	wt := t.TempDir()
+	var prompts []string
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		switch len(prompts) {
+		case 1, 2:
+			return claudeJSON("Group done.\nGROUP_DONE", fmt.Sprintf("sess-%d", len(prompts))), "", nil
+		case 3:
+			return claudeJSON("All done.\nPLAN_COMPLETE", "sess-3"), "", nil
+		}
+		t.Fatalf("unexpected call %d", len(prompts))
+		return "", "", nil
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{StepsPerSession: 5, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := executePlanGrouped(context.Background(), c, cfg, wt, "docs/plan.md"); err != nil {
+		t.Fatalf("expected success once PLAN_COMPLETE arrives, got %v", err)
+	}
+	if len(f.calls) != 3 {
+		t.Fatalf("got %d calls, want 3 (one fresh session per group)", len(f.calls))
+	}
+	for i, call := range f.calls {
+		if got := argAfter(call.args, "--resume"); got != "" {
+			t.Errorf("call %d: resume = %q, want fresh session (no --resume)", i, got)
+		}
+	}
+	if !strings.Contains(prompts[0], "next 5 steps") {
+		t.Errorf("group prompt should mention the steps-per-session cap: %s", prompts[0])
+	}
+}
+
+// TestExecutePlanGroupedSafetyCap verifies a session that never signals
+// PLAN_COMPLETE fails the pipeline after exactly maxExecuteGroups sessions,
+// rather than looping forever.
+func TestExecutePlanGroupedSafetyCap(t *testing.T) {
+	wt := t.TempDir()
+	calls := 0
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		calls++
+		return claudeJSON("Still going.\nGROUP_DONE", fmt.Sprintf("sess-%d", calls)), "", nil
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{StepsPerSession: 5, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := executePlanGrouped(context.Background(), c, cfg, wt, "docs/plan.md")
+	if err == nil {
+		t.Fatal("want an error when PLAN_COMPLETE never arrives")
+	}
+	if calls != maxExecuteGroups {
+		t.Errorf("got %d calls, want exactly maxExecuteGroups (%d)", calls, maxExecuteGroups)
+	}
+}
+
+// TestRunGroupWithRetryRetriesAmbiguousResult verifies a response with
+// neither sentinel triggers a --resume retry with the continuation prompt on
+// the SAME session, and that a later retry succeeding returns its result.
+func TestRunGroupWithRetryRetriesAmbiguousResult(t *testing.T) {
+	wt := t.TempDir()
+	var prompts []string
+	var resumes []string
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		resumes = append(resumes, argAfter(c.args, "--resume"))
+		if len(prompts) == 1 {
+			return claudeJSON("No sentinel here, ran out of turns.", "sess-1"), "", nil
+		}
+		return claudeJSON("Finishing up.\nGROUP_DONE", "sess-1"), "", nil
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	result, err := runGroupWithRetry(context.Background(), c, cfg, wt, "execute-group-1", executeGroupPrompt("docs/plan.md", 5))
+	if err != nil {
+		t.Fatalf("expected success on retry, got %v", err)
+	}
+	if !strings.Contains(result, groupDoneSentinel) {
+		t.Errorf("result = %q, want it to contain GROUP_DONE", result)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("got %d calls, want 2 (initial + one retry)", len(prompts))
+	}
+	if resumes[0] != "" {
+		t.Errorf("initial call resume = %q, want fresh session", resumes[0])
+	}
+	if resumes[1] != "sess-1" {
+		t.Errorf("retry resume = %q, want sess-1 (same session)", resumes[1])
+	}
+	if prompts[1] != executeContinuePrompt() {
+		t.Errorf("retry prompt = %q, want the continuation prompt", prompts[1])
+	}
+}
+
+// TestRunGroupWithRetryExhaustsRetries verifies that never signaling a
+// sentinel fails after maxGroupRetries retries rather than looping forever.
+func TestRunGroupWithRetryExhaustsRetries(t *testing.T) {
+	wt := t.TempDir()
+	calls := 0
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		calls++
+		return claudeJSON("Still no sentinel.", "sess-1"), "", nil
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	_, err := runGroupWithRetry(context.Background(), c, cfg, wt, "execute-group-1", executeGroupPrompt("docs/plan.md", 5))
+	if err == nil {
+		t.Fatal("want an error once retries are exhausted")
+	}
+	if calls != maxGroupRetries+1 {
+		t.Errorf("got %d calls, want %d (initial + maxGroupRetries retries)", calls, maxGroupRetries+1)
+	}
+}
+
+// TestRunGroupWithRetryFailsImmediatelyWithNoSessionID verifies an error
+// result carrying no session id (nothing to resume) fails the pipeline right
+// away instead of attempting a retry.
+func TestRunGroupWithRetryFailsImmediatelyWithNoSessionID(t *testing.T) {
+	wt := t.TempDir()
+	calls := 0
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		calls++
+		return "", "boom", fmt.Errorf("exit 1")
+	}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	_, err := runGroupWithRetry(context.Background(), c, cfg, wt, "execute-group-1", executeGroupPrompt("docs/plan.md", 5))
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if calls != 1 {
+		t.Errorf("got %d calls, want 1 (no retry when there is no session to resume)", calls)
+	}
+}
+
+// TestExecutePlanGroupedRecordsSessionPerGroup verifies every group call
+// (including retries) records its session, matching the existing
+// overwrite-with-latest behavior used for the dashboard's current-session
+// display.
+func TestExecutePlanGroupedRecordsSessionPerGroup(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	f := &fakeRunner{}
+	f.handler = func(c rcall) (string, string, error) {
+		return claudeJSON("Done.\nPLAN_COMPLETE", "final-sess"), "", nil
+	}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := &Config{StepsPerSession: 5, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	if err := executePlanGrouped(context.Background(), c, cfg, wt, "docs/plan.md"); err != nil {
+		t.Fatal(err)
+	}
+	si, err := readSession(logDir)
+	if err != nil {
+		t.Fatalf("session not recorded: %v", err)
+	}
+	if si.SessionID != "final-sess" || si.Kind != "feature" {
+		t.Errorf("session = %+v, want final-sess/feature", si)
+	}
+}
+
 func TestReadPersona(t *testing.T) {
 	if got := readPersona(""); got != "" {
 		t.Errorf("empty path = %q", got)
