@@ -81,6 +81,7 @@ func TestAskFormatBlockCarriesItsRules(t *testing.T) {
 	got := mustRender("ask-format", promptData())
 	for _, want := range []string{
 		"numbered list of questions",
+		"Write each question in short, plain sentences",
 		"At most 5 questions",
 		"MERGE related gaps",
 		"Under 200 words",
@@ -121,8 +122,8 @@ func TestUATFormatBlockCarriesItsRules(t *testing.T) {
 	d["UATCoverage"] = "every behavior the spec describes"
 	got := mustRender("uat-format", d)
 	for _, want := range []string{
-		"single flat list",
-		"No headings",
+		"### Happy path",
+		"### Edge cases",
 		"`Action → expected result`",
 		"15 words or fewer",
 		"Compress wording, never coverage",
@@ -132,9 +133,6 @@ func TestUATFormatBlockCarriesItsRules(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("uat-format block is missing %q:\n%s", want, got)
 		}
-	}
-	if strings.Contains(got, "###") {
-		t.Errorf("uat-format block still asks for `###` group headings:\n%s", got)
 	}
 	if strings.Contains(got, "under 20 items") {
 		t.Errorf("uat-format block still caps the item count:\n%s", got)
