@@ -130,9 +130,10 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	if len(env.callsMatching("gh", "--add-label ai-rework")) != 0 {
 		t.Error("needs-info must not park as rework")
 	}
-	// Worktree was created for the pipeline, then removed (no progress to keep).
-	if len(env.callsMatching("git", "worktree remove")) == 0 {
-		t.Error("needs-info path should remove the worktree")
+	// Worktree is preserved (never-delete): a human answering needs-info must
+	// resume into it, not restart from zero.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("needs-info path must preserve the worktree, not remove it")
 	}
 }
 
@@ -200,11 +201,13 @@ func TestProcessOnceHappyPathBug(t *testing.T) {
 		{"gh", "pr create"},
 		{"gh", "--remove-label ai-wip"},
 		{"gh", "--add-label ai-done"},
-		{"git", "worktree remove"},
 	} {
 		if len(env.callsMatching(want.name, want.substr)) == 0 {
 			t.Errorf("missing call %s %q", want.name, want.substr)
 		}
+	}
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("a shipped issue must preserve its worktree, not remove it")
 	}
 	// wip->done swap must be a single atomic gh call, not two separate calls.
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
@@ -412,9 +415,9 @@ func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 	if len(env.callsMatching("gh", "issue close")) == 0 {
 		t.Error("done path should close the issue")
 	}
-	// Worktree was created for the pipeline, then cleaned up.
-	if len(env.callsMatching("git", "worktree remove")) == 0 {
-		t.Error("done path should remove the worktree")
+	// Worktree is preserved (never-delete), even for a closed/already-done issue.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("already-done path must preserve the worktree, not remove it")
 	}
 	// It must not ship anything.
 	if len(env.callsMatching("gh", "pr create")) != 0 {
@@ -641,7 +644,7 @@ func TestSweepOrphansPreservesWorktreeAndSession(t *testing.T) {
 	}
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	recordState(logDir, "ai-wip")
-	(&Claude{logDir: logDir}).RecordSession("sess-7", "bug")
+	(&Claude{logDir: logDir}).RecordSession("sess-7", "bug", stageDebug)
 
 	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)
@@ -880,7 +883,7 @@ func TestContinueRequeuesEligible(t *testing.T) {
 				t.Fatal(err)
 			}
 			if withSession {
-				(&Claude{logDir: logDir}).RecordSession("s1", "bug")
+				(&Claude{logDir: logDir}).RecordSession("s1", "bug", stageDebug)
 			}
 			recordState(logDir, "ai-stopped")
 			recordParkCause(logDir, "whatever")
@@ -971,5 +974,188 @@ func TestStopFlagConsumedWhenPipelinePanics(t *testing.T) {
 	// The panic outcome wins over the pending stop: the issue is parked for a human.
 	if got := env.readLocalState(7); got != "ai-rework" {
 		t.Fatalf("local state = %q, want ai-rework (parked after panic)", got)
+	}
+}
+
+// TestHandleIssueResumesPersistedFeatureSession simulates a rework-then-removed
+// re-entry: a first cycle parks the issue with a recorded brainstorm session,
+// then a second cycle (the label removed, same worktree/logs preserved) must
+// call the architect with --resume and prompt "continue" instead of
+// brainstorm-0.
+func TestHandleIssueResumesPersistedFeatureSession(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "brainstorming") {
+			// First (fresh) attempt fails outright (e.g. a session-limit 429) but
+			// still returns a session id, so the issue parks with a recorded
+			// session and the worktree preserved.
+			return claudeErrorJSON("session limit hit", "arch-sess"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	if err := runCycle(o); err != nil {
+		t.Fatalf("park is a clean cycle outcome, got %v", err)
+	}
+	if len(env.callsMatching("gh", "--add-label ai-rework")) == 0 {
+		t.Fatal("setup: first attempt must park as ai-rework")
+	}
+
+	// Second cycle: the architect now resumes instead of failing, and the fake
+	// triage still returns the same issue as eligible (no state-label filtering
+	// in this harness, mirroring "label removed -> eligible again").
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "resumed"}`, "t1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var resumed bool
+	for _, call := range env.f.calls {
+		if call.name == "claude" && call.stdin == "continue" && argAfter(call.args, "--resume") != "" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Error("second attempt must resume the architect session with --resume and prompt \"continue\", not restart brainstorm-0")
+	}
+	// The park-then-resume cycle must never have deleted the worktree.
+	if len(env.callsMatching("git", "worktree remove")) != 0 {
+		t.Error("resuming must never have deleted the worktree along the way")
+	}
+}
+
+// TestHandleIssueResumesWithDiffAfterNeedsInfo simulates the ai-needs-info
+// answered trigger: the first cycle escalates to needs-info (recording the
+// snapshot and a brainstorm session); the second cycle, with a new human
+// comment in the fetched issue content, must resume with a prompt containing
+// the diffed comment, not the bare literal "continue".
+func TestHandleIssueResumesWithDiffAfterNeedsInfo(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "brainstorming") {
+			return claudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	o.cfg.ConfidenceThreshold = 70
+	if err := runCycle(o); err != nil {
+		t.Fatalf("needs-info is a clean outcome, want nil error, got %v", err)
+	}
+
+	// Second cycle: the issue now carries a human's answer in its comments, and
+	// the architect resumes instead of scoring low again.
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "issue view") {
+			return `{"title": "Fix crash", "body": "boom", "comments": [{"author": {"login": "alice"}, "body": "export should include CSV rows only"}]}`, "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "answered"}`, "t1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var diffPrompt string
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") == "arch-1" {
+			diffPrompt = call.stdin
+		}
+	}
+	if diffPrompt == "" {
+		t.Fatal("want a resumed architect call with --resume arch-1")
+	}
+	if diffPrompt == "continue" || !strings.Contains(diffPrompt, "export should include CSV rows only") {
+		t.Errorf("resume prompt = %q, want the diffed new comment, not a bare continue", diffPrompt)
+	}
+}
+
+// TestHandleIssueNoSessionUsesFreshPath is the control: an issue with no
+// session file at all (first-ever attempt) must call brainstorm-0/debug
+// exactly as today, with no --resume anywhere.
+func TestHandleIssueNoSessionUsesFreshPath(t *testing.T) {
+	env := newFakeEnv(t)
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") != "" {
+			t.Errorf("a first-ever attempt must never use --resume, got call: %+v", call)
+		}
+	}
+}
+
+// TestFinishDoneAndNeedsInfoPreserveBranch is a direct regression test for the
+// spec's "never delete" rule: finishDone and finishNeedsInfo must not delete
+// the branch any more than they delete the worktree.
+func TestFinishDoneAndNeedsInfoPreserveBranch(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && !strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
+		}
+		return base(c)
+	}
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("git", "branch -D")) != 0 {
+		t.Error("finishDone must not delete the branch")
+	}
+}
+
+// TestSweepOrphansThenNextCycleResumesSession is the daemon-restart case (spec
+// §5): an issue stranded in ai-wip by a crash, with a session already recorded
+// from before the crash, must have that session resumed on the very next cycle
+// after SweepOrphans requeues it — with no bespoke "was this a restart" signal
+// anywhere, just the ordinary loadResumableSession check in handleIssue.
+func TestSweepOrphansThenNextCycleResumesSession(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+
+	// Simulate a crash: ai-wip is set, and a brainstorm session was recorded
+	// before the process died mid-pipeline.
+	n := 7
+	if err := o.gh.AddLabel(context.Background(), n, o.cfg.StateLabels.WIP); err != nil {
+		t.Fatal(err)
+	}
+	logDir := o.issueLogDir(n)
+	c := &Claude{logDir: logDir}
+	c.RecordSession("stranded-sess", "feature", stageBrainstorm)
+	c.RecordSnapshot("# Fix crash (#7)\n\nboom\n")
+
+	if err := o.SweepOrphans(context.Background()); err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	if len(env.callsMatching("gh", "--remove-label ai-wip")) == 0 {
+		t.Fatal("setup: SweepOrphans must strip the stale ai-wip label")
+	}
+
+	if err := runCycle(o); err != nil {
+		t.Fatalf("cycle error = %v, want nil", err)
+	}
+	var resumed bool
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") == "stranded-sess" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Error("the next cycle after a sweep must resume the crash-stranded session, not restart brainstorm-0")
 	}
 }
