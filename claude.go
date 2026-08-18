@@ -236,25 +236,39 @@ func (c *Claude) writeLog(seq int, label, ext, content string) {
 const sessionFile = "session"
 
 // SessionInfo is persisted to <logDir>/session so the dashboard can show which
-// Claude session did the work. It holds the latest primary session for the issue.
+// Claude session did the work, and so a re-entry into the pipeline can resume
+// it. It holds the latest primary session for the issue and the pipeline stage
+// that session belongs to.
 type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	Kind      string `json:"kind"`
+	Stage     string `json:"stage"`
 }
 
-// RecordSession writes the latest primary working session id (and pipeline kind)
-// for this issue to <logDir>/session. Best-effort, like the other log-writers:
-// a no-op when logDir or id is empty, so an ephemeral answerer call (empty here
-// because callers only invoke it for architect/debug/execute sessions) or a
-// logless Claude never clobbers a recorded session.
-func (c *Claude) RecordSession(id, kind string) {
+// Recognized SessionInfo.Stage values — the pipeline entry point a persisted
+// session resumes into. Every recorded stage is a real Claude.Call site with a
+// natural resume point (see Resume*Pipeline); there is no stage with none.
+const (
+	stageBrainstorm = "brainstorm"
+	stagePlan       = "plan"
+	stageExecute    = "execute"
+	stageDebug      = "debug"
+)
+
+// RecordSession writes the latest primary working session id, pipeline kind,
+// and pipeline stage for this issue to <logDir>/session. Best-effort, like the
+// other log-writers: a no-op when logDir or id is empty, so an ephemeral
+// answerer call (empty here because callers only invoke it for
+// architect/debug/execute sessions) or a logless Claude never clobbers a
+// recorded session.
+func (c *Claude) RecordSession(id, kind, stage string) {
 	if c.logDir == "" || id == "" {
 		return
 	}
 	if err := os.MkdirAll(c.logDir, 0o755); err != nil {
 		return
 	}
-	b, err := json.Marshal(SessionInfo{SessionID: id, Kind: kind})
+	b, err := json.Marshal(SessionInfo{SessionID: id, Kind: kind, Stage: stage})
 	if err != nil {
 		return
 	}

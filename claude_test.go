@@ -302,23 +302,23 @@ func TestTail(t *testing.T) {
 func TestRecordAndReadSession(t *testing.T) {
 	dir := t.TempDir()
 	c := &Claude{logDir: dir}
-	c.RecordSession("sess-123", "feature")
+	c.RecordSession("sess-123", "feature", "brainstorm")
 
 	si, err := readSession(dir)
 	if err != nil {
 		t.Fatalf("readSession: %v", err)
 	}
-	if si.SessionID != "sess-123" || si.Kind != "feature" {
-		t.Errorf("session = %+v, want sess-123/feature", si)
+	if si.SessionID != "sess-123" || si.Kind != "feature" || si.Stage != "brainstorm" {
+		t.Errorf("session = %+v, want sess-123/feature/brainstorm", si)
 	}
 }
 
 func TestRecordSessionOverwritesAndSkipsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	c := &Claude{logDir: dir}
-	c.RecordSession("first", "bug")
-	c.RecordSession("", "bug") // empty id must not overwrite
-	c.RecordSession("second", "bug")
+	c.RecordSession("first", "bug", "debug")
+	c.RecordSession("", "bug", "debug") // empty id must not overwrite
+	c.RecordSession("second", "bug", "debug")
 
 	si, err := readSession(dir)
 	if err != nil {
