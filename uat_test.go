@@ -207,7 +207,7 @@ func TestUATSkipsWhenResultHasNoSentinel(t *testing.T) {
 func TestUATDoesNotRecordSession(t *testing.T) {
 	logDir := t.TempDir()
 	c := &Claude{runner: &fakeRunner{queue: []rresp{{stdout: uatResult("- [ ] click it")}}}, logDir: logDir}
-	c.RecordSession("primary-sess", "bug")
+	c.RecordSession("primary-sess", "bug", stageDebug)
 	(&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
 	si, err := readSession(logDir)
 	if err != nil {

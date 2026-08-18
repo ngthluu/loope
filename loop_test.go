@@ -641,7 +641,7 @@ func TestSweepOrphansPreservesWorktreeAndSession(t *testing.T) {
 	}
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	recordState(logDir, "ai-wip")
-	(&Claude{logDir: logDir}).RecordSession("sess-7", "bug")
+	(&Claude{logDir: logDir}).RecordSession("sess-7", "bug", stageDebug)
 
 	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)
@@ -880,7 +880,7 @@ func TestContinueRequeuesEligible(t *testing.T) {
 				t.Fatal(err)
 			}
 			if withSession {
-				(&Claude{logDir: logDir}).RecordSession("s1", "bug")
+				(&Claude{logDir: logDir}).RecordSession("s1", "bug", stageDebug)
 			}
 			recordState(logDir, "ai-stopped")
 			recordParkCause(logDir, "whatever")

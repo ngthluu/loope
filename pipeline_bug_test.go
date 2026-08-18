@@ -68,8 +68,8 @@ func TestBugPipelineRecordsSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session not recorded: %v", err)
 	}
-	if si.SessionID != "debug-sess" || si.Kind != "bug" {
-		t.Errorf("session = %+v, want debug-sess/bug", si)
+	if si.SessionID != "debug-sess" || si.Kind != "bug" || si.Stage != stageDebug {
+		t.Errorf("session = %+v, want debug-sess/bug/debug", si)
 	}
 }
 
@@ -89,8 +89,8 @@ func TestBugPipelineRecordsSessionOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session must be recorded even when the call errors, so -rework can resume: %v", err)
 	}
-	if si.SessionID != "debug-429" || si.Kind != "bug" {
-		t.Errorf("session = %+v, want debug-429/bug", si)
+	if si.SessionID != "debug-429" || si.Kind != "bug" || si.Stage != stageDebug {
+		t.Errorf("session = %+v, want debug-429/bug/debug", si)
 	}
 }
 
@@ -276,5 +276,42 @@ func TestBugPipelineReturnsNilWhenUATFails(t *testing.T) {
 	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main",
 		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}); err != nil {
 		t.Fatalf("a failed UAT session must never fail the pipeline: %v", err)
+	}
+}
+
+// TestResumeBugPipelineReentersWithResumeAndPrompt verifies the resumed call
+// carries --resume <id> and the trigger prompt instead of bugPrompt, and still
+// runs the confidence gate / already-done check / UAT on the resumed result.
+func TestResumeBugPipelineReentersWithResumeAndPrompt(t *testing.T) {
+	logDir := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if argAfter(c.args, "--resume") == "debug-sess" && c.stdin == "continue" {
+			return claudeJSON("Fixed and committed.", "debug-sess-2"), "", nil
+		}
+		return "", "unexpected call", fmt.Errorf("unexpected call: %+v", c)
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	session := SessionInfo{SessionID: "debug-sess", Kind: "bug", Stage: stageDebug}
+	if err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "the issue", "main", nil, session, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	si, err := readSession(logDir)
+	if err != nil || si.SessionID != "debug-sess-2" || si.Stage != stageDebug {
+		t.Errorf("session = %+v, err = %v, want debug-sess-2/debug", si, err)
+	}
+}
+
+// TestResumeBugPipelineLowConfidenceEscalates verifies the confidence gate still
+// runs against the resumed session's output.
+func TestResumeBugPipelineLowConfidenceEscalates(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 20\nstill unclear", "debug-sess-2")}}}
+	c := &Claude{runner: f}
+	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}, ConfidenceThreshold: 70}
+	session := SessionInfo{SessionID: "debug-sess", Kind: "bug", Stage: stageDebug}
+	err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil, session, "continue")
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
 	}
 }
