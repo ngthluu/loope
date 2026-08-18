@@ -214,6 +214,28 @@ func TestLoadConfigTicketsPerCycleOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigStepsPerSessionDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StepsPerSession != 0 {
+		t.Errorf("StepsPerSession = %d, want 0 (absent key preserves single-session behavior)", cfg.StepsPerSession)
+	}
+}
+
+func TestLoadConfigStepsPerSessionOverride(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w", "stepsPerSession": 5}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StepsPerSession != 5 {
+		t.Errorf("StepsPerSession = %d, want 5", cfg.StepsPerSession)
+	}
+}
+
 func TestLoadConfigGitHubRetryDefaults(t *testing.T) {
 	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w"}`)
 	cfg, err := LoadConfig(p)
