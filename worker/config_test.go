@@ -413,3 +413,27 @@ func TestLoadConfigTelemetryPushIntervalOverride(t *testing.T) {
 		t.Fatalf("PushIntervalSec = %d, want 30", cfg.Telemetry.PushIntervalSec)
 	}
 }
+
+// TestExampleConfigParsesAndCoversEverything keeps loope.json.example honest:
+// it must parse through LoadConfig exactly as a user's copied config would
+// (the "//" comment keys are ignored as unknown fields), and the values it
+// demonstrates must land where the comments claim — including the optional
+// codeReview and telemetry blocks, which only this example documents.
+func TestExampleConfigParsesAndCoversEverything(t *testing.T) {
+	cfg, err := LoadConfig("loope.json.example")
+	if err != nil {
+		t.Fatalf("the shipped example must always parse: %v", err)
+	}
+	if cfg.RepoSlug != "your-org/your-repo" || cfg.EligibleLabel != "ai-agent" {
+		t.Errorf("basic fields = %q/%q", cfg.RepoSlug, cfg.EligibleLabel)
+	}
+	if cfg.Models.CodeReview == nil || cfg.Models.CodeReview.Rounds != 2 {
+		t.Errorf("codeReview block = %+v, want rounds 2", cfg.Models.CodeReview)
+	}
+	if cfg.Telemetry == nil || cfg.Telemetry.PushIntervalSec != 15 || cfg.Telemetry.ServerURL == "" {
+		t.Errorf("telemetry block = %+v", cfg.Telemetry)
+	}
+	if cfg.StateLabels != defaultStateLabels() {
+		t.Errorf("stateLabels = %+v, want the defaults spelled out", cfg.StateLabels)
+	}
+}
