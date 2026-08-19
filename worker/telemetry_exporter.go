@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -73,6 +74,11 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 		log.Printf("telemetry: read usage snapshot: %v", err)
 	}
 
+	issueLogs, err := scanIssueLogs(e.cfg.WorkDir)
+	if err != nil {
+		log.Printf("telemetry: scan issue logs: %v", err)
+	}
+
 	hostname, _ := os.Hostname()
 	req := shared.PushRequest{
 		Resource: shared.Resource{
@@ -83,9 +89,10 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 			Version:         version,
 			PushIntervalSec: e.cfg.Telemetry.PushIntervalSec,
 		},
-		Logs:   logs,
-		Usage:  usage,
-		SentAt: now,
+		Logs:      logs,
+		Usage:     usage,
+		IssueLogs: issueLogs,
+		SentAt:    now,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -106,6 +113,64 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 		return fmt.Errorf("push: server returned %s", resp.Status)
 	}
 	return nil
+}
+
+// scanIssueLogs reads workDir/logs and returns one IssueLogDir per
+// subdirectory (each issue's pipeline run, plus the shared "triage" dir),
+// carrying the full contents of every regular file directly inside. This is
+// a full re-read and re-send every cycle (design decision 1) — these files
+// are small (prompts/outputs/postmortems for one Claude call, or single-line
+// state/pr/session files) — and the scan is non-recursive: the existing log
+// writers in tracker.go/claude.go never nest subdirectories. A missing or
+// empty logs dir yields an empty slice, never nil, so the field always
+// marshals as a JSON array rather than null.
+func scanIssueLogs(workDir string) ([]shared.IssueLogDir, error) {
+	logsDir := filepath.Join(workDir, "logs")
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []shared.IssueLogDir{}, nil
+		}
+		return nil, err
+	}
+	dirs := []shared.IssueLogDir{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		files, err := scanIssueLogFiles(filepath.Join(logsDir, e.Name()))
+		if err != nil {
+			log.Printf("telemetry: scan logs/%s: %v", e.Name(), err)
+			continue
+		}
+		dirs = append(dirs, shared.IssueLogDir{Name: e.Name(), Files: files})
+	}
+	return dirs, nil
+}
+
+// scanIssueLogFiles reads every regular file directly inside dir (no
+// recursion) into an IssueLogFile.
+func scanIssueLogFiles(dir string) ([]shared.IssueLogFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := []shared.IssueLogFile{}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		files = append(files, shared.IssueLogFile{Name: e.Name(), Content: string(content), ModTime: info.ModTime()})
+	}
+	return files, nil
 }
 
 // readUsageSnapshot reads the usage-hook file at path, returning nil when
