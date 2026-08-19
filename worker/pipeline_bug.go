@@ -8,7 +8,7 @@ import (
 // and the already-done claim. base is the base branch: on the outcome where a
 // fix was actually produced, the non-blocking UAT step diffs against
 // origin/<base> to build a human-verifiable checklist for the issue body.
-func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT) error {
+func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent, cfg.ConfidenceThreshold),
 		Model:           cfg.Models.Architect,
@@ -24,7 +24,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 	if err != nil {
 		return err
 	}
-	return afterDebug(ctx, c, cfg, wtPath, issueContent, base, uat, res.Result)
+	return afterDebug(ctx, c, cfg, wtPath, issueContent, base, uat, wt, res.Result)
 }
 
 // ResumeBugPipeline re-enters a persisted debug session with --resume and the
@@ -33,7 +33,7 @@ func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 // unrecognized SessionInfo.Stage can't reach this function (handleIssue only
 // calls it for session.Kind == "bug", and every bug-pipeline RecordSession call
 // uses stageDebug).
-func ResumeBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, session SessionInfo, prompt string) error {
+func ResumeBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree, session SessionInfo, prompt string) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "debug-resume", Prompt: prompt, Resume: session.SessionID,
 		Model:           cfg.Models.Architect,
@@ -47,13 +47,13 @@ func ResumeBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issu
 	if err != nil {
 		return err
 	}
-	return afterDebug(ctx, c, cfg, wtPath, issueContent, base, uat, res.Result)
+	return afterDebug(ctx, c, cfg, wtPath, issueContent, base, uat, wt, res.Result)
 }
 
 // afterDebug runs the confidence gate, already-done check, and (if a fix was
 // actually produced) the UAT step against a debug session's output — shared by
 // the fresh and resumed entry points.
-func afterDebug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, output string) error {
+func afterDebug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree, output string) error {
 	// Confidence gate, shared with the feature route: same threshold, sentinel,
 	// parser and terminal outcome. It runs before the already-done check on
 	// purpose — a session too unsure to fix the bug must not get to close the
@@ -67,6 +67,18 @@ func afterDebug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueConten
 	}
 	if reason, ok := parseAlreadyDone(output); ok {
 		return &alreadyDoneError{reason: reason}
+	}
+	if uat == nil || uat.Target == nil {
+		return nil
+	}
+	// A debug session can also end without either sentinel — e.g. it
+	// investigates and stops to ask a clarifying question instead of committing
+	// a fix, despite the HEADLESS instruction not to. Neither gate above catches
+	// that, so check the worktree directly: zero commits ahead of base means
+	// there is no diff for UAT to check, and running it would waste a session
+	// producing nothing. Fail open on an error, same as the confidence gate.
+	if n, err := wt.CommitCount(ctx, wtPath, base); err == nil && n == 0 {
+		return nil
 	}
 	// Only this outcome produced a fix — neither the needs-info nor the
 	// already-done return above reaches here, so neither publishes a checklist.
