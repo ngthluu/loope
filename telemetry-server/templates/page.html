@@ -12,7 +12,7 @@
   <span class="font-mono text-[15px] font-semibold tracking-tight text-text">loope<span class="text-live">&middot;</span>fleet</span>
  </header>
  <div class="flex min-h-0 flex-1">
-  <nav id="rail" class="scroll w-[340px] shrink-0 overflow-y-auto border-r border-line bg-panel"
+  <nav id="rail" class="scroll w-[420px] shrink-0 overflow-y-auto border-r border-line bg-panel"
        hx-get="/rail?worker={{if .Selected}}{{.Selected.MachineID}}{{end}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "trail" .}}</nav>
   <main id="main" class="scroll min-w-0 flex-1 overflow-y-auto"
         hx-get="/detail?worker={{if .Selected}}{{.Selected.MachineID}}{{end}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tdetail" .}}</main>
