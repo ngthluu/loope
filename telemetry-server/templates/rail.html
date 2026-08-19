@@ -1,15 +1,31 @@
 {{define "trail"}}<div class="p-3">
+{{$selID := ""}}{{with .Selected}}{{$selID = .MachineID}}{{end}}
 {{range .Groups}}
  <div class="mb-4">
   <div class="mb-1.5 px-1 font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-faint">{{.RepoSlug}}</div>
+  <div class="grid grid-cols-2 gap-2">
   {{range .Workers}}
    <a href="?worker={{.MachineID}}" hx-get="/detail?worker={{.MachineID}}" hx-target="#main" hx-swap="morph:innerHTML"
-      class="mb-1 flex items-center gap-2 rounded border border-line2 bg-panel2 px-2.5 py-2 font-mono text-[11px] text-text hover:border-live/40">
-    <span class="inline-block h-2 w-2 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
-    <span class="truncate">{{.Hostname}}</span>
-    {{if .UsageUnknown}}<span class="ml-auto text-faint">usage: unknown</span>{{else}}<span class="ml-auto tabular-nums">{{printf "%.0f%%" .FiveHourPct}} / 5h</span>{{end}}
+      class="block overflow-hidden rounded-md border bg-panel font-mono text-text hover:border-live/40 {{if eq $selID .MachineID}}border-live ring-1 ring-live/40{{else}}border-line2{{end}}">
+    <div class="flex h-12 items-center justify-center border-b border-line2 bg-panel2">
+     <svg class="h-5 w-5 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="6" rx="1.5"></rect>
+      <rect x="3" y="14" width="18" height="6" rx="1.5"></rect>
+      <circle cx="7" cy="7" r="0.75" fill="currentColor" stroke="none"></circle>
+      <circle cx="7" cy="17" r="0.75" fill="currentColor" stroke="none"></circle>
+     </svg>
+    </div>
+    <div class="px-2.5 py-2">
+     <div class="mb-1 flex items-center gap-1.5">
+      <span class="inline-block h-2 w-2 shrink-0 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
+      <span class="truncate text-[11px] font-semibold">{{.MachineID}}</span>
+     </div>
+     {{if .UsageUnknown}}<div class="text-[11px] text-faint">usage: unknown</div>
+     {{else}}<div class="tabular-nums text-[11px] text-faint">5h: {{printf "%.0f%%" .FiveHourPct}}&nbsp;&nbsp;7d: {{printf "%.0f%%" .SevenDayPct}}</div>{{end}}
+    </div>
    </a>
   {{end}}
+  </div>
  </div>
 {{else}}
  <div class="p-4 font-mono text-[12px] text-faint">No workers have reported yet.</div>

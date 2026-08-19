@@ -39,7 +39,7 @@ func TestTelemetryIndexGroupsByRepoSlugAndShowsWorkers(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"o/r", "o/other", "host1", "host2"} {
+	for _, want := range []string{"o/r", "o/other", "m1", "m2"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("index body missing %q:\n%s", want, body)
 		}
