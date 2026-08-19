@@ -19,6 +19,15 @@ docker run --rm -p 9090:9090 ghcr.io/ngthluu/loope-telemetry-server:latest \
   -token your-shared-secret
 ```
 
+`:latest` always tracks the newest **stable** release — release candidates
+never move it. To run an rc build, use its versioned tag (the release version
+without the `v` prefix):
+
+```bash
+docker run --rm -p 9090:9090 ghcr.io/ngthluu/loope-telemetry-server:0.2.2-rc.1 \
+  -token your-shared-secret
+```
+
 To build the image from source instead (from the repo root — the build needs
 `shared/`):
 

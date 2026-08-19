@@ -17,6 +17,28 @@ Prefer to do it yourself? Grab an archive from the
 [build from source](#build-from-source). Check the installed version with
 `loope --version`.
 
+## Release candidates
+
+Tags with an `-rc.N` suffix (e.g. `v0.2.2-rc.1`) are published as GitHub
+**prereleases**: they ship the same binaries and images as a real release, but
+the default install path never picks them up — `install.sh` resolves
+`releases/latest`, which GitHub only ever points at stable releases.
+
+To try one, pin the tag explicitly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ngthluu/loope/main/install.sh \
+  | LOOPE_VERSION=v0.2.2-rc.1 sh
+```
+
+Add `LOOPE_INSTALL_DIR=$HOME/.local/bin` to keep the candidate side-by-side
+with a stable install. Going back is the same command with the stable tag (or
+no `LOOPE_VERSION` at all).
+
+The telemetry-server image follows the same rule: an rc pushes only its
+versioned GHCR tags and leaves `:latest` on the last stable release — see
+[running an rc image](telemetry.md#running-the-server).
+
 ## Prerequisites
 
 loope is a wrapper around your local toolchain — these must be present at run
