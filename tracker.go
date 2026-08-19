@@ -240,6 +240,17 @@ func recordPR(logDir, url string) {
 	_ = os.WriteFile(filepath.Join(logDir, "pr"), []byte(url), 0o644)
 }
 
+// hasPR reports whether recordPR has already written a PR URL for this issue,
+// so ship (loop.go) can tell a PR the spec stage already opened apart from one
+// it still needs to create itself, and skip re-posting the PR-link comment.
+func hasPR(logDir string) bool {
+	if logDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(logDir, "pr"))
+	return err == nil
+}
+
 // clearState removes the local state marker, returning the issue to whatever
 // state GitHub reports (typically back to eligible). Used when the loop backs an
 // issue out to be re-picked. Best-effort.
