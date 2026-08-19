@@ -7,6 +7,10 @@
 #   LOOPE_VERSION       release tag to install (default: latest, e.g. v0.1.0)
 #   LOOPE_INSTALL_DIR   install directory   (default: /usr/local/bin)
 #
+# Only real releases install by default: the /releases/latest endpoint never
+# resolves to a prerelease, so rc tags (v*-rc.N) are skipped. To try a release
+# candidate, pin it explicitly: LOOPE_VERSION=v0.2.2-rc.1
+#
 # Downloads the prebuilt binary for your OS/arch from GitHub Releases,
 # verifies its checksum, and installs it. Needs: curl (or wget), tar, sha256sum
 # (or shasum). loope itself also needs git, gh, and claude on your PATH at run time.

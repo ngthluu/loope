@@ -1,6 +1,13 @@
 # GoReleaser configuration for loope.
-# Local dry run:  goreleaser release --snapshot --clean
-# Real release:   git tag v0.1.0 && git push origin v0.1.0  (CI does the rest)
+# Local dry run:        goreleaser release --snapshot --clean
+# Real release:         git tag v0.2.1 && git push origin v0.2.1        (CI does the rest)
+# Release candidate:    git tag v0.2.2-rc.1 && git push origin v0.2.2-rc.1
+#
+# Both flows run the same pipeline; the -rc.N suffix is what separates them:
+#   - GitHub release:  prerelease: auto marks rc tags as prereleases, so
+#     /releases/latest (which install.sh uses) never resolves to an rc.
+#   - Docker image:    rc versions get their versioned GHCR tags, but the
+#     :latest manifest is skipped (skip_push: auto below).
 version: 2
 
 project_name: loope
@@ -85,6 +92,8 @@ docker_manifests:
       - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-amd64
       - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-arm64
   - name_template: ghcr.io/ngthluu/loope-telemetry-server:latest
+    # auto = don't move :latest for prerelease (v*-rc.N) tags.
+    skip_push: auto
     image_templates:
       - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-amd64
       - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-arm64
