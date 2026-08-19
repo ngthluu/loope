@@ -118,33 +118,6 @@ HEADLESS: do not ask questions; make reasonable calls and note them in commit me
 	check(t, "executePrompt", executePrompt("docs/plan.md"), want)
 }
 
-func TestGoldenExecuteGroupPrompt(t *testing.T) {
-	want := `/superpowers:executing-plans Execute the plan at docs/plan.md.
-Use the execution style the plan recommends (subagent-driven or inline).
-Follow TDD per the plan. Commit as you complete tasks.
-HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
-
-This plan is being executed across multiple bounded sessions to avoid running
-out of context. Implement only the next 5 steps of the
-plan, even if more remain — do not go further. Before starting, check git log
-and the plan file for what earlier sessions already completed, and continue
-from there.
-If those steps finish the entire plan, commit and end your final reply with
-PLAN_COMPLETE. Otherwise, once you've implemented up to
-5 steps, commit your progress and end your final reply
-with GROUP_DONE.`
-	check(t, "executeGroupPrompt", executeGroupPrompt("docs/plan.md", 5), want)
-}
-
-func TestGoldenExecuteContinuePrompt(t *testing.T) {
-	want := `Continue. You were implementing a bounded group of plan steps and either did
-not finish or did not end with the expected sentinel. Check git status and
-the plan file for what remains in this group, finish it, commit, and end
-your reply with PLAN_COMPLETE if the whole plan is now done, or
-GROUP_DONE if more remains for a later session.`
-	check(t, "executeContinuePrompt", executeContinuePrompt(), want)
-}
-
 func TestGoldenBugPromptWithThreshold(t *testing.T) {
 	want := `/superpowers:systematic-debugging ISSUE BODY
 

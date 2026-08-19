@@ -16,7 +16,6 @@ with `~/`.
 | `claudeConfigDir`     | no       | —                | Claude Code profile dir; sets `CLAUDE_CONFIG_DIR` for every `claude` call ([details](#claudeconfigdir)) |
 | `maxQARounds`         | no       | `20`             | Max architect↔answerer rounds before a feature fails    |
 | `confidenceThreshold` | no       | `70`             | Confidence score (0–100) below which an issue is escalated to `needsInfo` instead of implemented, on both the bug and feature routes; `0` disables the gate |
-| `stepsPerSession`     | no       | `0` (unbounded)  | Caps how many plan steps one feature-pipeline execute session attempts before handing off to a fresh session ([details](#stepspersession)) |
 | `stateLabels`         | no       | see below        | Names of the [state labels](how-it-works.md#status-state-machine) |
 | `githubRetry`         | no       | see below        | Retry policy for transient GitHub failures              |
 | `models`              | no       | —                | Per-role model settings ([details](#models))            |
@@ -59,36 +58,6 @@ issue leaves the queue and the daemon never touches it again — a human answers
 the questions and removes the `ai-needs-info` label, which re-queues the issue
 from scratch. Set `confidenceThreshold` to `0` to disable the gate on both routes and
 always attempt an implementation.
-
-## `stepsPerSession`
-
-The feature pipeline's execute step normally implements the entire
-implementation plan in one Claude session. A large plan can exhaust that
-session's usable context before the plan is finished. Set `stepsPerSession`
-to cap how much one session attempts:
-
-```json
-"stepsPerSession": 5
-```
-
-With this set, the execute step runs across multiple **brand-new** Claude
-sessions instead of one — each session is told to implement only the next N
-steps, then stop. Nothing about the plan file's structure is parsed by the
-daemon: each fresh session reads the plan and the branch's git log itself to
-figure out where the previous session left off, the same "recover and
-continue from existing state" approach the loop already uses everywhere else.
-
-A session ends a group by printing `GROUP_DONE` (more of the plan remains —
-the daemon starts a fresh session for the next group) or `PLAN_COMPLETE` (the
-whole plan is now implemented). If a session's call fails outright, or
-succeeds without printing either sentinel, the loop retries that same session
-(via `--resume`, not a fresh session) with a short "continue" prompt, up to a
-few attempts, before giving up and parking the issue.
-
-Leave `stepsPerSession` unset (or `0`, the default) to keep the original
-behavior: one fresh execute session implements the whole plan, with no
-sentinel requirement. This only affects the feature pipeline's execute step —
-brainstorm, plan, and the bug pipeline are unaffected.
 
 ## `githubRetry`
 
