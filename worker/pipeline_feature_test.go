@@ -892,6 +892,40 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 	}
 }
 
+// TestResumeFeaturePipelineBrainstormStageLowConfidenceEscalates mirrors
+// TestFeaturePipelineLowConfidenceEscalates for the resume path: a
+// brainstorm-resume turn scoring below threshold must escalate instead of
+// falling through to the ordinary Q&A round loop.
+func TestResumeFeaturePipelineBrainstormStageLowConfidenceEscalates(t *testing.T) {
+	wt := t.TempDir()
+	cfg := &Config{
+		MaxQARounds:         3,
+		ConfidenceThreshold: 70,
+		Models: Models{
+			Architect: ModelConfig{Model: "opus"},
+			Answerer:  ModelConfig{Model: "sonnet"},
+		},
+	}
+	count := 0
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		count++
+		return claudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-sess"), "", nil
+	}}
+	c := &Claude{runner: f}
+	session := SessionInfo{SessionID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
+	err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
+	}
+	if lc.score != 40 {
+		t.Errorf("score = %d, want 40", lc.score)
+	}
+	if count != 1 {
+		t.Errorf("low confidence must stop after the first turn, got %d calls", count)
+	}
+}
+
 // TestResumeFeaturePipelinePlanStage resumes the plan session directly,
 // skipping brainstorm entirely, then runs execute fresh.
 func TestResumeFeaturePipelinePlanStage(t *testing.T) {
