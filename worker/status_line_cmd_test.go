@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,5 +198,148 @@ func TestResolveClaudeConfigDirDefault(t *testing.T) {
 	want := filepath.Join(home, ".claude")
 	if dir != want {
 		t.Errorf("dir = %q, want %q", dir, want)
+	}
+}
+
+const testLoopePath = "/usr/local/bin/loope"
+const testSettingsPath = "/home/user/.claude/settings.json"
+
+func TestPlanInstallFreshNoStatusLine(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	result, err := planInstall(settings, testLoopePath, testSettingsPath)
+	if err != nil {
+		t.Fatalf("planInstall: %v", err)
+	}
+	if !result.changed {
+		t.Fatal("changed = false, want true")
+	}
+	wantMsg := fmt.Sprintf("status-line: configured in %s (no previous statusLine was set, so your status line will show no visible output — set your own command later to see one alongside usage capture)", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+	cmd, ok := statusLineCommand(settings)
+	if !ok || cmd != bareCommand(testLoopePath) {
+		t.Errorf("statusLine.command = %q, want %q", cmd, bareCommand(testLoopePath))
+	}
+}
+
+func TestPlanInstallWrapsExistingCommand(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, "/path/to/real-statusline.sh")
+	result, err := planInstall(settings, testLoopePath, testSettingsPath)
+	if err != nil {
+		t.Fatalf("planInstall: %v", err)
+	}
+	if !result.changed {
+		t.Fatal("changed = false, want true")
+	}
+	wantMsg := fmt.Sprintf("status-line: wrapped existing statusLine command in %s", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+	cmd, _ := statusLineCommand(settings)
+	if cmd != wrappedCommand(testLoopePath, "/path/to/real-statusline.sh") {
+		t.Errorf("statusLine.command = %q, want the wrapped form", cmd)
+	}
+}
+
+func TestPlanInstallIdempotentOnBare(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, bareCommand(testLoopePath))
+	result, err := planInstall(settings, testLoopePath, testSettingsPath)
+	if err != nil {
+		t.Fatalf("planInstall: %v", err)
+	}
+	if result.changed {
+		t.Fatal("changed = true on a re-run, want false (idempotent)")
+	}
+	wantMsg := fmt.Sprintf("status-line: already configured (%s)", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+}
+
+func TestPlanInstallIdempotentOnWrapped(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, wrappedCommand(testLoopePath, "/path/to/real-statusline.sh"))
+	result, err := planInstall(settings, testLoopePath, testSettingsPath)
+	if err != nil {
+		t.Fatalf("planInstall: %v", err)
+	}
+	if result.changed {
+		t.Fatal("changed = true on a re-run, want false (idempotent)")
+	}
+}
+
+func TestPlanRemoveSettingsFileMissing(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	result := planRemove(settings, testLoopePath, testSettingsPath, false)
+	if result.changed || result.err {
+		t.Fatalf("result = %+v, want changed=false err=false", result)
+	}
+	wantMsg := fmt.Sprintf("status-line: nothing to remove (%s does not exist)", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+}
+
+func TestPlanRemoveRestoresOriginalAfterWrap(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, wrappedCommand(testLoopePath, "/path/to/real-statusline.sh"))
+	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	if !result.changed || result.err {
+		t.Fatalf("result = %+v, want changed=true err=false", result)
+	}
+	wantMsg := fmt.Sprintf("status-line: restored your original statusLine command in %s", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+	cmd, ok := statusLineCommand(settings)
+	if !ok || cmd != "/path/to/real-statusline.sh" {
+		t.Errorf("statusLine.command = (%q, %v), want (\"/path/to/real-statusline.sh\", true)", cmd, ok)
+	}
+}
+
+func TestPlanRemoveDeletesKeyAfterBareInstall(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, bareCommand(testLoopePath))
+	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	if !result.changed || result.err {
+		t.Fatalf("result = %+v, want changed=true err=false", result)
+	}
+	wantMsg := fmt.Sprintf("status-line: removed from %s", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+	if _, present := settings["statusLine"]; present {
+		t.Error("statusLine key still present after remove")
+	}
+}
+
+func TestPlanRemoveAlreadyClean(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	if result.changed || result.err {
+		t.Fatalf("result = %+v, want changed=false err=false", result)
+	}
+	wantMsg := fmt.Sprintf("status-line: already removed (%s)", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
+	}
+}
+
+func TestPlanRemoveHandEditedErrors(t *testing.T) {
+	settings := map[string]json.RawMessage{}
+	_ = setStatusLineCommand(settings, "/some/hand/edited/command.sh")
+	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	if result.changed {
+		t.Fatal("changed = true, want false — a hand-edited command must not be touched")
+	}
+	if !result.err {
+		t.Fatal("err = false, want true — a hand-edited command must be reported as an error")
+	}
+	wantMsg := fmt.Sprintf("status-line: statusLine command in %s was not set by this tool (or was modified since) — edit it manually", testSettingsPath)
+	if result.message != wantMsg {
+		t.Errorf("message = %q, want %q", result.message, wantMsg)
 	}
 }

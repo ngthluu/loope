@@ -156,3 +156,85 @@ func resolveClaudeConfigDir(cfg *Config) (string, error) {
 	}
 	return filepath.Join(home, ".claude"), nil
 }
+
+// installResult carries what planInstall decided, so runStatusLineCmd can
+// drive the backup/write/print I/O around a decision that's otherwise pure
+// and directly testable.
+type installResult struct {
+	message string
+	changed bool
+}
+
+// planInstall implements the spec's "Install" section: it decides what
+// `status-line` (no --remove) does to settings, given the resolved loope
+// path, and mutates settings in place when changed is true.
+func planInstall(settings map[string]json.RawMessage, loopePath, settingsPath string) (installResult, error) {
+	command, ok := statusLineCommand(settings)
+	if ok {
+		if isOurs, _, _ := matchOurs(command, loopePath); isOurs {
+			return installResult{
+				message: fmt.Sprintf("status-line: already configured (%s)", settingsPath),
+			}, nil
+		}
+		if err := setStatusLineCommand(settings, wrappedCommand(loopePath, command)); err != nil {
+			return installResult{}, err
+		}
+		return installResult{
+			message: fmt.Sprintf("status-line: wrapped existing statusLine command in %s", settingsPath),
+			changed: true,
+		}, nil
+	}
+	if err := setStatusLineCommand(settings, bareCommand(loopePath)); err != nil {
+		return installResult{}, err
+	}
+	return installResult{
+		message: fmt.Sprintf("status-line: configured in %s (no previous statusLine was set, so your status line will show no visible output — set your own command later to see one alongside usage capture)", settingsPath),
+		changed: true,
+	}, nil
+}
+
+// removeResult carries what planRemove decided. err marks a message that
+// belongs on stderr with exit code 1, as opposed to an informational exit-0
+// message.
+type removeResult struct {
+	message string
+	changed bool
+	err     bool
+}
+
+// planRemove implements the spec's "Remove" section: it decides what
+// `status-line --remove` does to settings, given the resolved loope path and
+// whether settings.json existed at all, and mutates settings in place when
+// changed is true.
+func planRemove(settings map[string]json.RawMessage, loopePath, settingsPath string, settingsExisted bool) removeResult {
+	if !settingsExisted {
+		return removeResult{
+			message: fmt.Sprintf("status-line: nothing to remove (%s does not exist)", settingsPath),
+		}
+	}
+	command, ok := statusLineCommand(settings)
+	if !ok {
+		return removeResult{
+			message: fmt.Sprintf("status-line: already removed (%s)", settingsPath),
+		}
+	}
+	isOurs, isWrapped, original := matchOurs(command, loopePath)
+	if !isOurs {
+		return removeResult{
+			message: fmt.Sprintf("status-line: statusLine command in %s was not set by this tool (or was modified since) — edit it manually", settingsPath),
+			err:     true,
+		}
+	}
+	if isWrapped {
+		_ = setStatusLineCommand(settings, original)
+		return removeResult{
+			message: fmt.Sprintf("status-line: restored your original statusLine command in %s", settingsPath),
+			changed: true,
+		}
+	}
+	delete(settings, "statusLine")
+	return removeResult{
+		message: fmt.Sprintf("status-line: removed from %s", settingsPath),
+		changed: true,
+	}
+}
