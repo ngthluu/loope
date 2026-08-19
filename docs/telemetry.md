@@ -12,7 +12,15 @@ limit. `loope-telemetry-server` — its own binary since the monorepo split
 loope-telemetry-server -addr :9090 -token your-shared-secret
 ```
 
-Or with Docker (build from the repo root — the image needs `shared/`):
+Or with Docker. Every release publishes a multi-arch image to GHCR:
+
+```bash
+docker run --rm -p 9090:9090 ghcr.io/ngthluu/loope-telemetry-server:latest \
+  -token your-shared-secret
+```
+
+To build the image from source instead (from the repo root — the build needs
+`shared/`):
 
 ```bash
 docker build -f telemetry-server/Dockerfile -t loope-telemetry-server .

@@ -1,0 +1,8 @@
+# Release image, used by goreleaser's `dockers:` section: the build context
+# is a temp dir holding the already-built linux binary for the target arch,
+# so this file only packages — it never compiles. For a from-source local
+# build, use telemetry-server/Dockerfile instead.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY loope-telemetry-server /usr/local/bin/loope-telemetry-server
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/loope-telemetry-server"]
