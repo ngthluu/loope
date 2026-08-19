@@ -14,17 +14,17 @@ import (
 // tool ever writes to settings.json's statusLine.command, and the only two
 // shapes matchOurs recognizes as "ours".
 func wrappedCommand(loopePath, original string) string {
-	return fmt.Sprintf(`sh -c 'tee >(%s claude-usage-hook) | %s'`, loopePath, original)
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | %s'`, loopePath, original)
 }
 
 func bareCommand(loopePath string) string {
-	return fmt.Sprintf(`sh -c 'tee >(%s claude-usage-hook) >/dev/null'`, loopePath)
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) >/dev/null'`, loopePath)
 }
 
 // wrappedPrefix is the fixed portion of a wrapped command up to (and
 // including) the space before the original command it wraps.
 func wrappedPrefix(loopePath string) string {
-	return fmt.Sprintf(`sh -c 'tee >(%s claude-usage-hook) | `, loopePath)
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | `, loopePath)
 }
 
 // matchOurs reports whether cmd is a command this tool wrote for loopePath.

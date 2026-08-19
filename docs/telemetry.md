@@ -88,7 +88,7 @@ by hand instead, for example to review or tweak the wrapping) something like:
 # ~/.claude/settings.json
 "statusLine": {
   "type": "command",
-  "command": "sh -c 'tee >(loope claude-usage-hook) | /path/to/your/real-statusline.sh'"
+  "command": "bash -c 'tee >(loope claude-usage-hook) | /path/to/your/real-statusline.sh'"
 }
 ```
 

@@ -12,13 +12,13 @@ import (
 
 func TestWrappedAndBareCommand(t *testing.T) {
 	got := wrappedCommand("/usr/local/bin/loope", "/path/to/real-statusline.sh")
-	want := `sh -c 'tee >(/usr/local/bin/loope claude-usage-hook) | /path/to/real-statusline.sh'`
+	want := `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) | /path/to/real-statusline.sh'`
 	if got != want {
 		t.Errorf("wrappedCommand = %q, want %q", got, want)
 	}
 
 	got = bareCommand("/usr/local/bin/loope")
-	want = `sh -c 'tee >(/usr/local/bin/loope claude-usage-hook) >/dev/null'`
+	want = `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) >/dev/null'`
 	if got != want {
 		t.Errorf("bareCommand = %q, want %q", got, want)
 	}
