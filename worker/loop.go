@@ -266,12 +266,12 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		}
 		prompt := resumePrompt(logDir, priorState, o.cfg.StateLabels.NeedsInfo, content)
 		if session.Kind == "bug" {
-			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, session, prompt)
+			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt, session, prompt)
 		} else {
 			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, session, prompt, o.gh, o.wt, branch, issue.Title, n)
 		}
 	} else if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
+		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt)
 	} else {
 		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, o.gh, o.wt, branch, issue.Title, n)
 	}
