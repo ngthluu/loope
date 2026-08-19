@@ -34,6 +34,8 @@ var promptTestData = map[string]map[string]any{
 	"uat-section":              {"Checklist": "- [ ] C"},
 	"uat-feature.md.tmpl":      {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
 	"uat-bug.md.tmpl":          {"Issue": "I", "Base": "main", "UATCoverage": "C"},
+	"codereview.md.tmpl":       {"Round": 1, "Rounds": 2, "Base": "main"},
+	"codereview-comment":       {"Round": 1, "Rounds": 2, "Status": "fixed", "Summary": "S"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
@@ -196,7 +198,7 @@ func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
-		uatBeginSentinel, uatEndSentinel, uatMarker}
+		uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())
 		if err != nil {

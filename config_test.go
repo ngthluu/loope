@@ -341,6 +341,51 @@ func TestLoadConfigTelemetryAbsentByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadConfigCodeReviewRoundTrips(t *testing.T) {
+	p := writeTemp(t, `{
+		"repoPath": "/tmp/clone",
+		"repoSlug": "org/repo",
+		"workDir": "/tmp/work",
+		"models": {"codeReview": {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 5, "maxTurns": 40, "rounds": 2}}
+	}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.CodeReview == nil {
+		t.Fatal("Models.CodeReview = nil, want the parsed block")
+	}
+	want := CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet", Effort: "medium", MaxBudgetUSD: 5, MaxTurns: 40}, Rounds: 2}
+	if *cfg.Models.CodeReview != want {
+		t.Errorf("Models.CodeReview = %+v, want %+v", *cfg.Models.CodeReview, want)
+	}
+}
+
+func TestLoadConfigCodeReviewAbsentByDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath":"/r","repoSlug":"o/r","workDir":"/w"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.CodeReview != nil {
+		t.Fatalf("Models.CodeReview = %+v, want nil when the block is absent — an absent block must skip the step entirely, not run with defaults", cfg.Models.CodeReview)
+	}
+}
+
+func TestLoadConfigCodeReviewZeroRoundsTreatedAsOne(t *testing.T) {
+	p := writeTemp(t, `{
+		"repoPath": "/tmp/clone", "repoSlug": "org/repo", "workDir": "/tmp/work",
+		"models": {"codeReview": {"model": "sonnet"}}
+	}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.CodeReview == nil || cfg.Models.CodeReview.Rounds != 0 {
+		t.Fatalf("Models.CodeReview.Rounds = %+v, want 0 as parsed — the <=0-means-1 default is CodeReview.Run's job, not LoadConfig's", cfg.Models.CodeReview)
+	}
+}
+
 func TestLoadConfigTelemetryPushIntervalDefault(t *testing.T) {
 	p := writeTemp(t, `{"repoPath":"/r","repoSlug":"o/r","workDir":"/w","telemetry":{"serverURL":"http://host:9090","token":"secret"}}`)
 	cfg, err := LoadConfig(p)

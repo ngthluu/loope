@@ -30,6 +30,10 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 				return `{"title": "Fix crash", "body": "boom", "comments": []}`, "", nil
 			case strings.HasPrefix(joined, "pr create"):
 				return "https://github.com/org/repo/pull/99\n", "", nil
+			case strings.HasPrefix(joined, "pr view"):
+				return `{"number": 99, "url": "https://github.com/org/repo/pull/99"}`, "", nil
+			case strings.HasPrefix(joined, "pr review"):
+				return "", "", nil
 			}
 			return "", "", nil
 		case "git":
@@ -44,6 +48,9 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 			prompt := c.stdin
 			if strings.Contains(prompt, "triage agent") {
 				return claudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "small"}`, "t1"), "", nil
+			}
+			if strings.Contains(prompt, "/code-review") {
+				return claudeJSON("Reviewing...\n"+codeReviewBeginSentinel+"\nSTATUS: clean\nNothing to fix.\n"+codeReviewEndSentinel, "cr1"), "", nil
 			}
 			if env.failClaude {
 				return "", "boom", fmt.Errorf("exit 1")
@@ -1157,5 +1164,61 @@ func TestSweepOrphansThenNextCycleResumesSession(t *testing.T) {
 	}
 	if !resumed {
 		t.Error("the next cycle after a sweep must resume the crash-stranded session, not restart brainstorm-0")
+	}
+}
+
+// TestShipSkipsCodeReviewWhenNotConfigured verifies an absent
+// Models.CodeReview block makes ship() behave exactly as before: no PR-number
+// lookup, no review comment.
+func TestShipSkipsCodeReviewWhenNotConfigured(t *testing.T) {
+	env := newFakeEnv(t)
+	if err := runCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "pr view")) != 0 || len(env.callsMatching("gh", "pr review")) != 0 {
+		t.Error("code review must make no gh calls when Models.CodeReview is nil")
+	}
+	if env.readLocalState(7) != "ai-done" {
+		t.Errorf("state = %q, want ai-done", env.readLocalState(7))
+	}
+}
+
+// TestShipRunsCodeReviewWhenConfigured verifies ship() invokes the post-ship
+// code review loop and still reaches ai-done.
+func TestShipRunsCodeReviewWhenConfigured(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	o.cfg.Models.CodeReview = &CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet"}, Rounds: 1}
+	if err := runCycle(o); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "pr review")) != 1 {
+		t.Errorf("want exactly one pr review call, got %v", env.callsMatching("gh", "pr review"))
+	}
+	if env.readLocalState(7) != "ai-done" {
+		t.Errorf("state = %q, want ai-done even with code review enabled", env.readLocalState(7))
+	}
+}
+
+// TestShipReachesDoneWhenCodeReviewErrors verifies a code-review loop failure
+// (here, the PR lookup fails) never blocks the ai-done transition — the spec
+// treats code review as additive quality, never a shipping gate.
+func TestShipReachesDoneWhenCodeReviewErrors(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	o.cfg.Models.CodeReview = &CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet"}, Rounds: 1}
+	orig := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		joined := strings.Join(c.args, " ")
+		if c.name == "gh" && strings.HasPrefix(joined, "pr view") {
+			return "", "no pull requests found", fmt.Errorf("exit 1")
+		}
+		return orig(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatal(err)
+	}
+	if env.readLocalState(7) != "ai-done" {
+		t.Errorf("state = %q, want ai-done even though code review errored", env.readLocalState(7))
 	}
 }

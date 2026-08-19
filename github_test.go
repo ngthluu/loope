@@ -323,6 +323,47 @@ func TestPRURLForBranch(t *testing.T) {
 	}
 }
 
+func TestPRNumberForBranch(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: `{"number":42}`}}}
+	g := testGitHub(f)
+	n, err := g.PRNumberForBranch(context.Background(), "ai/issue-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 42 {
+		t.Errorf("number = %d, want 42", n)
+	}
+	if !hasArg(f.calls[0].args, "view") || !hasArg(f.calls[0].args, "ai/issue-5") {
+		t.Errorf("call args = %v", f.calls[0].args)
+	}
+	if got := argAfter(f.calls[0].args, "--json"); got != "number" {
+		t.Errorf("--json = %q, want \"number\"", got)
+	}
+}
+
+func TestPRNumberForBranchPropagatesError(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{err: errors.New("exit 1"), stderr: "no pull requests found"}}}
+	g := testGitHub(f)
+	if _, err := g.PRNumberForBranch(context.Background(), "ai/issue-5"); err == nil {
+		t.Fatal("want an error when gh pr view fails")
+	}
+}
+
+func TestReviewComment(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: ""}}}
+	g := testGitHub(f)
+	if err := g.ReviewComment(context.Background(), 42, "looks good"); err != nil {
+		t.Fatal(err)
+	}
+	call := f.calls[0]
+	if !hasArg(call.args, "review") || !hasArg(call.args, "42") || !hasArg(call.args, "--comment") {
+		t.Errorf("args = %v, want a `gh pr review 42 --comment ...` call", call.args)
+	}
+	if argAfter(call.args, "--body") != "looks good" {
+		t.Errorf("--body = %q", argAfter(call.args, "--body"))
+	}
+}
+
 func TestGHRetriesTransientThenSucceeds(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{
 		{err: errors.New("exit 1"), stderr: "HTTP 502 Bad Gateway"},

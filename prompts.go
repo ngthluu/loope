@@ -53,16 +53,35 @@ func mustRender(name string, data map[string]any) string {
 // them in the prompts would let the instruction and the parser drift apart.
 func promptData() map[string]any {
 	return map[string]any{
-		"ConfidenceSentinel":   confidenceSentinel,
-		"SpecReadySentinel":    specReadySentinel,
-		"ReadySentinel":        readySentinel,
-		"AlreadyDoneSentinel":  alreadyDoneSentinel,
-		"DoneConfirmSentinel":  doneConfirmSentinel,
-		"UATBeginSentinel":     uatBeginSentinel,
-		"UATEndSentinel":       uatEndSentinel,
-		"UATMarker":            uatMarker,
-		"BotMarker":            botMarker,
-		"GroupDoneSentinel":    groupDoneSentinel,
-		"PlanCompleteSentinel": planCompleteSentinel,
+		"ConfidenceSentinel":      confidenceSentinel,
+		"SpecReadySentinel":       specReadySentinel,
+		"ReadySentinel":           readySentinel,
+		"AlreadyDoneSentinel":     alreadyDoneSentinel,
+		"DoneConfirmSentinel":     doneConfirmSentinel,
+		"UATBeginSentinel":        uatBeginSentinel,
+		"UATEndSentinel":          uatEndSentinel,
+		"UATMarker":               uatMarker,
+		"BotMarker":               botMarker,
+		"CodeReviewBeginSentinel": codeReviewBeginSentinel,
+		"CodeReviewEndSentinel":   codeReviewEndSentinel,
+		"GroupDoneSentinel":       groupDoneSentinel,
+		"PlanCompleteSentinel":    planCompleteSentinel,
 	}
+}
+
+func codeReviewPrompt(round, rounds int, base string) string {
+	d := promptData()
+	d["Round"] = round
+	d["Rounds"] = rounds
+	d["Base"] = base
+	return mustRender("codereview.md.tmpl", d)
+}
+
+func codeReviewComment(round, rounds int, status codeReviewStatus, summary string) string {
+	d := promptData()
+	d["Round"] = round
+	d["Rounds"] = rounds
+	d["Status"] = string(status)
+	d["Summary"] = summary
+	return mustRender("codereview-comment", d)
 }
