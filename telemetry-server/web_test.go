@@ -46,6 +46,31 @@ func TestTelemetryIndexGroupsByRepoSlugAndShowsWorkers(t *testing.T) {
 	}
 }
 
+func TestTelemetryIndexOrdersOnlineBeforeOfflineWithinRepoSlug(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	base := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+
+	s.now = func() time.Time { return base }
+	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m-aaa", RepoSlug: "o/r", Hostname: "aaa-host", PushIntervalSec: 15}})
+
+	later := base.Add(60 * time.Second) // > 3*15s online window, so m-aaa is now offline
+	s.now = func() time.Time { return later }
+	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m-zzz", RepoSlug: "o/r", Hostname: "zzz-host", PushIntervalSec: 15}})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	aIdx, zIdx := strings.Index(body, "m-aaa"), strings.Index(body, "m-zzz")
+	if aIdx == -1 || zIdx == -1 {
+		t.Fatalf("index body missing a worker card:\n%s", body)
+	}
+	if zIdx > aIdx {
+		t.Fatalf("expected online m-zzz before offline m-aaa (alphabetically the reverse), got body:\n%s", body)
+	}
+}
+
 func TestTelemetryDetailShowsUsageUnknownWhenAbsent(t *testing.T) {
 	s := newTestTelemetryServer(t)
 	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})

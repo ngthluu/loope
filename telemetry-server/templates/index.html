@@ -1,12 +1,11 @@
-{{define "trail"}}<div class="p-3">
-{{$selID := ""}}{{with .Selected}}{{$selID = .MachineID}}{{end}}
+{{define "tindex"}}<div class="p-6">
 {{range .Groups}}
- <div class="mb-4">
-  <div class="mb-1.5 px-1 font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-faint">{{.RepoSlug}}</div>
-  <div class="grid grid-cols-2 gap-2">
+ <div class="mb-6">
+  <div class="mb-2 px-1 font-mono text-[11px] font-semibold uppercase tracking-[0.15em] text-faint">{{.RepoSlug}}</div>
+  <div class="grid grid-cols-6 gap-3">
   {{range .Workers}}
-   <a href="?worker={{.MachineID}}" hx-get="/detail?worker={{.MachineID}}" hx-target="#main" hx-swap="morph:innerHTML"
-      class="block overflow-hidden rounded-md border bg-panel font-mono text-text hover:border-live/40 {{if eq $selID .MachineID}}border-live ring-1 ring-live/40{{else}}border-line2{{end}}">
+   <a href="/workers/{{.MachineID}}"
+      class="block overflow-hidden rounded-md border border-line2 bg-panel font-mono text-text hover:border-live/40">
     <div class="flex h-12 items-center justify-center border-b border-line2 bg-panel2">
      <svg class="h-5 w-5 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
       <rect x="3" y="4" width="18" height="6" rx="1.5"></rect>

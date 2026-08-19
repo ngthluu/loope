@@ -97,24 +97,63 @@ func (s *TelemetryServer) buildTelemetryView(selectedID string) telemetryView {
 	return view
 }
 
-// registerWebHandlers wires the dashboard routes onto mux: GET / (full
-// page), GET /rail and GET /detail (htmx poll fragments), and the
-// embedded static assets (staticHandler, static.go).
+// telemetryIndexView is the template payload for GET /.
+type telemetryIndexView struct {
+	Groups []telemetryGroup
+}
+
+// buildTelemetryIndexView groups all workers by RepoSlug (sorted), and
+// within each group sorts online workers before offline, both buckets by
+// hostname.
+func (s *TelemetryServer) buildTelemetryIndexView() telemetryIndexView {
+	now := s.now()
+	s.mu.Lock()
+	byRepo := map[string][]telemetryWorkerView{}
+	for _, ws := range s.workers {
+		byRepo[ws.Resource.RepoSlug] = append(byRepo[ws.Resource.RepoSlug], buildTelemetryWorkerView(ws, now))
+	}
+	s.mu.Unlock()
+
+	var slugs []string
+	for slug := range byRepo {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
+	view := telemetryIndexView{}
+	for _, slug := range slugs {
+		workers := byRepo[slug]
+		sort.Slice(workers, func(i, j int) bool {
+			if workers[i].Online != workers[j].Online {
+				return workers[i].Online // online sorts before offline
+			}
+			return workers[i].Hostname < workers[j].Hostname
+		})
+		view.Groups = append(view.Groups, telemetryGroup{RepoSlug: slug, Workers: workers})
+	}
+	return view
+}
+
+// registerWebHandlers wires the dashboard routes onto mux: GET / (index
+// page), GET /detail (htmx poll fragment), and the embedded static assets
+// (staticHandler, static.go).
 func (s *TelemetryServer) registerWebHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.handleTelemetryIndex)
-	mux.HandleFunc("GET /rail", s.handleTelemetryRail)
-	mux.HandleFunc("GET /detail", s.handleTelemetryDetail)
+	mux.HandleFunc("GET /detail", s.handleTelemetryDetail) // Task 5 removes this
 	mux.Handle("GET /static/", staticHandler())
 }
 
+// handleTelemetryIndex serves the full-width index page. A poll from the
+// page's own #content element (identified by the HX-Request header htmx
+// sets) gets just the grid fragment; any other request gets the full
+// document.
 func (s *TelemetryServer) handleTelemetryIndex(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "tpage", v)
-}
-
-func (s *TelemetryServer) handleTelemetryRail(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "trail", v)
+	v := s.buildTelemetryIndexView()
+	if r.Header.Get("HX-Request") == "true" {
+		renderTelemetryHTML(w, s.tmpl, "tindex", v)
+		return
+	}
+	renderTelemetryHTML(w, s.tmpl, "tindexPage", v)
 }
 
 func (s *TelemetryServer) handleTelemetryDetail(w http.ResponseWriter, r *http.Request) {
