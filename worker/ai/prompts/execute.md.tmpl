@@ -2,15 +2,3 @@
 Use the execution style the plan recommends (subagent-driven or inline).
 Follow TDD per the plan. Commit as you complete tasks.
 HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
-{{- if gt .StepsPerSession 0}}
-
-This plan is being executed across multiple bounded sessions to avoid running
-out of context. Implement only the next {{.StepsPerSession}} steps of the
-plan, even if more remain — do not go further. Before starting, check git log
-and the plan file for what earlier sessions already completed, and continue
-from there.
-If those steps finish the entire plan, commit and end your final reply with
-{{.PlanCompleteSentinel}}. Otherwise, once you've implemented up to
-{{.StepsPerSession}} steps, commit your progress and end your final reply
-with {{.GroupDoneSentinel}}.
-{{- end}}

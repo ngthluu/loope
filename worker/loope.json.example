@@ -24,8 +24,6 @@
   "maxQARounds": 20,
   "// confidenceThreshold": "Optional, default 70 — brainstorm/debug confidence (0-100) below which the issue escalates to ai-needs-info instead of being designed. 0 or less disables the gate.",
   "confidenceThreshold": 70,
-  "// stepsPerSession": "Optional, default 0 — plan steps one execute session attempts before handing off to a fresh session (grouped execution, GROUP_DONE/PLAN_COMPLETE). 0 = unbounded: one session implements the whole plan.",
-  "stepsPerSession": 0,
 
   "// stateLabels": "Optional — the lifecycle labels; unset fields keep these defaults.",
   "stateLabels": {
