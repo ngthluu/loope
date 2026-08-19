@@ -1,11 +1,17 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"bytes"
 	"embed"
+	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +32,97 @@ type telemetryWorkerView struct {
 	SevenDayPct   float64
 	SevenDayReset time.Time
 	Logs          []string
+	IssueLogs     []issueLogDirView
+}
+
+// issueLogFileView is one file entry in the persisted-logs tree.
+type issueLogFileView struct {
+	Name string
+}
+
+// issueLogDirView is one directory entry in the persisted-logs tree,
+// pre-sorted and carrying its display label.
+type issueLogDirView struct {
+	Name        string
+	DisplayName string
+	Files       []issueLogFileView
+}
+
+// issueNumber extracts N from an "issue-N" directory name.
+func issueNumber(name string) (int, bool) {
+	if !strings.HasPrefix(name, "issue-") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "issue-"))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// issueLogDisplayName renders "issue-42" as "Issue 42"; anything else
+// (namely "triage") displays as-is.
+func issueLogDisplayName(name string) string {
+	if n, ok := issueNumber(name); ok {
+		return fmt.Sprintf("Issue %d", n)
+	}
+	return name
+}
+
+// buildIssueLogDirViews converts a worker's raw IssueLogs into the sorted
+// tree the template renders: numeric "issue-N" dirs (newest-modified first)
+// before the shared "triage" dir, each with its files listed by name.
+func buildIssueLogDirViews(dirs map[string]shared.IssueLogDir) []issueLogDirView {
+	names := make([]string, 0, len(dirs))
+	for name := range dirs {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		_, iIsIssue := issueNumber(names[i])
+		_, jIsIssue := issueNumber(names[j])
+		if iIsIssue != jIsIssue {
+			return iIsIssue // numeric issue dirs sort before non-numeric ("triage")
+		}
+		return dirModTime(dirs[names[i]]).After(dirModTime(dirs[names[j]]))
+	})
+	views := make([]issueLogDirView, 0, len(names))
+	for _, name := range names {
+		d := dirs[name]
+		files := make([]issueLogFileView, 0, len(d.Files))
+		for _, f := range d.Files {
+			files = append(files, issueLogFileView{Name: f.Name})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+		views = append(views, issueLogDirView{Name: name, DisplayName: issueLogDisplayName(name), Files: files})
+	}
+	return views
+}
+
+// findIssueLogFileContent looks up one file's raw content within dirs.
+func findIssueLogFileContent(dirs map[string]shared.IssueLogDir, dirName, fileName string) (string, bool) {
+	d, ok := dirs[dirName]
+	if !ok {
+		return "", false
+	}
+	for _, f := range d.Files {
+		if f.Name == fileName {
+			return f.Content, true
+		}
+	}
+	return "", false
+}
+
+// formatIssueLogFileContent pretty-prints .json files server-side; everything
+// else renders as-is — syntax highlighting is explicitly out of scope.
+func formatIssueLogFileContent(name, content string) string {
+	if !strings.HasSuffix(name, ".json") {
+		return content
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(content), "", "  "); err != nil {
+		return content
+	}
+	return pretty.String()
 }
 
 // telemetryGroup is one repoSlug's workers, sorted by hostname.
@@ -45,6 +142,7 @@ func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerVie
 		Online:     ws.online(now),
 		LastPushAt: ws.LastPushAt,
 		Logs:       ws.Logs.Lines(),
+		IssueLogs:  buildIssueLogDirViews(ws.IssueLogs),
 	}
 	if u := ws.usableUsage(now); u != nil {
 		v.FiveHourPct, v.FiveHourReset = u.FiveHourUsedPct, u.FiveHourResetAt
@@ -115,33 +213,53 @@ func (s *TelemetryServer) handleTelemetryIndex(w http.ResponseWriter, r *http.Re
 }
 
 // telemetryWorkerPageView is the template payload for GET /workers/{id}.
-// Worker is nil when machineID matches no known worker (e.g. an offline
-// worker evicted after a server restart) — the template then renders a
-// "not found" state instead of erroring.
+// Worker is nil when machineID matches no known worker. SelectedFile is
+// non-empty when a specific log file is being viewed; FileNotFound is set
+// when the requested dir/file no longer exists on the worker's latest push.
 type telemetryWorkerPageView struct {
-	MachineID string
-	Worker    *telemetryWorkerView
+	MachineID    string
+	Worker       *telemetryWorkerView
+	SelectedDir  string
+	SelectedFile string
+	FileContent  string
+	FileNotFound bool
 }
 
 // buildTelemetryWorkerPageView looks up machineID and renders its current
-// state, or returns a Worker-less view when it has no match.
-func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID string) telemetryWorkerPageView {
+// state, optionally resolving the file named by dir/file for the log
+// viewer pane. dir and file are both empty when no file is selected.
+func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file string) telemetryWorkerPageView {
 	now := s.now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ws := s.workers[machineID]
 	if ws == nil {
+		s.mu.Unlock()
 		return telemetryWorkerPageView{MachineID: machineID}
 	}
-	v := buildTelemetryWorkerView(ws, now)
-	return telemetryWorkerPageView{MachineID: machineID, Worker: &v}
+	wv := buildTelemetryWorkerView(ws, now)
+	var content string
+	var found bool
+	if dir != "" && file != "" {
+		content, found = findIssueLogFileContent(ws.IssueLogs, dir, file)
+	}
+	s.mu.Unlock()
+
+	v := telemetryWorkerPageView{MachineID: machineID, Worker: &wv, SelectedDir: dir, SelectedFile: file}
+	if dir != "" && file != "" {
+		if !found {
+			v.FileNotFound = true
+		} else {
+			v.FileContent = formatIssueLogFileContent(file, content)
+		}
+	}
+	return v
 }
 
 // handleTelemetryWorker serves the worker detail page. Like the index page,
 // a poll from the page's own #content element gets just the content
 // fragment; a plain navigation gets the full document.
 func (s *TelemetryServer) handleTelemetryWorker(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryWorkerPageView(r.PathValue("machineID"))
+	v := s.buildTelemetryWorkerPageView(r.PathValue("machineID"), r.URL.Query().Get("dir"), r.URL.Query().Get("file"))
 	if r.Header.Get("HX-Request") == "true" {
 		renderTelemetryHTML(w, s.tmpl, "tdetail", v)
 		return

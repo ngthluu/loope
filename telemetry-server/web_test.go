@@ -126,6 +126,103 @@ func TestTelemetryWorkerUnknownIDRendersNotFound(t *testing.T) {
 	}
 }
 
+func TestTelemetryWorkerShowsPersistedLogTree(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-42", Files: []shared.IssueLogFile{{Name: "003-answer-1.output.md", Content: "the answer"}}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "Issue 42") {
+		t.Fatalf("worker page body missing the issue-42 tree node:\n%s", body)
+	}
+	if !strings.Contains(body, "003-answer-1.output.md") {
+		t.Fatalf("worker page body missing the file entry:\n%s", body)
+	}
+}
+
+func TestTelemetryWorkerSelectsFileContent(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-42", Files: []shared.IssueLogFile{{Name: "003-answer-1.output.md", Content: "the answer is 42"}}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1?dir=issue-42&file=003-answer-1.output.md", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "the answer is 42") {
+		t.Fatalf("worker page body missing selected file content:\n%s", rec.Body.String())
+	}
+}
+
+func TestTelemetryWorkerPrettyPrintsJSONFile(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-42", Files: []shared.IssueLogFile{{Name: "001-answer.json", Content: `{"a":1}`}}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1?dir=issue-42&file=001-answer.json", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	// html/template HTML-escapes quotes inside <pre> content (security: file
+	// content is worker-controlled, so it must never be injected unescaped).
+	if !strings.Contains(rec.Body.String(), "&#34;a&#34;: 1") {
+		t.Fatalf("worker page body missing pretty-printed JSON:\n%s", rec.Body.String())
+	}
+}
+
+func TestTelemetryWorkerUnknownFileRendersNotFound(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	pushWorker(t, s, shared.PushRequest{
+		Resource:  shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		IssueLogs: []shared.IssueLogDir{{Name: "issue-42", Files: []shared.IssueLogFile{{Name: "state", Content: "wip"}}}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1?dir=issue-42&file=nope", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "File not found") {
+		t.Fatalf("worker page body missing a file-not-found message:\n%s", rec.Body.String())
+	}
+}
+
+func TestTelemetryWorkerOrdersIssueDirsBeforeTriageNewestFirst(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	base := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "triage", Files: []shared.IssueLogFile{{Name: "session", ModTime: base.Add(3 * time.Hour)}}},
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "state", ModTime: base}}},
+			{Name: "issue-2", Files: []shared.IssueLogFile{{Name: "state", ModTime: base.Add(time.Hour)}}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	i2, i1, tri := strings.Index(body, "Issue 2"), strings.Index(body, "Issue 1"), strings.Index(body, "triage")
+	if i2 == -1 || i1 == -1 || tri == -1 {
+		t.Fatalf("worker page body missing a tree node:\n%s", body)
+	}
+	if !(i2 < i1 && i1 < tri) {
+		t.Fatalf("expected order Issue 2, Issue 1, triage; got positions %d, %d, %d in:\n%s", i2, i1, tri, body)
+	}
+}
+
 // TestAppCSSCoversTemplateClasses is the guard against the manual Tailwind
 // regeneration step being skipped. telemetry-server/static/app.css must be
 // regenerated from tailwind.css whenever a template's classes change, or the

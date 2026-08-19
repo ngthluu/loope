@@ -18,8 +18,34 @@
    {{else}}<dd class="mt-1.5 font-mono text-xl font-semibold tabular-nums text-text">{{printf "%.1f%%" .SevenDayPct}} <span class="text-[11px] font-normal text-faint">resets {{.SevenDayReset.Format "Jan 2 15:04"}}</span></dd>{{end}}
   </div>
  </dl>
- <div class="rounded-md border border-line bg-ink/40 p-3 font-mono text-[11px] leading-relaxed text-muted">
+ <div class="mb-5 rounded-md border border-line bg-ink/40 p-3 font-mono text-[11px] leading-relaxed text-muted">
   {{range .Logs}}<div>{{.}}</div>{{else}}<div class="text-faint">No log lines yet.</div>{{end}}
+ </div>
+ <div class="grid grid-cols-[280px_1fr] gap-4">
+  <div class="rounded-md border border-line bg-panel p-2">
+  {{range .IssueLogs}}
+   <details class="mb-1" {{if eq $.SelectedDir .Name}}open{{end}}>
+    <summary class="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 font-mono text-[11px] font-semibold text-text hover:bg-panel2">
+     <svg class="chev h-3 w-3 shrink-0 text-faint transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+     {{.DisplayName}}
+    </summary>
+    <div class="ml-4 border-l border-line2 pl-2">
+    {{$dirName := .Name}}
+    {{range .Files}}
+     <a href="/workers/{{$.MachineID}}?dir={{$dirName}}&file={{.Name}}"
+        class="block truncate rounded px-1.5 py-0.5 font-mono text-[11px] {{if and (eq $.SelectedDir $dirName) (eq $.SelectedFile .Name)}}bg-live/10 text-live{{else}}text-muted hover:bg-panel2{{end}}">{{.Name}}</a>
+    {{end}}
+    </div>
+   </details>
+  {{else}}
+   <div class="p-2 font-mono text-[11px] text-faint">No persisted logs yet.</div>
+  {{end}}
+  </div>
+  <div class="min-w-0 rounded-md border border-line bg-ink/40 p-3">
+  {{if $.FileNotFound}}<div class="font-mono text-[11px] text-faint">File not found.</div>
+  {{else if $.SelectedFile}}<pre class="scroll overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted">{{$.FileContent}}</pre>
+  {{else}}<div class="font-mono text-[11px] text-faint">Select a file to view its contents.</div>{{end}}
+  </div>
  </div>
 {{else}}<div class="flex h-full items-center justify-center py-20 font-mono text-[12px] text-faint">Worker not found.</div>{{end}}
 </div>{{end}}
