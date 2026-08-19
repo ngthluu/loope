@@ -14,6 +14,14 @@ const readySentinel = "PIPELINE_READY"
 
 const specReadySentinel = "SPEC_READY:"
 
+// groupDoneSentinel/planCompleteSentinel are emitted by a grouped execute
+// session (see executePlanGrouped) to tell the daemon whether more of the
+// plan remains for a later fresh session or the whole plan is now done.
+// Both only ever appear when cfg.StepsPerSession > 0 — the ungrouped execute
+// path never requires or checks either sentinel.
+const groupDoneSentinel = "GROUP_DONE"
+const planCompleteSentinel = "PLAN_COMPLETE"
+
 // RunFeaturePipeline drives three sessions: an architect brainstorm session
 // (session A) that scores its confidence up front and, above the threshold,
 // works with a sonnet product-owner proxy to a committed spec (SPEC_READY); a
@@ -57,7 +65,7 @@ func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, 
 	case stagePlan:
 		return runPlanThenExecute(ctx, c, cfg, wtPath, prompt, session.SessionID, start)
 	case stageExecute:
-		return executePlan(ctx, c, cfg, wtPath, prompt, session.SessionID)
+		return resumeExecutePlan(ctx, c, cfg, wtPath, prompt, session.SessionID)
 	case stageBrainstorm:
 		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", prompt, session.SessionID)
 		if res != nil {
@@ -182,13 +190,46 @@ func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, pro
 	if !ok {
 		return fmt.Errorf("feature pipeline: plan session signaled %s but wrote no plan file", readySentinel)
 	}
-	return executePlan(ctx, c, cfg, wtPath, executePrompt(plan), "")
+	return executePlan(ctx, c, cfg, wtPath, plan)
 }
 
-// executePlan runs the execute session (session C), fresh (resume == "", prompt
-// built from the just-written plan file) or resumed (resume is the persisted
-// execute session's id, prompt is the trigger prompt).
-func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string) error {
+// maxExecuteGroups bounds executePlanGrouped: no deterministic total-step
+// count exists (the plan file is not machine-parseable), so this is a safety
+// cap against a session that never signals planCompleteSentinel.
+const maxExecuteGroups = 20
+
+// maxGroupRetries bounds how many times a single group's session is retried
+// (via --resume with a continuation prompt) before the pipeline fails.
+const maxGroupRetries = 2
+
+// executePlan runs the execute session (session C) fresh, immediately after
+// the plan file is written. StepsPerSession <= 0 keeps the original
+// single-session behavior with no sentinel required; StepsPerSession > 0
+// spans the plan across several bounded, brand-new sessions via
+// executePlanGrouped.
+func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath string) error {
+	if cfg.StepsPerSession <= 0 {
+		res, err := c.Call(ctx, ClaudeCall{
+			Dir: wtPath, Label: "execute", Prompt: executePrompt(planPath),
+			Model:           cfg.Models.executeConfig(),
+			SkipPermissions: true,
+			DisallowedTools: []string{"AskUserQuestion"},
+		})
+		if res != nil {
+			c.RecordSession(res.SessionID, "feature", stageExecute)
+		}
+		return err
+	}
+	return executePlanGrouped(ctx, c, cfg, wtPath, planPath)
+}
+
+// resumeExecutePlan re-enters a persisted execute session (session C) at
+// exactly the recorded session, with --resume and the trigger prompt — used
+// by ResumeFeaturePipeline. It never spans multiple sessions even when
+// StepsPerSession > 0: grouped execution deliberately never --resumes
+// between groups (see executePlanGrouped), so resuming one persisted session
+// id only makes sense as a single ungrouped call.
+func resumeExecutePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "execute", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.executeConfig(),
@@ -198,10 +239,66 @@ func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, re
 	if res != nil {
 		c.RecordSession(res.SessionID, "feature", stageExecute)
 	}
-	if err != nil {
-		return err
+	return err
+}
+
+// executePlanGrouped implements the plan across several bounded, brand-new
+// Claude sessions (decision: never --resume between groups). Each group's
+// session reads the plan file and git log itself to figure out where to pick
+// up — the daemon tracks no per-group progress. It loops until a group
+// signals planCompleteSentinel or maxExecuteGroups is reached.
+func executePlanGrouped(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath string) error {
+	for i := 1; i <= maxExecuteGroups; i++ {
+		label := fmt.Sprintf("execute-group-%d", i)
+		result, err := runGroupWithRetry(ctx, c, cfg, wtPath, label, executeGroupPrompt(planPath, cfg.StepsPerSession))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(result, planCompleteSentinel) {
+			return nil
+		}
+		// strings.Contains(result, groupDoneSentinel): move on to a fresh
+		// session for the next group.
 	}
-	return nil
+	return fmt.Errorf("feature pipeline: execute did not signal %s within %d grouped sessions", planCompleteSentinel, maxExecuteGroups)
+}
+
+// runGroupWithRetry runs one group's initial call as a fresh session, then —
+// only when the call errors with a usable session id, or succeeds without
+// either sentinel — retries up to maxGroupRetries times via --resume on that
+// same session with the continuation prompt. An error with no session id
+// (nothing to resume) fails immediately, matching how every other stage
+// already propagates a hard Claude failure.
+func runGroupWithRetry(ctx context.Context, c *Claude, cfg *Config, wtPath, label, prompt string) (string, error) {
+	resume := ""
+	for attempt := 0; attempt <= maxGroupRetries; attempt++ {
+		callLabel := label
+		if attempt > 0 {
+			callLabel = fmt.Sprintf("%s-retry-%d", label, attempt)
+			prompt = executeContinuePrompt()
+		}
+		res, err := c.Call(ctx, ClaudeCall{
+			Dir: wtPath, Label: callLabel, Prompt: prompt, Resume: resume,
+			Model:           cfg.Models.executeConfig(),
+			SkipPermissions: true,
+			DisallowedTools: []string{"AskUserQuestion"},
+		})
+		if res != nil {
+			c.RecordSession(res.SessionID, "feature", stageExecute)
+		}
+		if err != nil {
+			if res == nil || res.SessionID == "" {
+				return "", err // nothing to resume; fail the pipeline now
+			}
+			resume = res.SessionID
+			continue // retry via continuation prompt
+		}
+		if strings.Contains(res.Result, planCompleteSentinel) || strings.Contains(res.Result, groupDoneSentinel) {
+			return res.Result, nil
+		}
+		resume = res.SessionID // neither sentinel: ambiguous, retry with "continue"
+	}
+	return "", fmt.Errorf("feature pipeline: %s did not signal completion after %d retries", label, maxGroupRetries)
 }
 
 // parseSpecReady extracts the spec path following specReadySentinel. ok is
@@ -339,5 +436,20 @@ func planPrompt(specPath string) string {
 func executePrompt(planPath string) string {
 	d := promptData()
 	d["PlanPath"] = planPath
+	d["StepsPerSession"] = 0
 	return mustRender("execute.md.tmpl", d)
+}
+
+// executeGroupPrompt renders the same execute.md.tmpl template as
+// executePrompt, but with StepsPerSession set so the conditional grouped-
+// execution block (and its sentinel instructions) is included.
+func executeGroupPrompt(planPath string, stepsPerSession int) string {
+	d := promptData()
+	d["PlanPath"] = planPath
+	d["StepsPerSession"] = stepsPerSession
+	return mustRender("execute.md.tmpl", d)
+}
+
+func executeContinuePrompt() string {
+	return mustRender("execute-continue.md.tmpl", promptData())
 }

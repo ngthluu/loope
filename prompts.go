@@ -64,6 +64,8 @@ func promptData() map[string]any {
 		"BotMarker":               botMarker,
 		"CodeReviewBeginSentinel": codeReviewBeginSentinel,
 		"CodeReviewEndSentinel":   codeReviewEndSentinel,
+		"GroupDoneSentinel":       groupDoneSentinel,
+		"PlanCompleteSentinel":    planCompleteSentinel,
 	}
 }
 
