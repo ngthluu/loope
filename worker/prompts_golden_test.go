@@ -267,7 +267,7 @@ UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
 - Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
-- Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
+- Each item is a GitHub task-list checkbox: ` + "`- [ ] `" + ` followed by ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
 - One item per behavior. Cover every behavior the spec describes, including its error and edge cases, but do not invent scope beyond it.
 - Compress wording, never coverage. An item that runs long loses words, not the check it makes.
@@ -292,7 +292,7 @@ UAT_END. Print nothing before or after those two lines.
 
 Rules for the checklist:
 - Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
-- Each item is ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
+- Each item is a GitHub task-list checkbox: ` + "`- [ ] `" + ` followed by ` + "`Action → expected result`" + `: what the human does, then the one thing they should see. 15 words or fewer. Not a sentence.
 - No implementation detail, no file paths, no code.
 - One item per behavior. Cover the reported bug and every behavior the fix touches, including its error and edge cases, but do not invent scope beyond it.
 - Compress wording, never coverage. An item that runs long loses words, not the check it makes.

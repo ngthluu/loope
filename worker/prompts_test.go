@@ -128,6 +128,7 @@ func TestUATFormatBlockCarriesItsRules(t *testing.T) {
 		"### Happy path",
 		"### Edge cases",
 		"`Action → expected result`",
+		"- [ ]",
 		"15 words or fewer",
 		"Compress wording, never coverage",
 		"every behavior the spec describes",
