@@ -7,10 +7,13 @@ project_name: loope
 
 before:
   hooks:
-    - go mod tidy
+    - go -C shared mod tidy
+    - go -C worker mod tidy
+    - go -C telemetry-server mod tidy
 
 builds:
   - id: loope
+    dir: worker
     main: .
     binary: loope
     env:
@@ -23,9 +26,23 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
+  - id: telemetry-server
+    dir: telemetry-server
+    main: .
+    binary: loope-telemetry-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
 
 archives:
   - id: loope
+    ids: [loope]
     # Predictable lowercase names so install.sh can construct the URL directly:
     #   loope_darwin_arm64.tar.gz, loope_linux_amd64.tar.gz, ...
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
@@ -33,8 +50,44 @@ archives:
     files:
       - README.md
       - LICENSE
-      - loope.json.example
-      - persona.example.md
+      - worker/loope.json.example
+      - worker/persona.example.md
+
+# The telemetry server ships as a container image, not an archive: one image
+# per arch (goreleaser drops the prebuilt binary into the build context, so
+# Dockerfile.release only packages), stitched into multi-arch manifests
+# below. Published to GHCR with the workflow's GITHUB_TOKEN.
+dockers:
+  - id: telemetry-server-amd64
+    ids: [telemetry-server]
+    goos: linux
+    goarch: amd64
+    dockerfile: telemetry-server/Dockerfile.release
+    use: buildx
+    image_templates:
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-amd64
+    build_flag_templates:
+      - --platform=linux/amd64
+  - id: telemetry-server-arm64
+    ids: [telemetry-server]
+    goos: linux
+    goarch: arm64
+    dockerfile: telemetry-server/Dockerfile.release
+    use: buildx
+    image_templates:
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-arm64
+    build_flag_templates:
+      - --platform=linux/arm64
+
+docker_manifests:
+  - name_template: ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}
+    image_templates:
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-amd64
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-arm64
+  - name_template: ghcr.io/ngthluu/loope-telemetry-server:latest
+    image_templates:
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-amd64
+      - ghcr.io/ngthluu/loope-telemetry-server:{{ .Version }}-arm64
 
 checksum:
   name_template: checksums.txt

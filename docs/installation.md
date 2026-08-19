@@ -73,8 +73,8 @@ machine](how-it-works.md#status-state-machine) for what each label means.
 ## Build from source
 
 ```bash
-go build -o loope .
-cp loope.json.example loope.json   # then edit repoPath / repoSlug / workDir
+go -C worker build -o loope .
+cp worker/loope.json.example loope.json   # then edit repoPath / repoSlug / workDir
 ./loope --config loope.json        # daemon: poll every pollIntervalSec, serve the dashboard
 ```
 
