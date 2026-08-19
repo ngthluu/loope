@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -303,11 +305,11 @@ func scanLogs(cfg *Config) ([]Ticket, error) {
 	}
 	var tickets []Ticket
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "issue-") {
+		if !e.IsDir() {
 			continue
 		}
-		num, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "issue-"))
-		if err != nil {
+		num, ok := shared.ParseIssueDirName(e.Name())
+		if !ok {
 			continue
 		}
 		tk, ok := scanIssueDir(filepath.Join(logsDir, e.Name()), num)

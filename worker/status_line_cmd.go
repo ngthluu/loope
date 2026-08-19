@@ -10,34 +10,73 @@ import (
 	"strings"
 )
 
+// shellSingleQuote wraps s in single quotes for bash, escaping embedded
+// single quotes with the standard quote-close, escaped-quote, quote-reopen
+// dance, so s survives as one literal argument whatever it contains.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// shellSingleUnquote is the exact inverse of shellSingleQuote.
+func shellSingleUnquote(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '\'' || s[len(s)-1] != '\'' {
+		return "", false
+	}
+	return strings.ReplaceAll(s[1:len(s)-1], `'\''`, "'"), true
+}
+
+// hookMark closes the process-substitution that feeds loope's usage hook.
+// "claude-usage-hook" is loope's own subcommand name, so its presence in this
+// position is what marks a statusLine command as written by this tool —
+// independent of which loope path wrote it (the binary moves on every
+// Homebrew upgrade; recognition must survive that or install double-wraps
+// and --remove strands the user's original command).
+const hookMark = " claude-usage-hook)"
+
 // wrappedCommand and bareCommand build the only two command strings this
 // tool ever writes to settings.json's statusLine.command, and the only two
-// shapes matchOurs recognizes as "ours".
+// shapes matchOurs recognizes as "ours". The user's original command is kept
+// verbatim inside the bash -c string (it is already shell), while the whole
+// inner command is single-quote-escaped, so an original containing single
+// quotes — e.g. jq -r '.model.display_name' — round-trips intact, as does a
+// loope path containing spaces.
 func wrappedCommand(loopePath, original string) string {
-	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | %s'`, loopePath, original)
+	inner := fmt.Sprintf("tee >(%s claude-usage-hook) | %s", shellSingleQuote(loopePath), original)
+	return "bash -c " + shellSingleQuote(inner)
 }
 
 func bareCommand(loopePath string) string {
-	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) >/dev/null'`, loopePath)
+	inner := fmt.Sprintf("tee >(%s claude-usage-hook) >/dev/null", shellSingleQuote(loopePath))
+	return "bash -c " + shellSingleQuote(inner)
 }
 
-// wrappedPrefix is the fixed portion of a wrapped command up to (and
-// including) the space before the original command it wraps.
-func wrappedPrefix(loopePath string) string {
-	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | `, loopePath)
-}
-
-// matchOurs reports whether cmd is a command this tool wrote for loopePath.
-// For a wrapped match, original is the literal remainder of cmd after the
-// fixed prefix, up to the closing quote — the command status-line --remove
-// restores settings.json to.
-func matchOurs(cmd, loopePath string) (isOurs, isWrapped bool, original string) {
-	if cmd == bareCommand(loopePath) {
+// matchOurs reports whether cmd is a command this tool wrote — for ANY loope
+// path, current or stale (see hookMark). For a wrapped match, original is the
+// user command it wraps — what status-line --remove restores settings.json
+// to. It also recognizes the unquoted-path shape older loope versions wrote.
+func matchOurs(cmd string) (isOurs, isWrapped bool, original string) {
+	quoted, found := strings.CutPrefix(cmd, "bash -c ")
+	if !found {
+		return false, false, ""
+	}
+	inner, ok := shellSingleUnquote(quoted)
+	if !ok {
+		return false, false, ""
+	}
+	rest, found := strings.CutPrefix(inner, "tee >(")
+	if !found {
+		return false, false, ""
+	}
+	i := strings.Index(rest, hookMark)
+	if i < 0 {
+		return false, false, ""
+	}
+	tail := rest[i+len(hookMark):]
+	if tail == " >/dev/null" {
 		return true, false, ""
 	}
-	prefix := wrappedPrefix(loopePath)
-	if strings.HasPrefix(cmd, prefix) && strings.HasSuffix(cmd, "'") && len(cmd) > len(prefix) {
-		return true, true, cmd[len(prefix) : len(cmd)-1]
+	if after, found := strings.CutPrefix(tail, " | "); found && after != "" {
+		return true, true, after
 	}
 	return false, false, ""
 }
@@ -172,9 +211,25 @@ type installResult struct {
 func planInstall(settings map[string]json.RawMessage, loopePath, settingsPath string) (installResult, error) {
 	command, ok := statusLineCommand(settings)
 	if ok {
-		if isOurs, _, _ := matchOurs(command, loopePath); isOurs {
+		if isOurs, isWrapped, original := matchOurs(command); isOurs {
+			// Ours, but possibly written by a previous loope binary at another
+			// path (Homebrew moves it every upgrade). Rewrite with the current
+			// path instead of wrapping our own stale wrapper.
+			want := bareCommand(loopePath)
+			if isWrapped {
+				want = wrappedCommand(loopePath, original)
+			}
+			if command == want {
+				return installResult{
+					message: fmt.Sprintf("status-line: already configured (%s)", settingsPath),
+				}, nil
+			}
+			if err := setStatusLineCommand(settings, want); err != nil {
+				return installResult{}, err
+			}
 			return installResult{
-				message: fmt.Sprintf("status-line: already configured (%s)", settingsPath),
+				message: fmt.Sprintf("status-line: updated loope path in %s", settingsPath),
+				changed: true,
 			}, nil
 		}
 		if err := setStatusLineCommand(settings, wrappedCommand(loopePath, command)); err != nil {
@@ -204,10 +259,11 @@ type removeResult struct {
 }
 
 // planRemove implements the spec's "Remove" section: it decides what
-// `status-line --remove` does to settings, given the resolved loope path and
-// whether settings.json existed at all, and mutates settings in place when
-// changed is true.
-func planRemove(settings map[string]json.RawMessage, loopePath, settingsPath string, settingsExisted bool) removeResult {
+// `status-line --remove` does to settings, given whether settings.json
+// existed at all, and mutates settings in place when changed is true. It
+// needs no loope path: matchOurs recognizes our wrapper whichever binary
+// wrote it, so --remove restores the original even after the binary moved.
+func planRemove(settings map[string]json.RawMessage, settingsPath string, settingsExisted bool) removeResult {
 	if !settingsExisted {
 		return removeResult{
 			message: fmt.Sprintf("status-line: nothing to remove (%s does not exist)", settingsPath),
@@ -219,7 +275,7 @@ func planRemove(settings map[string]json.RawMessage, loopePath, settingsPath str
 			message: fmt.Sprintf("status-line: already removed (%s)", settingsPath),
 		}
 	}
-	isOurs, isWrapped, original := matchOurs(command, loopePath)
+	isOurs, isWrapped, original := matchOurs(command)
 	if !isOurs {
 		return removeResult{
 			message: fmt.Sprintf("status-line: statusLine command in %s was not set by this tool (or was modified since) — edit it manually", settingsPath),
@@ -284,7 +340,7 @@ func runStatusLineCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *remove {
-		result := planRemove(settings, loopePath, settingsPath, existed)
+		result := planRemove(settings, settingsPath, existed)
 		if result.changed {
 			backupSettings(stderr, settingsPath)
 			if err := writeSettings(settingsPath, settings); err != nil {

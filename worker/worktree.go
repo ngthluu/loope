@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"context"
 	"fmt"
 	"os"
@@ -24,7 +26,7 @@ func branchName(issueNum int) string {
 // worktreePath is the deterministic worktree location for an issue, shared by
 // Create and the rework command so both agree on where the worktree lives.
 func worktreePath(workDir string, issueNum int) string {
-	return filepath.Join(workDir, fmt.Sprintf("issue-%d", issueNum))
+	return filepath.Join(workDir, shared.IssueDirName(issueNum))
 }
 
 func (w *Worktree) git(ctx context.Context, dir string, args ...string) (string, error) {

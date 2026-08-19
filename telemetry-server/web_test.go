@@ -39,10 +39,31 @@ func TestTelemetryIndexGroupsByRepoSlugAndShowsWorkers(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"o/r", "o/other", "m1", "m2"} {
+	// Hostnames are how an operator identifies a machine; the machineID hash
+	// alone is not enough (regression: the rail-to-grid rewrite dropped them).
+	for _, want := range []string{"o/r", "o/other", "m1", "m2", "host1", "host2"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("index body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// The index page renders neither the daemon-log tail nor the persisted-logs
+// tree, so its per-card view must not build them — that work runs under s.mu
+// on every 3s poll from every open browser.
+func TestBuildTelemetryIndexViewOmitsDetailFields(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		Logs:     []shared.LogRecord{{Body: "a line"}},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "state", Content: "wip"}}},
+		},
+	})
+	v := s.buildTelemetryIndexView()
+	w := v.Groups[0].Workers[0]
+	if len(w.Logs) != 0 || len(w.IssueLogs) != 0 {
+		t.Fatalf("index view carries detail fields (Logs=%d, IssueLogs=%d), want none", len(w.Logs), len(w.IssueLogs))
 	}
 }
 

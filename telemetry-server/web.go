@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -49,22 +48,10 @@ type issueLogDirView struct {
 	Files       []issueLogFileView
 }
 
-// issueNumber extracts N from an "issue-N" directory name.
-func issueNumber(name string) (int, bool) {
-	if !strings.HasPrefix(name, "issue-") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimPrefix(name, "issue-"))
-	if err != nil {
-		return 0, false
-	}
-	return n, true
-}
-
 // issueLogDisplayName renders "issue-42" as "Issue 42"; anything else
 // (namely "triage") displays as-is.
 func issueLogDisplayName(name string) string {
-	if n, ok := issueNumber(name); ok {
+	if n, ok := shared.ParseIssueDirName(name); ok {
 		return fmt.Sprintf("Issue %d", n)
 	}
 	return name
@@ -79,8 +66,8 @@ func buildIssueLogDirViews(dirs map[string]shared.IssueLogDir) []issueLogDirView
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		_, iIsIssue := issueNumber(names[i])
-		_, jIsIssue := issueNumber(names[j])
+		_, iIsIssue := shared.ParseIssueDirName(names[i])
+		_, jIsIssue := shared.ParseIssueDirName(names[j])
 		if iIsIssue != jIsIssue {
 			return iIsIssue // numeric issue dirs sort before non-numeric ("triage")
 		}
@@ -133,8 +120,12 @@ type telemetryGroup struct {
 }
 
 // buildTelemetryWorkerView converts one worker's server-side state into the
-// template's flat, pre-formatted shape as of now.
-func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerView {
+// template's flat, pre-formatted shape as of now. Logs and IssueLogs are
+// built only when withDetails is set: the index page renders neither, and it
+// rebuilds every worker's view under s.mu on every 3s poll — the log tree's
+// sort (whose comparator rescans file mod times) is detail-page work the
+// index must not pay per card.
+func buildTelemetryWorkerView(ws *WorkerState, now time.Time, withDetails bool) telemetryWorkerView {
 	v := telemetryWorkerView{
 		MachineID:  ws.Resource.MachineID,
 		Hostname:   ws.Resource.Hostname,
@@ -142,8 +133,10 @@ func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerVie
 		Version:    ws.Resource.Version,
 		Online:     ws.online(now),
 		LastPushAt: ws.LastPushAt,
-		Logs:       ws.Logs.Lines(),
-		IssueLogs:  buildIssueLogDirViews(ws.IssueLogs),
+	}
+	if withDetails {
+		v.Logs = ws.Logs.Lines()
+		v.IssueLogs = buildIssueLogDirViews(ws.IssueLogs)
 	}
 	if u := ws.usableUsage(now); u != nil {
 		v.FiveHourPct, v.FiveHourReset = u.FiveHourUsedPct, u.FiveHourResetAt
@@ -167,7 +160,7 @@ func (s *TelemetryServer) buildTelemetryIndexView() telemetryIndexView {
 	s.mu.Lock()
 	byRepo := map[string][]telemetryWorkerView{}
 	for _, ws := range s.workers {
-		byRepo[ws.Resource.RepoSlug] = append(byRepo[ws.Resource.RepoSlug], buildTelemetryWorkerView(ws, now))
+		byRepo[ws.Resource.RepoSlug] = append(byRepo[ws.Resource.RepoSlug], buildTelemetryWorkerView(ws, now, false))
 	}
 	s.mu.Unlock()
 
@@ -238,7 +231,7 @@ func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file stri
 		s.mu.Unlock()
 		return telemetryWorkerPageView{MachineID: machineID, PollURL: workerPollURL(machineID, dir, file)}
 	}
-	wv := buildTelemetryWorkerView(ws, now)
+	wv := buildTelemetryWorkerView(ws, now, true)
 	var content string
 	var found bool
 	if dir != "" && file != "" {

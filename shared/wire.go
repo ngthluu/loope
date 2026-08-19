@@ -6,8 +6,31 @@ package shared
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// IssueDirName and ParseIssueDirName are the "issue-N" naming contract for
+// per-issue directories under <WorkDir>/logs (and the matching worktree
+// dirs): the worker writes them, and both the worker's tracker and the
+// telemetry dashboard parse them back.
+func IssueDirName(n int) string { return fmt.Sprintf("issue-%d", n) }
+
+// ParseIssueDirName extracts N from an "issue-N" directory name; ok is false
+// for any other name (e.g. the shared "triage" dir).
+func ParseIssueDirName(name string) (int, bool) {
+	rest, found := strings.CutPrefix(name, "issue-")
+	if !found {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
 
 // DefaultPushIntervalSec is the push interval assumed when a worker's
 // Resource never carried one (older workers), and the default the worker's
@@ -50,7 +73,7 @@ type UsageSnapshot struct {
 
 // IssueLogFile is one persisted file from a worker's logs/<dir> tree.
 type IssueLogFile struct {
-	Name    string    `json:"name"`    // e.g. "003-answer-1.output.md", "state", "session"
+	Name    string    `json:"name"` // e.g. "003-answer-1.output.md", "state", "session"
 	Content string    `json:"content"`
 	ModTime time.Time `json:"modTime"`
 }

@@ -17,8 +17,9 @@
     <div class="px-2.5 py-2">
      <div class="mb-1 flex items-center gap-1.5">
       <span class="inline-block h-2 w-2 shrink-0 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
-      <span class="truncate text-[11px] font-semibold">{{.MachineID}}</span>
+      <span class="truncate text-[11px] font-semibold">{{.Hostname}}</span>
      </div>
+     <div class="mb-1 truncate text-[10px] text-faint">{{.MachineID}}</div>
      {{if .UsageUnknown}}<div class="text-[11px] text-faint">usage: unknown</div>
      {{else}}<div class="tabular-nums text-[11px] text-faint">5h: {{printf "%.0f%%" .FiveHourPct}}&nbsp;&nbsp;7d: {{printf "%.0f%%" .SevenDayPct}}</div>{{end}}
     </div>

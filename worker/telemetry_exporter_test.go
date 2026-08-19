@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,5 +210,50 @@ func TestReadUsageSnapshotEmptyPathReturnsNil(t *testing.T) {
 	got, err := readUsageSnapshot("", time.Now())
 	if err != nil || got != nil {
 		t.Fatalf("got = %v, err = %v, want nil, nil", got, err)
+	}
+}
+
+func TestScanIssueLogFilesTruncatesLargeFilesToTail(t *testing.T) {
+	workDir := t.TempDir()
+	dir := filepath.Join(workDir, "logs", "issue-1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", maxIssueLogFileBytes) + "TAIL-MARKER"
+	if err := os.WriteFile(filepath.Join(dir, "big.stream.jsonl"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := scanIssueLogs(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dirs[0].Files[0].Content
+	if len(got) != len(issueLogTruncatedBanner)+maxIssueLogFileBytes {
+		t.Errorf("content length = %d, want banner + %d", len(got), maxIssueLogFileBytes)
+	}
+	if !strings.HasPrefix(got, issueLogTruncatedBanner) {
+		t.Error("truncated content must lead with the truncation banner")
+	}
+	if !strings.HasSuffix(got, "TAIL-MARKER") {
+		t.Error("truncation must keep the tail (most recent output), not the head")
+	}
+}
+
+func TestApplyIssueLogBudgetElidesOldestContentFirst(t *testing.T) {
+	old := time.Now().Add(-time.Hour)
+	fresh := time.Now()
+	dirs := []shared.IssueLogDir{
+		{Name: "issue-old", Files: []shared.IssueLogFile{{Name: "f", Content: "0123456789", ModTime: old}}},
+		{Name: "issue-new", Files: []shared.IssueLogFile{{Name: "f", Content: "0123456789", ModTime: fresh}}},
+	}
+	applyIssueLogBudget(dirs, 10)
+	if dirs[1].Files[0].Content != "0123456789" {
+		t.Errorf("newest dir's content must survive, got %q", dirs[1].Files[0].Content)
+	}
+	if dirs[0].Files[0].Content != issueLogElidedContent {
+		t.Errorf("oldest dir's content must be elided past the budget, got %q", dirs[0].Files[0].Content)
+	}
+	if dirs[0].Files[0].Name != "f" || dirs[0].Files[0].ModTime != old {
+		t.Error("eliding content must keep the file's name and mod time (the tree stays complete)")
 	}
 }

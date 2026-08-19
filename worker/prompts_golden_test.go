@@ -195,6 +195,9 @@ func TestGoldenAlreadyDoneComment(t *testing.T) {
 func TestGoldenNeedsInfoComment(t *testing.T) {
 	check(t, "needsInfoComment", needsInfoComment(42, "ai-needs-info", "Which database?"),
 		"🤖 Not confident enough to implement (confidence 42/100). Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
+
+	check(t, "needsInfoComment (stalled, no score)", needsInfoComment(noConfidenceScore, "ai-needs-info", "Want me to proceed?"),
+		"🤖 The session stopped to ask questions instead of committing a fix. Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWant me to proceed?")
 }
 
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +

@@ -1,10 +1,11 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -187,7 +188,7 @@ func (s *Server) setWorktree(v *view) {
 
 // issueLogDir is the log dir for one issue.
 func (s *Server) issueLogDir(n int) string {
-	return filepath.Join(s.cfg.WorkDir, "logs", fmt.Sprintf("issue-%d", n))
+	return filepath.Join(s.cfg.WorkDir, "logs", shared.IssueDirName(n))
 }
 
 // persistTitles mirrors GitHub titles into the log dirs of tickets that came

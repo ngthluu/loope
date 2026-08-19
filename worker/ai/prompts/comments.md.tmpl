@@ -6,7 +6,7 @@
 
 {{.BotMarker}}{{end}}
 
-{{define "needs-info"}}🤖 Not confident enough to implement (confidence {{.Score}}/100). Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
+{{define "needs-info"}}🤖 {{if lt .Score 0}}The session stopped to ask questions instead of committing a fix.{{else}}Not confident enough to implement (confidence {{.Score}}/100).{{end}} Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
 
 {{.Feedback}}{{end}}
 

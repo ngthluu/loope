@@ -20,6 +20,13 @@ const maxLogLinesPerWorker = 2000
 // directories instead of lines.
 const maxIssueLogDirsPerWorker = 50
 
+// maxPushBodyBytes caps one push's request body. The exporter budgets its
+// own payload well below this (its maxIssueLogContentBytes plus the log tail
+// and usage snapshot), so a compliant worker never trips it — the cap exists
+// so a single oversized or malicious push can't balloon the server's memory,
+// since everything ingested here is held in RAM.
+const maxPushBodyBytes = 8 << 20
+
 // WorkerState is the server's last-known view of one worker, keyed by
 // Resource.MachineID.
 type WorkerState struct {
@@ -104,7 +111,7 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req shared.PushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPushBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -128,11 +135,17 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 		lines[i] = l.Body
 	}
 	ws.Logs.Add(lines...)
-	issueLogs := make(map[string]shared.IssueLogDir, len(req.IssueLogs))
-	for _, d := range req.IssueLogs {
-		issueLogs[d.Name] = d
+	// A nil IssueLogs (JSON null) means the worker's scan failed this cycle,
+	// not that the archive is empty — keep the previous view instead of
+	// wiping the dashboard's tree on a transient ReadDir error (continue from
+	// existing state on failure; an empty archive arrives as [], non-nil).
+	if req.IssueLogs != nil {
+		issueLogs := make(map[string]shared.IssueLogDir, len(req.IssueLogs))
+		for _, d := range req.IssueLogs {
+			issueLogs[d.Name] = d
+		}
+		ws.IssueLogs = evictIssueLogs(issueLogs, maxIssueLogDirsPerWorker)
 	}
-	ws.IssueLogs = evictIssueLogs(issueLogs, maxIssueLogDirsPerWorker)
 
 	w.WriteHeader(http.StatusNoContent)
 }

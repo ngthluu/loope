@@ -454,7 +454,11 @@ func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
 	}
 }
 
-func TestHandleIssueZeroCommitsParksForRework(t *testing.T) {
+// A debug run that ends with zero commits and no sentinel escalates to
+// needs-info with the session's questions as the comment (issues #70/#83) —
+// the old outcome, parking as ai-rework with "produced no commits", buried
+// the questions in the log.
+func TestHandleIssueZeroCommitsEscalatesToNeedsInfo(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.handler
 	env.f.handler = func(c rcall) (string, string, error) {
@@ -464,14 +468,14 @@ func TestHandleIssueZeroCommitsParksForRework(t *testing.T) {
 		return base(c)
 	}
 	if err := runCycle(env.orchestrator()); err != nil {
-		t.Fatalf("cycle error = %v, want nil (the park is the observable outcome)", err)
+		t.Fatalf("cycle error = %v, want nil (the escalation is the observable outcome)", err)
 	}
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-rework") {
-		t.Errorf("zero commits should park as ai-rework, got: %v", swap)
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-needs-info") {
+		t.Errorf("zero commits should escalate to ai-needs-info, got: %v", swap)
 	}
 	if len(env.callsMatching("git", "worktree remove")) != 0 {
-		t.Error("zero-commit park must preserve the worktree")
+		t.Error("zero-commit escalation must preserve the worktree")
 	}
 }
 

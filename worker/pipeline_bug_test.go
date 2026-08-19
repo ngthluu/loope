@@ -227,24 +227,54 @@ func TestBugPipelineRunsUATAfterDebug(t *testing.T) {
 
 // The systematic-debugging route can end by asking a question instead of
 // committing a fix or emitting a sentinel (violating the HEADLESS instruction,
-// but real behavior seen in practice) — neither the confidence gate nor the
-// already-done check catches that, so afterDebug must fall back to checking
-// the worktree itself: zero commits ahead of base means nothing to accept.
-func TestBugPipelineSkipsUATWhenNoCommitsProduced(t *testing.T) {
+// but real behavior seen on issues #70 and #83) — neither the confidence gate
+// nor the already-done check catches that, so afterDebug must fall back to
+// checking the worktree itself: zero commits ahead of base means nothing to
+// ship, and the run escalates to needs-info with the session's questions as
+// the feedback instead of parking as "produced no commits".
+func TestBugPipelineEscalatesToNeedsInfoWhenNoCommitsProduced(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON(
 		"I found the root cause in parseCodeReview. Want me to proceed with a fix?", "s1")}}}
 	tgt := &fakeUATTarget{body: "body"}
 	wt := &Worktree{runner: &fakeRunner{queue: []rresp{{stdout: "0\n"}}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	if err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", &UAT{Target: tgt, Num: 7}, wt); err != nil {
-		t.Fatal(err)
+	err := RunBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", &UAT{Target: tgt, Num: 7}, wt)
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
+	}
+	if lc.score != noConfidenceScore {
+		t.Errorf("score = %d, want noConfidenceScore", lc.score)
+	}
+	if !strings.Contains(lc.feedback, "Want me to proceed with a fix?") {
+		t.Errorf("feedback must carry the session's questions, got %q", lc.feedback)
 	}
 	if len(f.calls) != 1 {
 		t.Errorf("calls = %d, want only the debug turn (no UAT session)", len(f.calls))
 	}
 	if tgt.bodyCalls != 0 || len(tgt.posted) != 0 {
 		t.Error("the UAT step must not run when the debug step produced no commits")
+	}
+}
+
+// A resumed debug session that keeps asking its needs-info questions without
+// re-printing the CONFIDENCE sentinel (issue #83) must route back to
+// needs-info, not fall through to ship's "produced no commits" park.
+func TestResumeBugPipelineEscalatesToNeedsInfoWhenStalled(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON(
+		"I still can't responsibly pick a fix. Please answer the 5 questions above.", "s2")}}}
+	wt := &Worktree{runner: &fakeRunner{queue: []rresp{{stdout: "0\n"}}}}
+	c := &Claude{runner: f, logDir: t.TempDir()}
+	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
+	err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil, wt,
+		SessionInfo{SessionID: "s1", Kind: "bug", Stage: stageDebug}, "continue")
+	var lc *lowConfidenceError
+	if !errors.As(err, &lc) {
+		t.Fatalf("want *lowConfidenceError, got %v", err)
+	}
+	if lc.score != noConfidenceScore {
+		t.Errorf("score = %d, want noConfidenceScore", lc.score)
 	}
 }
 

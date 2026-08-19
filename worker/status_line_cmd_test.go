@@ -12,30 +12,28 @@ import (
 
 func TestWrappedAndBareCommand(t *testing.T) {
 	got := wrappedCommand("/usr/local/bin/loope", "/path/to/real-statusline.sh")
-	want := `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) | /path/to/real-statusline.sh'`
+	want := `bash -c 'tee >('\''/usr/local/bin/loope'\'' claude-usage-hook) | /path/to/real-statusline.sh'`
 	if got != want {
 		t.Errorf("wrappedCommand = %q, want %q", got, want)
 	}
 
 	got = bareCommand("/usr/local/bin/loope")
-	want = `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) >/dev/null'`
+	want = `bash -c 'tee >('\''/usr/local/bin/loope'\'' claude-usage-hook) >/dev/null'`
 	if got != want {
 		t.Errorf("bareCommand = %q, want %q", got, want)
 	}
 }
 
 func TestMatchOursBare(t *testing.T) {
-	loopePath := "/usr/local/bin/loope"
-	isOurs, isWrapped, original := matchOurs(bareCommand(loopePath), loopePath)
+	isOurs, isWrapped, original := matchOurs(bareCommand("/usr/local/bin/loope"))
 	if !isOurs || isWrapped || original != "" {
 		t.Fatalf("matchOurs(bare) = (%v, %v, %q), want (true, false, \"\")", isOurs, isWrapped, original)
 	}
 }
 
 func TestMatchOursWrapped(t *testing.T) {
-	loopePath := "/usr/local/bin/loope"
-	cmd := wrappedCommand(loopePath, "/path/to/real-statusline.sh")
-	isOurs, isWrapped, original := matchOurs(cmd, loopePath)
+	cmd := wrappedCommand("/usr/local/bin/loope", "/path/to/real-statusline.sh")
+	isOurs, isWrapped, original := matchOurs(cmd)
 	if !isOurs || !isWrapped || original != "/path/to/real-statusline.sh" {
 		t.Fatalf("matchOurs(wrapped) = (%v, %v, %q), want (true, true, %q)",
 			isOurs, isWrapped, original, "/path/to/real-statusline.sh")
@@ -43,21 +41,52 @@ func TestMatchOursWrapped(t *testing.T) {
 }
 
 func TestMatchOursForeignCommand(t *testing.T) {
-	loopePath := "/usr/local/bin/loope"
-	isOurs, _, _ := matchOurs("/some/other/statusline.sh", loopePath)
+	isOurs, _, _ := matchOurs("/some/other/statusline.sh")
 	if isOurs {
 		t.Fatal("matchOurs: unrelated command must not match")
 	}
 }
 
 func TestMatchOursDifferentLoopePath(t *testing.T) {
-	// A command wrapped for a different loope binary path must not match —
-	// this is what makes remove-after-move fail safely (edit manually)
-	// rather than silently discarding an unrelated statusLine.
+	// A command wrapped by a previous loope binary at another path (Homebrew
+	// moves it every upgrade) is still ours: install must rewrite it instead
+	// of double-wrapping, and --remove must restore the user's original.
 	cmd := wrappedCommand("/old/path/loope", "/path/to/real-statusline.sh")
-	isOurs, _, _ := matchOurs(cmd, "/usr/local/bin/loope")
-	if isOurs {
-		t.Fatal("matchOurs: command wrapped for a different loope path must not match")
+	isOurs, isWrapped, original := matchOurs(cmd)
+	if !isOurs || !isWrapped || original != "/path/to/real-statusline.sh" {
+		t.Fatalf("matchOurs(stale path) = (%v, %v, %q), want (true, true, %q)",
+			isOurs, isWrapped, original, "/path/to/real-statusline.sh")
+	}
+}
+
+func TestWrappedCommandSingleQuoteRoundTrip(t *testing.T) {
+	// The canonical statusline uses single quotes; it must survive the wrap
+	// as literal shell and come back verbatim on --remove.
+	original := `jq -r '.model.display_name'`
+	cmd := wrappedCommand("/usr/local/bin/loope", original)
+	isOurs, isWrapped, got := matchOurs(cmd)
+	if !isOurs || !isWrapped || got != original {
+		t.Fatalf("matchOurs = (%v, %v, %q), want (true, true, %q)", isOurs, isWrapped, got, original)
+	}
+	want := `bash -c 'tee >('\''/usr/local/bin/loope'\'' claude-usage-hook) | jq -r '\''.model.display_name'\'''`
+	if cmd != want {
+		t.Errorf("wrappedCommand = %q, want %q", cmd, want)
+	}
+}
+
+func TestMatchOursLegacyUnquotedPath(t *testing.T) {
+	// Commands written by loope versions that didn't quote the binary path
+	// must still be recognized and unwrapped.
+	cmd := `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) | /path/to/real-statusline.sh'`
+	isOurs, isWrapped, original := matchOurs(cmd)
+	if !isOurs || !isWrapped || original != "/path/to/real-statusline.sh" {
+		t.Fatalf("matchOurs(legacy wrapped) = (%v, %v, %q), want (true, true, %q)",
+			isOurs, isWrapped, original, "/path/to/real-statusline.sh")
+	}
+	bare := `bash -c 'tee >(/usr/local/bin/loope claude-usage-hook) >/dev/null'`
+	isOurs, isWrapped, original = matchOurs(bare)
+	if !isOurs || isWrapped || original != "" {
+		t.Fatalf("matchOurs(legacy bare) = (%v, %v, %q), want (true, false, \"\")", isOurs, isWrapped, original)
 	}
 }
 
@@ -273,7 +302,7 @@ func TestPlanInstallIdempotentOnWrapped(t *testing.T) {
 
 func TestPlanRemoveSettingsFileMissing(t *testing.T) {
 	settings := map[string]json.RawMessage{}
-	result := planRemove(settings, testLoopePath, testSettingsPath, false)
+	result := planRemove(settings, testSettingsPath, false)
 	if result.changed || result.err {
 		t.Fatalf("result = %+v, want changed=false err=false", result)
 	}
@@ -286,7 +315,7 @@ func TestPlanRemoveSettingsFileMissing(t *testing.T) {
 func TestPlanRemoveRestoresOriginalAfterWrap(t *testing.T) {
 	settings := map[string]json.RawMessage{}
 	_ = setStatusLineCommand(settings, wrappedCommand(testLoopePath, "/path/to/real-statusline.sh"))
-	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	result := planRemove(settings, testSettingsPath, true)
 	if !result.changed || result.err {
 		t.Fatalf("result = %+v, want changed=true err=false", result)
 	}
@@ -303,7 +332,7 @@ func TestPlanRemoveRestoresOriginalAfterWrap(t *testing.T) {
 func TestPlanRemoveDeletesKeyAfterBareInstall(t *testing.T) {
 	settings := map[string]json.RawMessage{}
 	_ = setStatusLineCommand(settings, bareCommand(testLoopePath))
-	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	result := planRemove(settings, testSettingsPath, true)
 	if !result.changed || result.err {
 		t.Fatalf("result = %+v, want changed=true err=false", result)
 	}
@@ -318,7 +347,7 @@ func TestPlanRemoveDeletesKeyAfterBareInstall(t *testing.T) {
 
 func TestPlanRemoveAlreadyClean(t *testing.T) {
 	settings := map[string]json.RawMessage{}
-	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	result := planRemove(settings, testSettingsPath, true)
 	if result.changed || result.err {
 		t.Fatalf("result = %+v, want changed=false err=false", result)
 	}
@@ -331,7 +360,7 @@ func TestPlanRemoveAlreadyClean(t *testing.T) {
 func TestPlanRemoveHandEditedErrors(t *testing.T) {
 	settings := map[string]json.RawMessage{}
 	_ = setStatusLineCommand(settings, "/some/hand/edited/command.sh")
-	result := planRemove(settings, testLoopePath, testSettingsPath, true)
+	result := planRemove(settings, testSettingsPath, true)
 	if result.changed {
 		t.Fatal("changed = true, want false — a hand-edited command must not be touched")
 	}

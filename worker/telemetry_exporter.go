@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -19,6 +20,31 @@ import (
 // existing log) does not send one enormous request; the remainder catches
 // up over the next few push cycles.
 const maxLogLinesPerPush = 500
+
+// maxIssueLogFileBytes caps one persisted log file's pushed content. Most of
+// these files are small (prompts, outputs, single-line state files), but
+// *.stream.jsonl session transcripts grow to many megabytes — and the whole
+// archive is re-sent every push interval, so an uncapped file burns bandwidth
+// every cycle and bloats the server's in-memory copy. The tail is kept (the
+// most recent output is what an operator reads), behind a truncation banner.
+const maxIssueLogFileBytes = 64 << 10
+
+// maxIssueLogContentBytes budgets the total content across one push's whole
+// IssueLogs payload, newest directories first. Files past the budget keep
+// their name and mod time (the dashboard tree stays complete) but carry a
+// placeholder instead of content. Together with maxIssueLogFileBytes this
+// bounds both the worker's per-cycle upload and the server's per-worker
+// memory — the server rejects anything larger outright (see its
+// maxPushBodyBytes).
+const maxIssueLogContentBytes = 6 << 20
+
+// issueLogTruncatedBanner leads a file whose pushed content was cut to its
+// tail; issueLogElidedContent replaces content that fell past the per-push
+// budget entirely.
+const (
+	issueLogTruncatedBanner = "[loope: file truncated, showing the last 64KB]\n"
+	issueLogElidedContent   = "[loope: content not pushed — the log archive exceeds the per-push budget; read it on the worker's disk]"
+)
 
 // TelemetryExporter pushes this daemon's log tail and Claude usage to a
 // telemetry-server on a fixed interval. It is opt-in: nothing constructs or
@@ -74,6 +100,9 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 		log.Printf("telemetry: read usage snapshot: %v", err)
 	}
 
+	// On a scan error issueLogs stays nil, which marshals as JSON null — the
+	// server reads that as "no update this cycle" and keeps its previous
+	// view, rather than wiping the archive over a transient ReadDir failure.
 	issueLogs, err := scanIssueLogs(e.cfg.WorkDir)
 	if err != nil {
 		log.Printf("telemetry: scan issue logs: %v", err)
@@ -117,13 +146,14 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 
 // scanIssueLogs reads workDir/logs and returns one IssueLogDir per
 // subdirectory (each issue's pipeline run, plus the shared "triage" dir),
-// carrying the full contents of every regular file directly inside. This is
-// a full re-read and re-send every cycle (design decision 1) — these files
-// are small (prompts/outputs/postmortems for one Claude call, or single-line
-// state/pr/session files) — and the scan is non-recursive: the existing log
-// writers in tracker.go/claude.go never nest subdirectories. A missing or
-// empty logs dir yields an empty slice, never nil, so the field always
-// marshals as a JSON array rather than null.
+// carrying the contents of every regular file directly inside — capped per
+// file (maxIssueLogFileBytes) and per push (maxIssueLogContentBytes), since
+// session transcripts grow to many megabytes. This is a full re-read and
+// re-send every cycle (design decision 1), and the scan is non-recursive:
+// the existing log writers in tracker.go/claude.go never nest
+// subdirectories. A missing or empty logs dir yields an empty slice, never
+// nil, so the field marshals as [] — a real "archive is empty", as opposed
+// to the null a failed scan sends (see pushOnce).
 func scanIssueLogs(workDir string) ([]shared.IssueLogDir, error) {
 	logsDir := filepath.Join(workDir, "logs")
 	entries, err := os.ReadDir(logsDir)
@@ -145,7 +175,46 @@ func scanIssueLogs(workDir string) ([]shared.IssueLogDir, error) {
 		}
 		dirs = append(dirs, shared.IssueLogDir{Name: e.Name(), Files: files})
 	}
+	applyIssueLogBudget(dirs, maxIssueLogContentBytes)
 	return dirs, nil
+}
+
+// applyIssueLogBudget spends budget bytes of file content across dirs, newest
+// directory first, replacing content that falls past the budget with
+// issueLogElidedContent. Names and mod times always survive, so the
+// dashboard's tree stays complete even when a large archive's older content
+// is elided.
+func applyIssueLogBudget(dirs []shared.IssueLogDir, budget int) {
+	order := make([]int, len(dirs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		return dirModTime(dirs[order[a]]).After(dirModTime(dirs[order[b]]))
+	})
+	remaining := budget
+	for _, di := range order {
+		files := dirs[di].Files
+		for fi := range files {
+			n := len(files[fi].Content)
+			if n <= remaining {
+				remaining -= n
+				continue
+			}
+			files[fi].Content = issueLogElidedContent
+		}
+	}
+}
+
+// dirModTime returns the latest ModTime across a dir's files.
+func dirModTime(d shared.IssueLogDir) time.Time {
+	var latest time.Time
+	for _, f := range d.Files {
+		if f.ModTime.After(latest) {
+			latest = f.ModTime
+		}
+	}
+	return latest
 }
 
 // scanIssueLogFiles reads every regular file directly inside dir (no
@@ -168,7 +237,11 @@ func scanIssueLogFiles(dir string) ([]shared.IssueLogFile, error) {
 		if err != nil {
 			continue
 		}
-		files = append(files, shared.IssueLogFile{Name: e.Name(), Content: string(content), ModTime: info.ModTime()})
+		body := string(content)
+		if len(body) > maxIssueLogFileBytes {
+			body = issueLogTruncatedBanner + body[len(body)-maxIssueLogFileBytes:]
+		}
+		files = append(files, shared.IssueLogFile{Name: e.Name(), Content: body, ModTime: info.ModTime()})
 	}
 	return files, nil
 }

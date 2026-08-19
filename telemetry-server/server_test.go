@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -199,5 +200,66 @@ func TestHandlePushEvictsLeastRecentlyModifiedIssueLogDirsOverCap(t *testing.T) 
 	}
 	if _, kept := ws.IssueLogs["issue-50"]; !kept {
 		t.Fatal("issue-50 has the newest ModTime and should have been kept")
+	}
+}
+
+// A push whose IssueLogs is null (the exporter's scan failed that cycle)
+// must keep the server's previous view instead of wiping the archive; an
+// explicit empty array still clears it.
+func TestHandlePushNilIssueLogsKeepsPreviousView(t *testing.T) {
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "state", Content: "wip"}}},
+		},
+	})
+	pushWorker(t, s, shared.PushRequest{
+		Resource:  shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: nil,
+	})
+	s.mu.Lock()
+	ws := s.workers["m1"]
+	s.mu.Unlock()
+	if len(ws.IssueLogs) != 1 || ws.IssueLogs["issue-1"].Files[0].Content != "wip" {
+		t.Fatalf("IssueLogs = %+v, want issue-1 preserved across a nil push", ws.IssueLogs)
+	}
+
+	pushWorker(t, s, shared.PushRequest{
+		Resource:  shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: []shared.IssueLogDir{},
+	})
+	s.mu.Lock()
+	ws = s.workers["m1"]
+	s.mu.Unlock()
+	if len(ws.IssueLogs) != 0 {
+		t.Fatalf("IssueLogs = %+v, want cleared by an explicit empty array", ws.IssueLogs)
+	}
+}
+
+// A push body over maxPushBodyBytes is rejected instead of being decoded
+// into memory.
+func TestHandlePushRejectsOversizedBody(t *testing.T) {
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "huge", Content: strings.Repeat("x", maxPushBodyBytes)}}},
+		},
+	}
+	rec := doPush(t, s.Handler(), "secret", req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d for an oversized push", rec.Code, http.StatusBadRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workers["m1"] != nil {
+		t.Fatal("an oversized push must not be ingested")
 	}
 }

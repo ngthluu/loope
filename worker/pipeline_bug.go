@@ -57,27 +57,31 @@ func afterDebug(ctx context.Context, c *Claude, cfg *Config, wtPath, issueConten
 	// Confidence gate, shared with the feature route: same threshold, sentinel,
 	// parser and terminal outcome. It runs before the already-done check on
 	// purpose — a session too unsure to fix the bug must not get to close the
-	// issue as already implemented instead. A threshold <= 0 disables it, and an
-	// unparseable score fails open so a session that forgot the sentinel but
-	// fixed the bug still ships.
-	if cfg.ConfidenceThreshold > 0 {
-		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(output)}
-		}
+	// issue as already implemented instead. An unparseable score fails open so
+	// a session that forgot the sentinel but fixed the bug still ships.
+	if err := confidenceGate(cfg, output); err != nil {
+		return err
 	}
 	if reason, ok := parseAlreadyDone(output); ok {
 		return &alreadyDoneError{reason: reason}
 	}
-	if uat == nil || uat.Target == nil {
-		return nil
-	}
 	// A debug session can also end without either sentinel — e.g. it
 	// investigates and stops to ask a clarifying question instead of committing
-	// a fix, despite the HEADLESS instruction not to. Neither gate above catches
-	// that, so check the worktree directly: zero commits ahead of base means
-	// there is no diff for UAT to check, and running it would waste a session
-	// producing nothing. Fail open on an error, same as the confidence gate.
-	if n, err := wt.CommitCount(ctx, wtPath, base); err == nil && n == 0 {
+	// a fix, despite the HEADLESS instruction not to (observed on issues #70
+	// and #83, where resumed sessions re-asked their needs-info questions
+	// without re-printing the CONFIDENCE sentinel). Neither gate above catches
+	// that, so check the worktree directly: zero commits ahead of base means no
+	// fix exists — letting that fall through to ship() parks the ticket as
+	// "produced no commits" with the session's questions buried in the log.
+	// Escalate to needs-info instead, with the session's output as the public
+	// comment, so a human sees the questions and their answer resumes this
+	// session. Fail open on a CommitCount error, same as the confidence gate.
+	if wt != nil {
+		if n, err := wt.CommitCount(ctx, wtPath, base); err == nil && n == 0 {
+			return &lowConfidenceError{score: noConfidenceScore, feedback: sanitizeFeedback(output)}
+		}
+	}
+	if uat == nil || uat.Target == nil {
 		return nil
 	}
 	// Only this outcome produced a fix — neither the needs-info nor the

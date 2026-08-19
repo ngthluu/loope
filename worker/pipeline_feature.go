@@ -298,17 +298,11 @@ func resumeExecutePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prom
 }
 
 // parseSpecReady extracts the spec path following specReadySentinel. ok is
-// false only when the sentinel is absent; an empty path still counts.
+// false only when no line leads with the sentinel (line-anchored via
+// parseSentinelLine, same as the other sentinels); an empty path still
+// counts.
 func parseSpecReady(s string) (string, bool) {
-	i := strings.Index(s, specReadySentinel)
-	if i < 0 {
-		return "", false
-	}
-	rest := s[i+len(specReadySentinel):]
-	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-		rest = rest[:nl]
-	}
-	return strings.TrimSpace(rest), true
+	return parseSentinelLine(s, specReadySentinel)
 }
 
 // findSpecFile returns the newest *.md under any specs/ directory in root

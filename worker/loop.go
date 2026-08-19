@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"context"
 	"errors"
 	"fmt"
@@ -105,7 +107,7 @@ type pick struct {
 }
 
 func (o *Orchestrator) issueLogDir(n int) string {
-	return filepath.Join(o.cfg.WorkDir, "logs", fmt.Sprintf("issue-%d", n))
+	return filepath.Join(o.cfg.WorkDir, "logs", shared.IssueDirName(n))
 }
 
 // ProcessOnce runs one poll cycle: top the in-flight pipeline set back up to the
