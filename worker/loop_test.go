@@ -1200,10 +1200,11 @@ func TestShipRunsCodeReviewWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestShipReachesDoneWhenCodeReviewErrors verifies a code-review loop failure
-// (here, the PR lookup fails) never blocks the ai-done transition — the spec
-// treats code review as additive quality, never a shipping gate.
-func TestShipReachesDoneWhenCodeReviewErrors(t *testing.T) {
+// TestShipParksWhenCodeReviewErrors verifies a code-review loop failure
+// (here, the PR lookup fails) parks the issue for a human instead of marking
+// it done: code review is a session stage, and its failures wait in
+// ai-rework like any other error while the PR itself stays up.
+func TestShipParksWhenCodeReviewErrors(t *testing.T) {
 	env := newFakeEnv(t)
 	o := env.orchestrator()
 	o.cfg.Models.CodeReview = &CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet"}, Rounds: 1}
@@ -1215,11 +1216,9 @@ func TestShipReachesDoneWhenCodeReviewErrors(t *testing.T) {
 		}
 		return orig(c)
 	}
-	if err := runCycle(o); err != nil {
-		t.Fatal(err)
-	}
-	if env.readLocalState(7) != "ai-done" {
-		t.Errorf("state = %q, want ai-done even though code review errored", env.readLocalState(7))
+	_ = runCycle(o) // the park cause propagates out of the cycle; labels are what matter
+	if env.readLocalState(7) != "ai-rework" {
+		t.Errorf("state = %q, want ai-rework when the code review loop fails", env.readLocalState(7))
 	}
 }
 
@@ -1306,5 +1305,60 @@ func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
 	swap := env.callsMatching("gh", "--remove-label ai-wip")
 	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
 		t.Errorf("want a single ai-wip->ai-done swap, got: %v", swap)
+	}
+}
+
+// TestHandleIssueRoutesCodeReviewStageToShip: a persisted codereview-stage
+// session (review parked, or a restart mid-review) re-enters through ship —
+// never through the pipelines — so the finished execute/debug session is not
+// re-resumed, no duplicate PR comment appears, and the review loop continues
+// its recorded session to ai-done.
+func TestHandleIssueRoutesCodeReviewStageToShip(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	o.cfg.Models.CodeReview = &CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet"}, Rounds: 1}
+	logDir := o.issueLogDir(7)
+	recordPR(logDir, "https://github.com/org/repo/pull/99")
+	(&Claude{logDir: logDir}).RecordSession("cr-parked", "feature", stageCodeReview)
+	if err := os.MkdirAll(worktreePath(env.wtDir, 7), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := env.f.handler
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "resume"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && (strings.Contains(c.stdin, "brainstorming") ||
+			strings.Contains(c.stdin, "writing-plans") || strings.Contains(c.stdin, "executing-plans")) {
+			t.Errorf("a codereview-stage re-entry must never run a pipeline session, got prompt: %.60s", c.stdin)
+		}
+		return base(c)
+	}
+	if err := runCycle(o); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	for _, call := range env.f.calls {
+		if call.name == "claude" && argAfter(call.args, "--resume") == "cr-parked" {
+			resumed = true
+			if call.stdin != "continue" {
+				t.Errorf("resumed review prompt = %q, want \"continue\"", call.stdin)
+			}
+		}
+	}
+	if !resumed {
+		t.Error("want the parked codereview session resumed via --resume cr-parked")
+	}
+	prComments := 0
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "pull/99") {
+			prComments++
+		}
+	}
+	if prComments != 0 {
+		t.Errorf("re-entry must not re-post the PR comment, got %d", prComments)
+	}
+	if env.readLocalState(7) != "ai-done" {
+		t.Errorf("state = %q, want ai-done after the resumed review finishes", env.readLocalState(7))
 	}
 }

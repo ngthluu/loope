@@ -256,6 +256,14 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		// trigger (rework removed, needs-info answered, dashboard Continue, a
 		// daemon-restart requeue via SweepOrphans) converges on this same check,
 		// so there is no separate code path per trigger (spec §1).
+		if session.Stage == stageCodeReview {
+			// The run already shipped; only the post-ship review loop was cut
+			// short (parked on a review failure, or orphaned by a restart).
+			// Skip the pipelines entirely and re-enter ship: its push/CreatePR
+			// are idempotent, hasPR suppresses a duplicate PR comment, and the
+			// review loop resumes the recorded session at the cut-short round.
+			return o.ship(ctx, issue, c, wtPath, branch, base, session.Kind)
+		}
 		prompt := resumePrompt(logDir, priorState, o.cfg.StateLabels.NeedsInfo, content)
 		if session.Kind == "bug" {
 			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, session, prompt)
@@ -479,9 +487,10 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // The worktree and branch are never removed here either (spec Decision 3): a
 // shipped issue's worktree sits on disk permanently, same as a parked or
 // stopped one already does — an accepted, explicit trade-off with no cleanup
-// mechanism in scope. The code review loop's own errors are logged, never
-// propagated: it is a quality pass layered on top of a successful ship, not a
-// gate on it. Returns nil only when fully shipped.
+// mechanism in scope. A code-review loop failure parks like any other error:
+// the PR stays up, the issue waits in ai-rework, and the recorded codereview
+// session resumes when a human removes the label. Returns nil only when fully
+// shipped AND reviewed.
 func (o *Orchestrator) ship(ctx context.Context, issue Issue, c *Claude, wtPath, branch, base, kind string) error {
 	n := issue.Number
 	onInfra := func(err error) error {
@@ -510,11 +519,13 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, c *Claude, wtPath,
 		_ = o.gh.Comment(ctx, n, prComment(url))
 		recordPR(logDir, url)
 	}
-	cr := &CodeReview{Target: o.gh, Push: o.wt.Push, Num: n}
+	cr := &CodeReview{Target: o.gh, Push: o.wt.Push, Num: n, Kind: kind}
 	if err := cr.Run(ctx, c, o.cfg, wtPath, branch, base, logDir); err != nil {
-		// The review loop's own errors never revert or re-park a successful
-		// ship — it is a quality pass layered on top, not a gate on shipping.
-		log.Printf("issue #%d: code review loop error: %v", n, err)
+		// A review failure parks for a human like any other error: the PR
+		// stays up, but the issue is not marked done. Removing the rework
+		// label re-enters ship, whose review loop resumes the recorded
+		// codereview session at the same round — never automatically.
+		return o.park(ctx, n, err)
 	}
 	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Done); err != nil {
 		// PR is up but the Done swap failed. Surface it; leave ai-wip in place so

@@ -51,6 +51,9 @@ type CodeReview struct {
 	// without a real Worktree/Runner.
 	Push func(ctx context.Context, wtPath, branch string) error
 	Num  int
+	// Kind is the issue's pipeline kind ("feature"/"bug"), recorded alongside
+	// each review session so a parked review resumes with the right kind.
+	Kind string
 }
 
 // Run drives the round loop: resolve the PR once, then for each round from
@@ -58,9 +61,15 @@ type CodeReview struct {
 // treated as 1), run one Claude session, push whatever it committed, parse
 // its status, post the finding, and persist progress. It stops early on
 // STATUS: clean or STATUS: blocked, and stops (returning an error) if the PR
-// lookup, the Claude call, or the push fails — but every one of those errors
-// is the caller's (ship()'s) to log, never to propagate into a park: the PR
-// already shipped successfully.
+// lookup, the Claude call, or the push fails — the caller (ship()) parks that
+// error like any other failure, so a human decides when to continue.
+//
+// Code review is a recorded session stage (stageCodeReview): every round's
+// session is persisted, and when logDir already holds a codereview-stage
+// session (a parked or crashed review), the first round Run executes resumes
+// THAT session with --resume and "continue" instead of starting a fresh
+// round session — the round counter only ever names completed rounds, so the
+// cut-short round is continued, never skipped.
 func (r *CodeReview) Run(ctx context.Context, c *Claude, cfg *Config, wtPath, branch, base, logDir string) error {
 	if r == nil || r.Target == nil || cfg.Models.CodeReview == nil {
 		return nil
@@ -73,12 +82,30 @@ func (r *CodeReview) Run(ctx context.Context, c *Claude, cfg *Config, wtPath, br
 	if err != nil {
 		return fmt.Errorf("issue #%d: code review PR lookup failed: %w", r.Num, err)
 	}
+	resume := ""
+	if si, ok := loadResumableSession(logDir); ok && si.Stage == stageCodeReview {
+		resume = si.SessionID
+	}
 	for i := lastCompletedRound(logDir) + 1; i <= rounds; i++ {
-		res, err := c.Call(ctx, ClaudeCall{
+		call := ClaudeCall{
 			Dir: wtPath, Label: fmt.Sprintf("codereview-%d", i), Prompt: codeReviewPrompt(i, rounds, base),
 			Model:           cfg.Models.CodeReview.ModelConfig,
 			SkipPermissions: true,
-		})
+		}
+		if resume != "" {
+			// Re-entry into a cut-short round: continue its session in place.
+			call.Label = fmt.Sprintf("codereview-%d-resume", i)
+			call.Prompt = "continue"
+			call.Resume = resume
+			resume = ""
+		}
+		res, err := c.Call(ctx, call)
+		// Record before the error check, like every pipeline stage: an errored
+		// call (e.g. a 429) still returns a session id, and that id is exactly
+		// what the post-park re-entry resumes.
+		if res != nil {
+			c.RecordSession(res.SessionID, r.Kind, stageCodeReview)
+		}
 		if err != nil {
 			return fmt.Errorf("issue #%d: code review round %d session failed: %w", r.Num, i, err)
 		}

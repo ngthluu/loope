@@ -253,6 +253,11 @@ const (
 	stagePlan       = "plan"
 	stageExecute    = "execute"
 	stageDebug      = "debug"
+	// stageCodeReview marks the post-ship review-and-fix loop's latest session
+	// (codereview.go). Unlike the pipeline stages it does not resume into a
+	// pipeline: handleIssue routes it straight back to ship, whose review loop
+	// resumes the recorded session at the round it was cut short in.
+	stageCodeReview = "codereview"
 )
 
 // RecordSession writes the latest primary working session id, pipeline kind,

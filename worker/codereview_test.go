@@ -263,3 +263,82 @@ func TestCodeReviewCallUsesConfiguredModelAndDistinctLabel(t *testing.T) {
 		t.Errorf("prompt should invoke /code-review: %s", call.stdin)
 	}
 }
+
+// TestCodeReviewRecordsSessionStage: every review round records its session
+// under stageCodeReview, so a park or crash mid-review resumes the review
+// session instead of re-resuming the finished execute/debug session.
+func TestCodeReviewRecordsSessionStage(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	f := &fakeRunner{queue: []rresp{{stdout: codeReviewResult("clean", "Nothing to fix.")}}}
+	logDir := t.TempDir()
+	c := &Claude{runner: f, logDir: logDir}
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "feature"}
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(1), "/wt", "ai/issue-7", "main", logDir); err != nil {
+		t.Fatal(err)
+	}
+	si, err := readSession(logDir)
+	if err != nil {
+		t.Fatalf("session not recorded: %v", err)
+	}
+	if si.SessionID != "cr-1" || si.Kind != "feature" || si.Stage != stageCodeReview {
+		t.Errorf("session = %+v, want cr-1/feature/codereview", si)
+	}
+}
+
+// TestCodeReviewRecordsSessionOnError mirrors the pipeline stages: an errored
+// round still records its session id, which is exactly what the post-park
+// re-entry resumes.
+func TestCodeReviewRecordsSessionOnError(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	f := &fakeRunner{queue: []rresp{{stdout: claudeErrorJSON("You've hit your session limit", "cr-429")}}}
+	logDir := t.TempDir()
+	c := &Claude{runner: f, logDir: logDir}
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "bug"}
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(1), "/wt", "ai/issue-7", "main", logDir); err == nil {
+		t.Fatal("want the round error propagated so ship parks")
+	}
+	si, err := readSession(logDir)
+	if err != nil {
+		t.Fatalf("session must be recorded even when the round errors: %v", err)
+	}
+	if si.SessionID != "cr-429" || si.Stage != stageCodeReview {
+		t.Errorf("session = %+v, want cr-429/codereview", si)
+	}
+}
+
+// TestCodeReviewResumesRecordedReviewSession: when logDir holds a
+// codereview-stage session (a parked review), the first executed round
+// resumes THAT session with --resume and "continue" — continuing the
+// cut-short round, never skipping to the next one — and later rounds run
+// fresh as usual.
+func TestCodeReviewResumesRecordedReviewSession(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	logDir := t.TempDir()
+	recordCodeReviewRound(logDir, 1) // round 1 completed; round 2 was cut short
+	c := &Claude{runner: nil, logDir: logDir}
+	c.RecordSession("cr-parked", "feature", stageCodeReview)
+	f := &fakeRunner{queue: []rresp{
+		{stdout: codeReviewResult("fixed", "- finished the cut-short fix")},
+		{stdout: codeReviewResult("clean", "Nothing left.")},
+	}}
+	c.runner = f
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "feature"}
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(3), "/wt", "ai/issue-7", "main", logDir); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("claude calls = %d, want 2 (resumed round 2, fresh round 3)", len(f.calls))
+	}
+	if got := argAfter(f.calls[0].args, "--resume"); got != "cr-parked" {
+		t.Errorf("first call --resume = %q, want cr-parked (continue the cut-short round)", got)
+	}
+	if f.calls[0].stdin != "continue" {
+		t.Errorf("first call prompt = %q, want \"continue\"", f.calls[0].stdin)
+	}
+	if got := argAfter(f.calls[1].args, "--resume"); got != "" {
+		t.Errorf("second call --resume = %q, want a fresh session for the next round", got)
+	}
+	if len(tgt.comments) != 2 || !strings.Contains(tgt.comments[0], "round 2/3") {
+		t.Errorf("comments = %v, want the resumed round posted as round 2/3", tgt.comments)
+	}
+}
