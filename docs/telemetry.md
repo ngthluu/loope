@@ -72,16 +72,23 @@ pushes.
 ## Capturing Claude usage (optional)
 
 The 5-hour/7-day usage numbers come from the JSON Claude Code feeds to a
-configured `statusLine` command. `loope` does not modify your
-`~/.claude/settings.json` automatically — wire it in yourself by teeing the
-same stdin into `loope claude-usage-hook` alongside your existing statusline
-script, e.g.:
+configured `statusLine` command. Wire it up with:
+
+```bash
+loope status-line --config /path/to/loope.json
+```
+
+This wraps (or sets, if none exists) your `~/.claude/settings.json`
+`statusLine` command so it also feeds `loope claude-usage-hook`, without
+disturbing whatever your existing statusline already shows. Run it again
+with `--remove` to undo. Under the hood, this produces (or you can wire up
+by hand instead, for example to review or tweak the wrapping) something like:
 
 ```bash
 # ~/.claude/settings.json
 "statusLine": {
   "type": "command",
-  "command": "sh -c 'tee >(loope claude-usage-hook) | /path/to/your/real-statusline.sh'"
+  "command": "bash -c 'tee >(loope claude-usage-hook) | /path/to/your/real-statusline.sh'"
 }
 ```
 

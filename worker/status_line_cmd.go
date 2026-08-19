@@ -1,0 +1,317 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// wrappedCommand and bareCommand build the only two command strings this
+// tool ever writes to settings.json's statusLine.command, and the only two
+// shapes matchOurs recognizes as "ours".
+func wrappedCommand(loopePath, original string) string {
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | %s'`, loopePath, original)
+}
+
+func bareCommand(loopePath string) string {
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) >/dev/null'`, loopePath)
+}
+
+// wrappedPrefix is the fixed portion of a wrapped command up to (and
+// including) the space before the original command it wraps.
+func wrappedPrefix(loopePath string) string {
+	return fmt.Sprintf(`bash -c 'tee >(%s claude-usage-hook) | `, loopePath)
+}
+
+// matchOurs reports whether cmd is a command this tool wrote for loopePath.
+// For a wrapped match, original is the literal remainder of cmd after the
+// fixed prefix, up to the closing quote — the command status-line --remove
+// restores settings.json to.
+func matchOurs(cmd, loopePath string) (isOurs, isWrapped bool, original string) {
+	if cmd == bareCommand(loopePath) {
+		return true, false, ""
+	}
+	prefix := wrappedPrefix(loopePath)
+	if strings.HasPrefix(cmd, prefix) && strings.HasSuffix(cmd, "'") && len(cmd) > len(prefix) {
+		return true, true, cmd[len(prefix) : len(cmd)-1]
+	}
+	return false, false, ""
+}
+
+// statusLineValue is the shape this tool ever writes to the top-level
+// "statusLine" key in settings.json.
+type statusLineValue struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// loadSettings reads and parses settingsPath into a generic
+// map[string]json.RawMessage, so keys this tool doesn't know about (and any
+// of Claude Code's own settings) pass through untouched. A missing file is
+// treated as an empty settings object, not an error.
+func loadSettings(settingsPath string) (settings map[string]json.RawMessage, existed bool, err error) {
+	data, err := os.ReadFile(settingsPath)
+	if os.IsNotExist(err) {
+		return map[string]json.RawMessage{}, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	settings = map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, false, err
+	}
+	return settings, true, nil
+}
+
+// writeSettings marshals settings as indented JSON and writes it to
+// settingsPath, creating the parent directory if it doesn't exist yet.
+func writeSettings(settingsPath string, settings map[string]json.RawMessage) error {
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath, out, 0o644)
+}
+
+// backupSettings copies settingsPath's current bytes to settingsPath+".bak"
+// before it's mutated. Best-effort: a missing settingsPath (fresh install)
+// is not an error, and any other failure is logged to w but never blocks
+// the caller's write — cheap insurance, not a hard dependency.
+func backupSettings(w io.Writer, settingsPath string) {
+	data, err := os.ReadFile(settingsPath)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(w, "status-line: backup %s: %v\n", settingsPath, err)
+		return
+	}
+	if err := os.WriteFile(settingsPath+".bak", data, 0o644); err != nil {
+		fmt.Fprintf(w, "status-line: backup %s: %v\n", settingsPath, err)
+	}
+}
+
+// statusLineCommand extracts settings["statusLine"].command, if present and
+// non-empty.
+func statusLineCommand(settings map[string]json.RawMessage) (command string, ok bool) {
+	raw, present := settings["statusLine"]
+	if !present {
+		return "", false
+	}
+	var v statusLineValue
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", false
+	}
+	if v.Command == "" {
+		return "", false
+	}
+	return v.Command, true
+}
+
+// setStatusLineCommand sets settings["statusLine"] to
+// {"type":"command","command":command}, the only shape this tool writes.
+func setStatusLineCommand(settings map[string]json.RawMessage, command string) error {
+	raw, err := json.Marshal(statusLineValue{Type: "command", Command: command})
+	if err != nil {
+		return err
+	}
+	settings["statusLine"] = raw
+	return nil
+}
+
+// resolveLoopePath returns the absolute path to the running loope binary,
+// dereferencing symlinks so the command this tool writes keeps working
+// regardless of the shell's PATH when Claude Code invokes it later —
+// os.Executable()'s doc explicitly does not guarantee an unresolved symlink
+// stays valid.
+func resolveLoopePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve loope path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve loope path: %w", err)
+	}
+	return resolved, nil
+}
+
+// resolveClaudeConfigDir returns cfg.ClaudeConfigDir if set, else ~/.claude
+// — the same field and default the daemon itself uses for CLAUDE_CONFIG_DIR
+// (see worker/claude.go).
+func resolveClaudeConfigDir(cfg *Config) (string, error) {
+	if cfg.ClaudeConfigDir != "" {
+		return cfg.ClaudeConfigDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
+}
+
+// installResult carries what planInstall decided, so runStatusLineCmd can
+// drive the backup/write/print I/O around a decision that's otherwise pure
+// and directly testable.
+type installResult struct {
+	message string
+	changed bool
+}
+
+// planInstall implements the spec's "Install" section: it decides what
+// `status-line` (no --remove) does to settings, given the resolved loope
+// path, and mutates settings in place when changed is true.
+func planInstall(settings map[string]json.RawMessage, loopePath, settingsPath string) (installResult, error) {
+	command, ok := statusLineCommand(settings)
+	if ok {
+		if isOurs, _, _ := matchOurs(command, loopePath); isOurs {
+			return installResult{
+				message: fmt.Sprintf("status-line: already configured (%s)", settingsPath),
+			}, nil
+		}
+		if err := setStatusLineCommand(settings, wrappedCommand(loopePath, command)); err != nil {
+			return installResult{}, err
+		}
+		return installResult{
+			message: fmt.Sprintf("status-line: wrapped existing statusLine command in %s", settingsPath),
+			changed: true,
+		}, nil
+	}
+	if err := setStatusLineCommand(settings, bareCommand(loopePath)); err != nil {
+		return installResult{}, err
+	}
+	return installResult{
+		message: fmt.Sprintf("status-line: configured in %s (no previous statusLine was set, so your status line will show no visible output — set your own command later to see one alongside usage capture)", settingsPath),
+		changed: true,
+	}, nil
+}
+
+// removeResult carries what planRemove decided. err marks a message that
+// belongs on stderr with exit code 1, as opposed to an informational exit-0
+// message.
+type removeResult struct {
+	message string
+	changed bool
+	err     bool
+}
+
+// planRemove implements the spec's "Remove" section: it decides what
+// `status-line --remove` does to settings, given the resolved loope path and
+// whether settings.json existed at all, and mutates settings in place when
+// changed is true.
+func planRemove(settings map[string]json.RawMessage, loopePath, settingsPath string, settingsExisted bool) removeResult {
+	if !settingsExisted {
+		return removeResult{
+			message: fmt.Sprintf("status-line: nothing to remove (%s does not exist)", settingsPath),
+		}
+	}
+	command, ok := statusLineCommand(settings)
+	if !ok {
+		return removeResult{
+			message: fmt.Sprintf("status-line: already removed (%s)", settingsPath),
+		}
+	}
+	isOurs, isWrapped, original := matchOurs(command, loopePath)
+	if !isOurs {
+		return removeResult{
+			message: fmt.Sprintf("status-line: statusLine command in %s was not set by this tool (or was modified since) — edit it manually", settingsPath),
+			err:     true,
+		}
+	}
+	if isWrapped {
+		_ = setStatusLineCommand(settings, original)
+		return removeResult{
+			message: fmt.Sprintf("status-line: restored your original statusLine command in %s", settingsPath),
+			changed: true,
+		}
+	}
+	delete(settings, "statusLine")
+	return removeResult{
+		message: fmt.Sprintf("status-line: removed from %s", settingsPath),
+		changed: true,
+	}
+}
+
+// runStatusLineCmd implements `loope status-line`: it wires (or, with
+// --remove, unwires) Claude Code's statusLine setting to also capture usage
+// for the fleet telemetry dashboard. See docs/telemetry.md.
+func runStatusLineCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("status-line", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to loope config file (required)")
+	remove := fs.Bool("remove", false, "remove the statusLine wiring installed by a previous run")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: loope status-line --config <FILE> [--remove]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" {
+		fs.Usage()
+		return 2
+	}
+
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	claudeConfigDir, err := resolveClaudeConfigDir(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	loopePath, err := resolveLoopePath()
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	settingsPath := filepath.Join(claudeConfigDir, "settings.json")
+
+	settings, existed, err := loadSettings(settingsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+
+	if *remove {
+		result := planRemove(settings, loopePath, settingsPath, existed)
+		if result.changed {
+			backupSettings(stderr, settingsPath)
+			if err := writeSettings(settingsPath, settings); err != nil {
+				fmt.Fprintf(stderr, "status-line: %v\n", err)
+				return 1
+			}
+		}
+		if result.err {
+			fmt.Fprintln(stderr, result.message)
+			return 1
+		}
+		fmt.Fprintln(stdout, result.message)
+		return 0
+	}
+
+	result, err := planInstall(settings, loopePath, settingsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	if result.changed {
+		backupSettings(stderr, settingsPath)
+		if err := writeSettings(settingsPath, settings); err != nil {
+			fmt.Fprintf(stderr, "status-line: %v\n", err)
+			return 1
+		}
+	}
+	fmt.Fprintln(stdout, result.message)
+	return 0
+}

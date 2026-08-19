@@ -179,6 +179,16 @@ func TestDispatchSubcommandClaudeUsageHook(t *testing.T) {
 	}
 }
 
+func TestDispatchSubcommandStatusLineMissingConfigExits2(t *testing.T) {
+	code, handled := dispatchSubcommand([]string{"loope", "status-line"}, strings.NewReader(""))
+	if !handled {
+		t.Fatal("expected status-line to be handled")
+	}
+	if code != 2 {
+		t.Errorf("code = %d, want 2 (missing required --config)", code)
+	}
+}
+
 func TestDispatchSubcommandFallsThroughForDaemonInvocation(t *testing.T) {
 	for _, args := range [][]string{{"loope"}, {"loope", "--config", "x.json"}, {"loope", "--version"}} {
 		if _, handled := dispatchSubcommand(args, strings.NewReader("")); handled {
