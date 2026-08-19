@@ -51,10 +51,7 @@ func (w *Worktree) Create(ctx context.Context, workDir string, issueNum int, bas
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return "", err
 	}
-	if err := w.retry.do(ctx, isTransientGitHubError, func() error {
-		_, e := w.git(ctx, w.repoPath, "fetch", "origin", "--prune")
-		return e
-	}); err != nil {
+	if err := w.fetchLocked(ctx); err != nil {
 		return "", err
 	}
 	path := worktreePath(workDir, issueNum)
@@ -101,6 +98,52 @@ func (w *Worktree) DeleteBranch(ctx context.Context, branch string) error {
 	defer w.mu.Unlock()
 	_, err := w.git(ctx, w.repoPath, "branch", "-D", branch)
 	return err
+}
+
+// fetchLocked fetches origin with pruning, retried on transient errors.
+// Callers must hold w.mu.
+func (w *Worktree) fetchLocked(ctx context.Context) error {
+	return w.retry.do(ctx, isTransientGitHubError, func() error {
+		_, e := w.git(ctx, w.repoPath, "fetch", "origin", "--prune")
+		return e
+	})
+}
+
+// Fetch is the self-locking form of fetchLocked, for callers outside the
+// Create path (the merge-resolve flow refreshes origin/<base> before merging).
+func (w *Worktree) Fetch(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fetchLocked(ctx)
+}
+
+// Merge merges ref into wtPath's checked-out branch. --no-edit keeps the
+// default merge-commit message without ever opening an editor. A conflicted
+// merge is a non-zero git exit, so it surfaces as a non-nil error — callers
+// tell it apart from a genuine failure via HasUnmergedPaths. No w.mu: like
+// Push/CommitCount it acts on one issue's worktree, which the orchestrator
+// already confines to a single goroutine.
+func (w *Worktree) Merge(ctx context.Context, wtPath, ref string) error {
+	_, err := w.git(ctx, wtPath, "merge", "--no-edit", ref)
+	return err
+}
+
+// HasUnmergedPaths reports whether wtPath has unresolved conflict entries,
+// via `git ls-files --unmerged` (any output means at least one).
+func (w *Worktree) HasUnmergedPaths(ctx context.Context, wtPath string) (bool, error) {
+	out, err := w.git(ctx, wtPath, "ls-files", "--unmerged")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// MergeInProgress reports whether wtPath has an unconcluded merge (MERGE_HEAD
+// present). Boolean-only: git's exit 1 for "no such ref" is the expected
+// negative, not an error worth propagating.
+func (w *Worktree) MergeInProgress(ctx context.Context, wtPath string) bool {
+	_, err := w.git(ctx, wtPath, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+	return err == nil
 }
 
 func (w *Worktree) Push(ctx context.Context, wtPath, branch string) error {

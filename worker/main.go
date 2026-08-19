@@ -234,6 +234,12 @@ func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, sweep bool) {
 				sweep = false
 			}
 		}
+		// Merge-resolve scans before the pipeline cycle so a merge request is
+		// never starved by a full eligible queue; both draw on the same slot
+		// budget, so the ordering is the priority.
+		if err := guard("merge-resolve scan", func() error { return o.ProcessMergeResolves(ctx) }); err != nil {
+			log.Printf("merge-resolve scan error: %v", err)
+		}
 		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
 			log.Printf("cycle error: %v", err)
 		}

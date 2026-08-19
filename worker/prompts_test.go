@@ -36,6 +36,10 @@ var promptTestData = map[string]map[string]any{
 	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main", "UATCoverage": "C"},
 	"codereview.md.tmpl":   {"Round": 1, "Rounds": 2, "Base": "main"},
 	"codereview-comment":   {"Round": 1, "Rounds": 2, "Status": "fixed", "Summary": "S"},
+	"mergeresolve.md.tmpl": {"Base": "main"},
+	"mergeresolve-pickup":  {"Base": "main", "Branch": "b"},
+	"mergeresolve-done":    {"Base": "main", "Branch": "b", "Summary": "S"},
+	"mergeresolve-park":    {"Label": "ai-rework", "TriggerLabel": "ai-resolve-merge", "Guidance": "G", "Error": "E"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
@@ -199,7 +203,7 @@ func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
-		uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel}
+		uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel, mergeResolveSentinel}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())
 		if err != nil {

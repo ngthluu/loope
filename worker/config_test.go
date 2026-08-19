@@ -12,23 +12,23 @@ import (
 // plan-execution step must run with the architect's model config, so existing
 // configs behave exactly as before.
 func TestModelsExecuteConfigFallsBackToArchitect(t *testing.T) {
-	m := Models{Architect: ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100}}
+	m := Models{Architect: ModelConfig{Model: "opus", Effort: "high"}}
 	got := m.executeConfig()
-	want := ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100}
+	want := ModelConfig{Model: "opus", Effort: "high"}
 	if got != want {
 		t.Errorf("executeConfig with no override = %+v, want architect %+v", got, want)
 	}
 }
 
-// TestModelsExecuteConfigOverrides: a partial execute block raises just the
-// fields it sets (turns/budget) while inheriting model/effort from architect.
+// TestModelsExecuteConfigOverrides: a partial execute block overrides just the
+// fields it sets while inheriting the rest from architect.
 func TestModelsExecuteConfigOverrides(t *testing.T) {
 	m := Models{
-		Architect: ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100},
-		Execute:   ModelConfig{MaxTurns: 300, MaxBudgetUSD: 30},
+		Architect: ModelConfig{Model: "opus", Effort: "high"},
+		Execute:   ModelConfig{Effort: "max"},
 	}
 	got := m.executeConfig()
-	want := ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 30, MaxTurns: 300}
+	want := ModelConfig{Model: "opus", Effort: "max"}
 	if got != want {
 		t.Errorf("executeConfig = %+v, want %+v", got, want)
 	}
@@ -48,7 +48,7 @@ func TestLoadConfigValid(t *testing.T) {
 		"repoPath": "/tmp/clone",
 		"repoSlug": "org/repo",
 		"workDir": "/tmp/work",
-		"models": {"architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100}}
+		"models": {"architect": {"model": "opus", "effort": "high"}}
 	}`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestLoadConfigValid(t *testing.T) {
 	if cfg.RepoSlug != "org/repo" {
 		t.Errorf("RepoSlug = %q", cfg.RepoSlug)
 	}
-	if cfg.Models.Architect.Model != "opus" || cfg.Models.Architect.MaxTurns != 100 {
+	if cfg.Models.Architect.Model != "opus" || cfg.Models.Architect.Effort != "high" {
 		t.Errorf("architect = %+v", cfg.Models.Architect)
 	}
 }
@@ -278,15 +278,15 @@ func TestLoadConfigUATBlockRoundTrips(t *testing.T) {
 		"repoSlug": "org/repo",
 		"workDir": "/tmp/work",
 		"models": {
-			"architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100},
-			"uat": {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 30}
+			"architect": {"model": "opus", "effort": "high"},
+			"uat": {"model": "sonnet", "effort": "medium"}
 		}
 	}`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ModelConfig{Model: "sonnet", Effort: "medium", MaxBudgetUSD: 2, MaxTurns: 30}
+	want := ModelConfig{Model: "sonnet", Effort: "medium"}
 	if cfg.Models.UAT != want {
 		t.Errorf("Models.UAT = %+v, want %+v", cfg.Models.UAT, want)
 	}
@@ -297,7 +297,7 @@ func TestLoadConfigUATDoesNotInheritFromArchitect(t *testing.T) {
 		"repoPath": "/tmp/clone",
 		"repoSlug": "org/repo",
 		"workDir": "/tmp/work",
-		"models": {"architect": {"model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100}}
+		"models": {"architect": {"model": "opus", "effort": "high"}}
 	}`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -324,7 +324,7 @@ func TestLoadConfigCodeReviewRoundTrips(t *testing.T) {
 		"repoPath": "/tmp/clone",
 		"repoSlug": "org/repo",
 		"workDir": "/tmp/work",
-		"models": {"codeReview": {"model": "sonnet", "effort": "medium", "maxBudgetUSD": 5, "maxTurns": 40, "rounds": 2}}
+		"models": {"codeReview": {"model": "sonnet", "effort": "medium", "rounds": 2}}
 	}`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -333,7 +333,7 @@ func TestLoadConfigCodeReviewRoundTrips(t *testing.T) {
 	if cfg.Models.CodeReview == nil {
 		t.Fatal("Models.CodeReview = nil, want the parsed block")
 	}
-	want := CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet", Effort: "medium", MaxBudgetUSD: 5, MaxTurns: 40}, Rounds: 2}
+	want := CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet", Effort: "medium"}, Rounds: 2}
 	if *cfg.Models.CodeReview != want {
 		t.Errorf("Models.CodeReview = %+v, want %+v", *cfg.Models.CodeReview, want)
 	}
@@ -413,5 +413,52 @@ func TestExampleConfigParsesAndCoversEverything(t *testing.T) {
 	}
 	if cfg.StateLabels != defaultStateLabels() {
 		t.Errorf("stateLabels = %+v, want the defaults spelled out", cfg.StateLabels)
+	}
+}
+
+// The merge-resolve session falls back to the architect config field-by-field,
+// exactly like executeConfig, so existing configs need no mergeResolve block.
+func TestModelsMergeResolveConfigFallsBackToArchitect(t *testing.T) {
+	m := Models{Architect: ModelConfig{Model: "opus", Effort: "high"}}
+	got := m.mergeResolveConfig()
+	want := ModelConfig{Model: "opus", Effort: "high"}
+	if got != want {
+		t.Errorf("mergeResolveConfig with no override = %+v, want architect %+v", got, want)
+	}
+}
+
+func TestModelsMergeResolveConfigOverrides(t *testing.T) {
+	m := Models{
+		Architect:    ModelConfig{Model: "opus", Effort: "high"},
+		MergeResolve: ModelConfig{Model: "sonnet"},
+	}
+	got := m.mergeResolveConfig()
+	want := ModelConfig{Model: "sonnet", Effort: "high"}
+	if got != want {
+		t.Errorf("mergeResolveConfig = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadConfigMergeResolveLabelDefault(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w"}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MergeResolveLabel != "ai-resolve-merge" {
+		t.Errorf("MergeResolveLabel = %q, want ai-resolve-merge", cfg.MergeResolveLabel)
+	}
+}
+
+// An explicit "" opts out of the flow entirely, so the default must not
+// resurrect it.
+func TestLoadConfigMergeResolveLabelDisabled(t *testing.T) {
+	p := writeTemp(t, `{"repoPath": "/a", "repoSlug": "o/r", "workDir": "/w", "mergeResolveLabel": ""}`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MergeResolveLabel != "" {
+		t.Errorf("MergeResolveLabel = %q, want \"\" (disabled)", cfg.MergeResolveLabel)
 	}
 }

@@ -180,5 +180,36 @@ already-implemented check can close out work that turned out to be finished. Wha
 is *not* carried over is the Claude conversation: the new run starts a fresh
 session. Progress survives as commits, not as context.
 
+### The merge-resolve flow
+
+A shipped branch can drift out of date while its PR waits: `origin/<default>`
+moves on and the PR grows conflicts. Adding the **`ai-resolve-merge`** label
+(configurable via [`mergeResolveLabel`](configuration.md)) to an issue asks the
+daemon to bring its existing worktree up to date instead of running a pipeline:
+
+1. The scan runs at the start of every poll cycle, ahead of normal picks, and
+   acts on any open issue carrying both the eligible label and the trigger —
+   whatever state the issue is in (`ai-done`, `ai-rework`, …). There is no
+   triage; the label *is* the decision.
+2. The issue wears `ai-wip` while the run holds a normal concurrency slot, so it
+   can never collide with a pipeline run on the same issue.
+3. The daemon fetches and runs `git merge origin/<default-branch>` in the
+   issue's preserved worktree. A clean merge skips Claude entirely. A conflicted
+   merge gets exactly **one** Claude session, in the worktree, to resolve and
+   commit — success is then verified against git itself (no `MERGE_HEAD`, no
+   unmerged paths), never the session's own say-so.
+4. The branch is pushed, the trigger label removed, and the state label the
+   issue wore before is restored.
+
+On any failure the issue parks as `ai-rework` like every other flow, but with
+one extra move: the trigger label is **removed**, so a failing merge is
+attempted once, not every cycle. The worktree is left exactly as the failure
+left it — including a half-resolved, in-progress merge, which the next
+triggered run *continues* rather than aborts. To retry, re-add
+`ai-resolve-merge`; do **not** remove `ai-rework` expecting a merge retry, as
+that queues a fresh, unrelated pipeline run instead. The issue's recorded
+pipeline session is never touched, so a later pipeline re-entry still resumes
+where it left off.
+
 See [Operations](operations.md#always-on-operation) for how crashes and
 transient failures play out in practice.

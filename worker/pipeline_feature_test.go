@@ -631,9 +631,8 @@ func TestFeaturePipelineRecordsSessionOnError(t *testing.T) {
 }
 
 // TestFeaturePipelineExecuteUsesExecuteConfig verifies the plan-execution step
-// runs under the dedicated execute config (higher turn ceiling) while the
-// bounded architect Q&A keeps the architect config — so raising execute turns
-// doesn't inflate brainstorm rounds.
+// runs under the dedicated execute config while the bounded architect Q&A keeps
+// the architect config.
 func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 	wt := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(wt, "plans"), 0o755); err != nil {
@@ -654,9 +653,9 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 	}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{
-		Architect: ModelConfig{Model: "opus", MaxTurns: 100},
+		Architect: ModelConfig{Model: "opus", Effort: "high"},
 		Answerer:  ModelConfig{Model: "sonnet"},
-		Execute:   ModelConfig{Model: "opus", MaxTurns: 300},
+		Execute:   ModelConfig{Model: "opus", Effort: "max"},
 	}}
 	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
@@ -670,11 +669,11 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 			brainArgs = cl.args
 		}
 	}
-	if got := argAfter(execArgs, "--max-turns"); got != "300" {
-		t.Errorf("execute --max-turns = %q, want 300 (execute config)", got)
+	if got := argAfter(execArgs, "--effort"); got != "max" {
+		t.Errorf("execute --effort = %q, want max (execute config)", got)
 	}
-	if got := argAfter(brainArgs, "--max-turns"); got != "100" {
-		t.Errorf("brainstorm --max-turns = %q, want 100 (architect config)", got)
+	if got := argAfter(brainArgs, "--effort"); got != "high" {
+		t.Errorf("brainstorm --effort = %q, want high (architect config)", got)
 	}
 }
 

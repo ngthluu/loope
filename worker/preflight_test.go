@@ -364,3 +364,24 @@ func TestReportPreflightPluralSummary(t *testing.T) {
 		t.Fatalf("report = %q, want a plural summary line", buf.String())
 	}
 }
+
+// A configured merge-resolve trigger label that doesn't exist on the repo is
+// unusable — a human can't apply it — so doctor must warn and hand over the
+// exact create command, like any other wanted label.
+func TestPreflightLabelsWarnOnMissingMergeResolveLabel(t *testing.T) {
+	f := &fakeRunner{handler: okHandler(nil)} // fixture lists every label EXCEPT the trigger
+	cfg := preflightConfig()
+	cfg.MergeResolveLabel = "ai-resolve-merge"
+	results := Preflight(context.Background(), f, cfg)
+	c := resultByName(t, results, "labels")
+	if c.Status != statusWarn {
+		t.Fatalf("labels status = %d, want statusWarn (detail %q)", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "ai-resolve-merge") {
+		t.Errorf("detail = %q, want it to name ai-resolve-merge", c.Detail)
+	}
+	want := "gh label create ai-resolve-merge --repo your-org/your-repo"
+	if len(c.Fix) != 1 || c.Fix[0] != want {
+		t.Errorf("fix = %v, want [%q]", c.Fix, want)
+	}
+}

@@ -18,7 +18,7 @@ func TestIntegrationTriage(t *testing.T) {
 		{Number: 1, Title: "Typo in README", Body: "The word 'teh' appears in the intro."},
 		{Number: 2, Title: "Design a plugin system", Body: "We need extensibility for third parties."},
 	}
-	dec, err := Triage(ctx, c, ModelConfig{Model: "sonnet", MaxTurns: 3}, t.TempDir(), issues)
+	dec, err := Triage(ctx, c, ModelConfig{Model: "sonnet"}, t.TempDir(), issues)
 	if err != nil {
 		t.Fatal(err)
 	}

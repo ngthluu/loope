@@ -144,51 +144,63 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 	}
 
 	for i := range picks {
-		if !o.tryAcquire(picks[i].issue.Number) {
+		p := picks[i]
+		n := p.issue.Number
+		if !o.tryAcquire(n) {
 			continue
 		}
-		go func(p pick) {
-			n := p.issue.Number
-			// release is deferred FIRST so it runs LAST: a panicking pipeline parks
-			// the issue in the recover handler below and still returns its slot.
-			defer o.release(n)
-			// Derive a per-ticket child ctx and register its cancel so Stop can kill
-			// this one pipeline's claude subprocess without touching its siblings.
-			cctx, cancel := context.WithCancel(ctx)
-			defer cancel() // release the context's resources when the goroutine ends
-			o.setCancel(n, cancel)
-			defer o.clearCancel(n)
-			// One deferred handler owns BOTH panic recovery and the stop outcome, so
-			// the stopping flag is consumed on every exit path. A panic in one
-			// pipeline must not kill the daemon or the sibling pipelines: park the
-			// issue with the panic as its (non-resumable) cause, preserving worktree
-			// and logs for a human. Uses the LIVE parent ctx. Consuming the flag even
-			// on the panic path is what stops it leaking: a flag left set would never
-			// be cleared (clearCancel only clears cancels) and would spuriously stop
-			// the issue's next run.
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("issue #%d: pipeline panic: %v\n%s", n, r, debug.Stack())
-					// The panic outcome wins over a pending stop — a human should look —
-					// so consume the flag (preventing a leak) and park, don't pause.
-					o.consumeStopping(n)
-					_ = o.park(ctx, n, fmt.Errorf("panic: %v", r))
-					return
-				}
-				// A Stop observed during the run transitions the ticket to ai-stopped
-				// here, on the live parent ctx (the child ctx is cancelled). handleIssue
-				// already skipped its normal outcome, leaving the ticket ai-wip for this.
-				if o.consumeStopping(n) {
-					o.pause(ctx, n)
-				}
-			}()
-			log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
-			if err := o.handleIssue(cctx, p.issue, p.kind, base); err != nil {
-				log.Printf("issue #%d: pipeline failed: %v", n, err)
-			}
-		}(picks[i])
+		log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
+		o.runGuarded(ctx, n,
+			func(cctx context.Context) error { return o.handleIssue(cctx, p.issue, p.kind, base) },
+			func(cause error) { _ = o.park(ctx, n, cause) })
 	}
 	return selectErr
+}
+
+// runGuarded launches fn for issue n — whose slot the caller has already
+// tryAcquire'd — in its own goroutine, wrapped in the ceremony every per-issue
+// worker needs: slot release, per-ticket cancellation so Stop can kill this one
+// run's claude subprocess without touching its siblings, and one deferred
+// handler owning BOTH panic recovery and the stop outcome so the stopping flag
+// is consumed on every exit path. Shared by ProcessOnce's pipeline picks and
+// ProcessMergeResolves' merge runs, which differ only in fn and in how a panic
+// is parked (onPanic — a pipeline uses park, a merge run parkMergeResolve).
+//
+// A panic in one run must not kill the daemon or its siblings: onPanic parks
+// the issue with the panic as its (non-resumable) cause, preserving worktree
+// and logs for a human, on the LIVE parent ctx. Consuming the stopping flag
+// even on the panic path is what stops it leaking: a flag left set would never
+// be cleared (clearCancel only clears cancels) and would spuriously stop the
+// issue's next run.
+func (o *Orchestrator) runGuarded(ctx context.Context, n int, fn func(cctx context.Context) error, onPanic func(cause error)) {
+	go func() {
+		// release is deferred FIRST so it runs LAST: a panicking run parks the
+		// issue in the recover handler below and still returns its slot.
+		defer o.release(n)
+		cctx, cancel := context.WithCancel(ctx)
+		defer cancel() // release the context's resources when the goroutine ends
+		o.setCancel(n, cancel)
+		defer o.clearCancel(n)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("issue #%d: pipeline panic: %v\n%s", n, r, debug.Stack())
+				// The panic outcome wins over a pending stop — a human should look —
+				// so consume the flag (preventing a leak) and park, don't pause.
+				o.consumeStopping(n)
+				onPanic(fmt.Errorf("panic: %v", r))
+				return
+			}
+			// A Stop observed during the run transitions the ticket to ai-stopped
+			// here, on the live parent ctx (the child ctx is cancelled). fn
+			// already skipped its normal outcome, leaving the ticket ai-wip for this.
+			if o.consumeStopping(n) {
+				o.pause(ctx, n)
+			}
+		}()
+		if err := fn(cctx); err != nil {
+			log.Printf("issue #%d: pipeline failed: %v", n, err)
+		}
+	}()
 }
 
 // selectIssues picks up to limit distinct issues by calling the single-pick

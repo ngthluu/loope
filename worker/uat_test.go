@@ -91,7 +91,7 @@ func (f *fakeUATTarget) Comment(ctx context.Context, n int, body string) error {
 }
 
 func uatTestConfig() *Config {
-	return &Config{Models: Models{UAT: ModelConfig{Model: "sonnet", Effort: "medium", MaxTurns: 30}}}
+	return &Config{Models: Models{UAT: ModelConfig{Model: "sonnet", Effort: "medium"}}}
 }
 
 // uatResult builds a fake claude payload whose result carries a fenced checklist.

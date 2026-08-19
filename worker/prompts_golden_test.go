@@ -248,7 +248,7 @@ func TestGoldenPRBody(t *testing.T) {
 func TestGoldenClassifyCauseGuidance(t *testing.T) {
 	cases := []struct{ msg, want string }{
 		{"session limit reached", "Cause: Claude usage/rate limit. Re-queue once the limit resets."},
-		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs."},
+		{"hit max_turns", "Cause: hit the turn/budget ceiling mid-run. Re-queue to continue from the recorded session."},
 		{"dial tcp: i/o timeout", "Cause: network outage. Re-queue once connectivity is back."},
 	}
 	for _, tc := range cases {
@@ -320,4 +320,35 @@ HEADLESS MODE: do not ask questions; make reasonable calls.`
 func TestGoldenCodeReviewComment(t *testing.T) {
 	check(t, "codeReviewComment", codeReviewComment(1, 2, codeReviewFixed, "- Fixed a null check."),
 		"<!-- loope:codereview:1 -->\n🤖 Code review round 1/2: fixed\n\n- Fixed a null check.")
+}
+
+func TestGoldenMergeResolvePickupComment(t *testing.T) {
+	check(t, "mergeResolvePickupComment", mergeResolvePickupComment("main", "ai/issue-12"),
+		"🤖 Merge-resolve requested: merging `origin/main` into `ai/issue-12`.\n\n"+botMarker)
+}
+
+func TestGoldenMergeResolveDoneComment(t *testing.T) {
+	check(t, "mergeResolveDoneComment(summary)", mergeResolveDoneComment("main", "ai/issue-12", "resolved"),
+		"🤖 Merged `origin/main` into `ai/issue-12` and pushed.\n\nresolved\n\n"+botMarker)
+	check(t, "mergeResolveDoneComment(no summary)", mergeResolveDoneComment("main", "ai/issue-12", ""),
+		"🤖 Merged `origin/main` into `ai/issue-12` and pushed.\n\n"+botMarker)
+}
+
+const mergeResolveParkHead = "🤖 Merge-resolve failed — parked as `ai-rework`, and it will not be retried automatically.\n\n" +
+	"The `ai-resolve-merge` label has been removed so the merge is not re-attempted every cycle. " +
+	"The worktree is left exactly as the failure left it (including any partially resolved conflict), so no work is lost. " +
+	"To retry, re-add `ai-resolve-merge` — the next run continues from that state. " +
+	"Do NOT remove `ai-rework` expecting a merge retry: that instead queues a fresh, unrelated pipeline run against this same worktree."
+
+func TestGoldenMergeResolveParkCommentFull(t *testing.T) {
+	check(t, "mergeResolveParkComment(guidance+error)",
+		mergeResolveParkComment("ai-rework", "ai-resolve-merge", "Cause: x.", "boom"),
+		mergeResolveParkHead+"\n\nCause: x."+
+			"\n\n<details><summary>Error detail</summary>\n\n````\nboom\n````\n\n</details>\n\n"+botMarker)
+}
+
+func TestGoldenMergeResolveParkCommentErrorOnly(t *testing.T) {
+	check(t, "mergeResolveParkComment(error only)",
+		mergeResolveParkComment("ai-rework", "ai-resolve-merge", "", "boom"),
+		mergeResolveParkHead+"\n\n<details><summary>Error detail</summary>\n\n````\nboom\n````\n\n</details>\n\n"+botMarker)
 }

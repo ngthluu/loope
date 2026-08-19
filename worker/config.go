@@ -18,10 +18,8 @@ const (
 )
 
 type ModelConfig struct {
-	Model        string  `json:"model"`
-	Effort       string  `json:"effort"`
-	MaxBudgetUSD float64 `json:"maxBudgetUSD"`
-	MaxTurns     int     `json:"maxTurns"`
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
 }
 
 type Models struct {
@@ -29,15 +27,13 @@ type Models struct {
 	Answerer  ModelConfig `json:"answerer"`
 	Triage    ModelConfig `json:"triage"`
 	// Execute is the config for the plan-execution step of the feature pipeline.
-	// It typically wants a much higher turn/budget ceiling than the bounded
-	// architect Q&A rounds, since it implements the whole plan in one session.
 	// Any field left unset falls back to Architect (see executeConfig), so
 	// existing configs without an execute block behave exactly as before.
 	Execute ModelConfig `json:"execute"`
 	// UAT is the config for the UAT-checklist session. Unlike Execute it has no
 	// fallback helper: the block is used exactly as written, so an absent block
-	// means the claude CLI's own defaults with no budget or turn cap. The session
-	// is short and read-only, so a cheap model with a low cap is the right shape.
+	// means the claude CLI's own defaults. The session is short and read-only,
+	// so a cheap model is the right shape.
 	UAT ModelConfig `json:"uat"`
 	// CodeReview is the config for the post-ship review-and-fix loop. Unlike
 	// Execute it has no fallback to Architect: a real model choice here matters
@@ -45,6 +41,11 @@ type Models struct {
 	// whole step is skipped, not "use defaults" — hence the pointer, mirroring
 	// Telemetry rather than UAT's always-constructed value field.
 	CodeReview *CodeReviewConfig `json:"codeReview"`
+	// MergeResolve is the config for the merge-conflict-resolution session of
+	// the merge-resolve flow. Any field left unset falls back to Architect
+	// (see mergeResolveConfig), mirroring Execute, so existing configs get the
+	// flow without a new block.
+	MergeResolve ModelConfig `json:"mergeResolve"`
 }
 
 // CodeReviewConfig is the config for the post-ship review-and-fix loop.
@@ -56,26 +57,25 @@ type CodeReviewConfig struct {
 	Rounds int `json:"rounds"`
 }
 
-// executeConfig returns the model config for the plan-execution step, filling
-// each field left unset on Execute from Architect. This lets a config raise
-// just execute's maxTurns/maxBudgetUSD without restating the model or effort,
-// and keeps pre-execute-block configs identical to the old behavior.
-func (m Models) executeConfig() ModelConfig {
-	e := m.Execute
-	if e.Model == "" {
-		e.Model = m.Architect.Model
+// withArchitectFallback fills each field left unset on c from Architect. This
+// lets a config override just one step's model or effort without restating the
+// other, and keeps configs without the step's block identical to running that
+// step with the architect config.
+func (m Models) withArchitectFallback(c ModelConfig) ModelConfig {
+	if c.Model == "" {
+		c.Model = m.Architect.Model
 	}
-	if e.Effort == "" {
-		e.Effort = m.Architect.Effort
+	if c.Effort == "" {
+		c.Effort = m.Architect.Effort
 	}
-	if e.MaxBudgetUSD == 0 {
-		e.MaxBudgetUSD = m.Architect.MaxBudgetUSD
-	}
-	if e.MaxTurns == 0 {
-		e.MaxTurns = m.Architect.MaxTurns
-	}
-	return e
+	return c
 }
+
+// executeConfig returns the model config for the plan-execution step.
+func (m Models) executeConfig() ModelConfig { return m.withArchitectFallback(m.Execute) }
+
+// mergeResolveConfig returns the model config for the merge-resolve session.
+func (m Models) mergeResolveConfig() ModelConfig { return m.withArchitectFallback(m.MergeResolve) }
 
 // StateLabels are the labels the loop applies to track issue state.
 // Unset fields fall back to the ai-wip/ai-done defaults.
@@ -117,9 +117,17 @@ type TelemetryConfig struct {
 }
 
 type Config struct {
-	RepoPath            string      `json:"repoPath"`
-	RepoSlug            string      `json:"repoSlug"`
-	EligibleLabel       string      `json:"eligibleLabel"`
+	RepoPath      string `json:"repoPath"`
+	RepoSlug      string `json:"repoSlug"`
+	EligibleLabel string `json:"eligibleLabel"`
+	// MergeResolveLabel is the human-applied trigger label of the merge-resolve
+	// flow: added to an issue (in any state) with an existing worktree, it asks
+	// the daemon to merge origin/<default-branch> into the issue's branch,
+	// resolve conflicts with one Claude session, and push. It is a trigger like
+	// EligibleLabel, not a StateLabels member: state labels are mutually
+	// exclusive, while this one rides on top of whatever state the issue is in.
+	// "" disables the flow.
+	MergeResolveLabel   string      `json:"mergeResolveLabel"`
 	PollIntervalSec     int         `json:"pollIntervalSec"`
 	TicketsPerCycle     int         `json:"ticketsPerCycle"`
 	WorkDir             string      `json:"workDir"`
@@ -141,7 +149,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	cfg := &Config{Addr: "localhost:8080", EligibleLabel: "ai-agent", PollIntervalSec: 60, MaxQARounds: 20, ConfidenceThreshold: 70, TicketsPerCycle: 1, StateLabels: defaultStateLabels(), GitHubRetry: RetryConfig{BaseDelaySec: 2, MaxDelaySec: 60}}
+	cfg := &Config{Addr: "localhost:8080", EligibleLabel: "ai-agent", MergeResolveLabel: "ai-resolve-merge", PollIntervalSec: 60, MaxQARounds: 20, ConfidenceThreshold: 70, TicketsPerCycle: 1, StateLabels: defaultStateLabels(), GitHubRetry: RetryConfig{BaseDelaySec: 2, MaxDelaySec: 60}}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}

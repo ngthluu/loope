@@ -33,7 +33,7 @@ func (f *fakeCodeReviewTarget) ReviewComment(ctx context.Context, prNumber int, 
 
 func codeReviewTestConfig(rounds int) *Config {
 	return &Config{Models: Models{CodeReview: &CodeReviewConfig{
-		ModelConfig: ModelConfig{Model: "sonnet", Effort: "medium", MaxTurns: 30},
+		ModelConfig: ModelConfig{Model: "sonnet", Effort: "medium"},
 		Rounds:      rounds,
 	}}}
 }

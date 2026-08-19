@@ -182,6 +182,10 @@ func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth Chec
 // Orchestrator.pause, which deliberately leaves state unchanged rather than
 // diverging from the real label). Warning at boot is the only place the user
 // learns the label is missing before they need it.
+//
+// MergeResolveLabel belongs here for the mirror reason: only a HUMAN applies
+// it, but a label that doesn't exist on the repo can't be applied at all, so
+// without this warning the merge-resolve flow is silently unreachable.
 func wantedLabels(cfg *Config) []string {
 	names := []string{
 		cfg.EligibleLabel,
@@ -190,6 +194,7 @@ func wantedLabels(cfg *Config) []string {
 		cfg.StateLabels.Rework,
 		cfg.StateLabels.NeedsInfo,
 		cfg.StateLabels.Stopped,
+		cfg.MergeResolveLabel,
 	}
 	out := names[:0:0]
 	for _, n := range names {

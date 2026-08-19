@@ -1,0 +1,23 @@
+Resolve the merge conflicts from merging `origin/{{.Base}}` into this branch.
+The merge has already been run in this worktree and stopped on conflicts.
+
+Run `git status` to see the conflicted files. Resolve every conflict marker so
+the result preserves the intent of BOTH sides wherever they touch unrelated
+code; where the two sides are genuinely incompatible, prefer the incoming
+`origin/{{.Base}}` side and adapt this branch's change on top of it. Stage
+every resolved file and conclude the merge with `git commit --no-edit` (never
+a bare `git commit` or `git merge --continue` — both can open an interactive
+editor, and this environment is headless). Then run the project's tests if it
+has any and fix anything the merge itself broke. Do not expand scope beyond
+making the merge conclude cleanly.
+
+If a conflict cannot be resolved safely without a human decision (e.g. two
+incompatible designs for the same behavior), leave the merge unresolved — do
+NOT commit — and explain why.
+
+HEADLESS MODE: you cannot ask questions (AskUserQuestion is disabled). Make
+reasonable calls and note them in the merge commit message.
+
+End your reply with exactly one line, the LAST line, in one of these forms:
+{{.MergeResolveSentinel}} resolved
+{{.MergeResolveSentinel}} blocked <one-sentence reason>

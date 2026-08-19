@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -106,12 +105,6 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 		args = append(args, "--model", call.Model.Model)
 	}
 	args = append(args, effortArgs(call.Model.Effort)...)
-	if call.Model.MaxBudgetUSD > 0 {
-		args = append(args, "--max-budget-usd", strconv.FormatFloat(call.Model.MaxBudgetUSD, 'f', -1, 64))
-	}
-	if call.Model.MaxTurns > 0 {
-		args = append(args, "--max-turns", strconv.Itoa(call.Model.MaxTurns))
-	}
 	if call.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}

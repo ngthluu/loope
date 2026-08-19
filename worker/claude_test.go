@@ -17,7 +17,7 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 		Dir:             "/wt",
 		Label:           "brainstorm-0",
 		Prompt:          "hello",
-		Model:           ModelConfig{Model: "opus", Effort: "high", MaxBudgetUSD: 15, MaxTurns: 100},
+		Model:           ModelConfig{Model: "opus", Effort: "high"},
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
 	})
@@ -45,11 +45,8 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 	if got := argAfter(call.args, "--model"); got != "opus" {
 		t.Errorf("--model = %q", got)
 	}
-	if got := argAfter(call.args, "--max-budget-usd"); got != "15" {
-		t.Errorf("--max-budget-usd = %q", got)
-	}
-	if got := argAfter(call.args, "--max-turns"); got != "100" {
-		t.Errorf("--max-turns = %q", got)
+	if got := argAfter(call.args, "--effort"); got != "high" {
+		t.Errorf("--effort = %q", got)
 	}
 	if got := argAfter(call.args, "--disallowedTools"); got != "AskUserQuestion" {
 		t.Errorf("--disallowedTools = %q", got)

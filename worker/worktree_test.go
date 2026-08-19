@@ -229,3 +229,78 @@ func TestCommitCount(t *testing.T) {
 		t.Errorf("args = %q", joined)
 	}
 }
+
+func TestFetchFetchesOriginWithPrune(t *testing.T) {
+	f := &fakeRunner{}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	if err := w.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c := f.calls[0]
+	if c.dir != "/clone" || !hasArg(c.args, "fetch") || !hasArg(c.args, "--prune") {
+		t.Errorf("fetch call = %+v", c)
+	}
+}
+
+func TestFetchRetriesTransientFailure(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{
+		{err: errors.New("exit 1"), stderr: "Connection reset by peer"},
+		{stdout: ""},
+	}}
+	w := &Worktree{runner: f, repoPath: "/clone", retry: testRetry}
+	if err := w.Fetch(context.Background()); err != nil {
+		t.Fatalf("want success after one retry, got %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (fail then retry-success)", len(f.calls))
+	}
+}
+
+func TestMergeRunsInWorktreeWithNoEdit(t *testing.T) {
+	f := &fakeRunner{}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	if err := w.Merge(context.Background(), "/work/issue-7", "origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	c := f.calls[0]
+	if c.dir != "/work/issue-7" || !hasArg(c.args, "merge") || !hasArg(c.args, "--no-edit") || !hasArg(c.args, "origin/main") {
+		t.Errorf("merge call = %+v", c)
+	}
+}
+
+func TestHasUnmergedPaths(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{
+		{stdout: "100644 abc 1\tmain.go\n"},
+		{stdout: "\n"},
+	}}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	got, err := w.HasUnmergedPaths(context.Background(), "/work/issue-7")
+	if err != nil || !got {
+		t.Errorf("HasUnmergedPaths with conflict entries = %v, %v, want true", got, err)
+	}
+	got, err = w.HasUnmergedPaths(context.Background(), "/work/issue-7")
+	if err != nil || got {
+		t.Errorf("HasUnmergedPaths with empty output = %v, %v, want false", got, err)
+	}
+	if !hasArg(f.calls[0].args, "--unmerged") {
+		t.Errorf("args = %v", f.calls[0].args)
+	}
+}
+
+func TestMergeInProgress(t *testing.T) {
+	f := &fakeRunner{queue: []rresp{
+		{stdout: "abc123\n"},
+		{err: errors.New("exit 1")},
+	}}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	if !w.MergeInProgress(context.Background(), "/work/issue-7") {
+		t.Error("MERGE_HEAD resolves: want MergeInProgress true")
+	}
+	if w.MergeInProgress(context.Background(), "/work/issue-7") {
+		t.Error("rev-parse fails: want MergeInProgress false")
+	}
+	joined := strings.Join(f.calls[0].args, " ")
+	if !strings.Contains(joined, "rev-parse -q --verify MERGE_HEAD") {
+		t.Errorf("args = %q", joined)
+	}
+}

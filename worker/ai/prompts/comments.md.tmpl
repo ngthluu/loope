@@ -26,6 +26,32 @@ Remove the `{{.Label}}` label to queue a fresh attempt — any worktree, branch 
 
 {{.BotMarker}}{{end}}
 
+{{define "mergeresolve-pickup"}}🤖 Merge-resolve requested: merging `origin/{{.Base}}` into `{{.Branch}}`.
+
+{{.BotMarker}}{{end}}
+
+{{define "mergeresolve-done"}}🤖 Merged `origin/{{.Base}}` into `{{.Branch}}` and pushed.{{if .Summary}}
+
+{{.Summary}}{{end}}
+
+{{.BotMarker}}{{end}}
+
+{{define "mergeresolve-park"}}🤖 Merge-resolve failed — parked as `{{.Label}}`, and it will not be retried automatically.
+
+The `{{.TriggerLabel}}` label has been removed so the merge is not re-attempted every cycle. The worktree is left exactly as the failure left it (including any partially resolved conflict), so no work is lost. To retry, re-add `{{.TriggerLabel}}` — the next run continues from that state. Do NOT remove `{{.Label}}` expecting a merge retry: that instead queues a fresh, unrelated pipeline run against this same worktree.{{if .Guidance}}
+
+{{.Guidance}}{{end}}{{if .Error}}
+
+<details><summary>Error detail</summary>
+
+````
+{{.Error}}
+````
+
+</details>{{end}}
+
+{{.BotMarker}}{{end}}
+
 {{define "pr-comment"}}🤖 PR: {{.URL}}
 
 {{.BotMarker}}{{end}}
@@ -42,7 +68,7 @@ Automated by loope ({{.Kind}} flow). Spec and plan, if any, are committed in thi
 
 {{define "guidance-usage-limit"}}Cause: Claude usage/rate limit. Re-queue once the limit resets.{{end}}
 
-{{define "guidance-budget"}}Cause: hit the turn/budget ceiling mid-run. Raise the execute maxTurns/maxBudgetUSD if this recurs.{{end}}
+{{define "guidance-budget"}}Cause: hit the turn/budget ceiling mid-run. Re-queue to continue from the recorded session.{{end}}
 
 {{define "guidance-network"}}Cause: network outage. Re-queue once connectivity is back.{{end}}
 

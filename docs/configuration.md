@@ -9,6 +9,7 @@ with `~/`.
 | `repoSlug`            | yes      | —                | `org/repo` used for all `gh` calls                      |
 | `workDir`             | yes      | —                | Where worktrees and logs are created                    |
 | `eligibleLabel`       | no       | `ai-agent`       | Label that marks an issue as available to the loop      |
+| `mergeResolveLabel`   | no       | `ai-resolve-merge` | Trigger label for the [merge-resolve flow](how-it-works.md#the-merge-resolve-flow): add it to an eligible issue with an existing worktree to merge `origin/<default-branch>` into its branch, resolve conflicts with one Claude session, and push. `""` disables the flow |
 | `pollIntervalSec`     | no       | `60`             | Seconds between poll cycles                             |
 | `addr`                | no       | `localhost:8080` | Address the progress dashboard listens on               |
 | `ticketsPerCycle`     | no       | `1`              | Maximum pipelines running concurrently. Each poll cycle tops the in-flight set back up to this limit from the eligible queue, so a newly labelled issue starts within one poll interval whenever a slot is free. Values below 1 are treated as 1 |
@@ -92,34 +93,33 @@ started with. `~` is expanded.
 
 ## `models`
 
-Five roles, each `{model, effort, maxBudgetUSD, maxTurns}`:
+Each role is a `{model, effort}` block:
 
 - `architect` — the heavy lifter: brainstorms, plans, debugs, and (unless
   `execute` overrides it) executes.
 - `answerer` — the product-owner proxy answering the architect's questions.
 - `triage` — picks and classifies the next issue.
-- `execute` — optional. The feature pipeline's plan-execution step, which
-  implements the whole plan in one session and so usually wants a much higher
-  `maxTurns`/`maxBudgetUSD` than the bounded architect Q&A rounds. Any field left
-  unset inherits from `architect`, so omitting the block entirely keeps the old
-  behavior (execute runs with the architect config).
+- `execute` — optional. The feature pipeline's plan-execution step. Any field
+  left unset inherits from `architect`, so omitting the block entirely keeps the
+  old behavior (execute runs with the architect config).
 - `uat` — optional. The short read-only session that writes the UAT checklist
   posted as an issue comment. Unlike `execute`, it does **not** inherit from
   `architect`: the block is used exactly as written, so leaving it out means the
-  `claude` CLI's own defaults with no budget or turn cap. A cheap model with a
-  low cap is the right shape here (`{"model": "sonnet", "effort": "medium",
-  "maxBudgetUSD": 2, "maxTurns": 30}`). The step never blocks the pipeline — if
-  the session fails or hits its cap, the checklist is simply skipped and the
+  `claude` CLI's own defaults. A cheap model is the right shape here
+  (`{"model": "sonnet", "effort": "medium"}`). The step never blocks the
+  pipeline — if the session fails, the checklist is simply skipped and the
   reason is logged.
+- `mergeResolve` — optional. The conflict-resolution session of the
+  [merge-resolve flow](how-it-works.md#the-merge-resolve-flow). Like `execute`,
+  any field left unset inherits from `architect`.
 
-`maxBudgetUSD` and `maxTurns` are passed straight to the `claude` CLI as hard
-caps per session; `0` omits the cap. `effort` maps to `--effort`.
+`model` maps to the `claude` CLI's `--model`; `effort` maps to `--effort`.
 
-When a session hits one of these caps (`terminal_reason: max_turns`) or a Claude
-usage/rate limit, the loop parks the issue as `ai-rework` with the cause and the
-full error noted in the issue comment, and stops. It is not retried
-automatically: remove the `ai-rework` label once the limit resets (or the cap is
-raised) to queue another attempt.
+When a session hits the CLI's own turn ceiling (`terminal_reason: max_turns`) or
+a Claude usage/rate limit, the loop parks the issue as `ai-rework` with the
+cause and the full error noted in the issue comment, and stops. It is not
+retried automatically: remove the `ai-rework` label once the limit resets to
+queue another attempt.
 
 ## Persona
 

@@ -1,31 +1,18 @@
 {
-  "//": "Full loope worker settings. Keys starting with '//' are comments — the parser ignores unknown keys, so this file works as-is with `cp loope.json.example loope.json`. Only repoPath, repoSlug, and workDir are required; every other key is optional and shows its default (or a sensible starting value where noted).",
-
-  "// repoPath": "REQUIRED — local clone the worktrees are created from. ~ expands.",
   "repoPath": "/Users/you/src/your-repo",
-  "// repoSlug": "REQUIRED — GitHub owner/name, used for every gh call.",
   "repoSlug": "your-org/your-repo",
-  "// workDir": "REQUIRED — where worktrees, logs, and state markers live. Owned exclusively by one daemon (lockfile). ~ expands.",
   "workDir": "~/.loope/worktrees",
 
-  "// eligibleLabel": "Optional, default \"ai-agent\" — issues wearing this label are picked up.",
   "eligibleLabel": "ai-agent",
-  "// pollIntervalSec": "Optional, default 60 — seconds between poll cycles.",
+  "mergeResolveLabel": "ai-resolve-merge",
   "pollIntervalSec": 60,
-  "// ticketsPerCycle": "Optional, default 1 — max issues in flight at once (concurrency budget). This example raises it to 3.",
   "ticketsPerCycle": 3,
-  "// addr": "Optional, default \"localhost:8080\" — the per-repo progress dashboard's listen address.",
   "addr": "localhost:8080",
-  "// personaPath": "Optional, no default — markdown persona the answerer (product-owner proxy) adopts during brainstorm Q&A. Absent: no persona. ~ expands.",
   "personaPath": "~/.loope/persona.md",
-  "// claudeConfigDir": "Optional, no default — CLAUDE_CONFIG_DIR for every claude call, to pin a separate account/login. Absent: the CLI's own default. ~ expands.",
   "claudeConfigDir": "~/.claude-personal",
-  "// maxQARounds": "Optional, default 20 — architect<->answerer Q&A rounds before the feature pipeline gives up.",
   "maxQARounds": 20,
-  "// confidenceThreshold": "Optional, default 70 — brainstorm/debug confidence (0-100) below which the issue escalates to ai-needs-info instead of being designed. 0 or less disables the gate.",
   "confidenceThreshold": 70,
 
-  "// stateLabels": "Optional — the lifecycle labels; unset fields keep these defaults.",
   "stateLabels": {
     "wip": "ai-wip",
     "done": "ai-done",
@@ -34,23 +21,18 @@
     "stopped": "ai-stopped"
   },
 
-  "// githubRetry": "Optional — in-band retry for transient git/gh failures. maxAttempts 0 = retry until success, a permanent error, or shutdown. Defaults: baseDelaySec 2, maxDelaySec 60.",
   "githubRetry": { "maxAttempts": 0, "baseDelaySec": 2, "maxDelaySec": 60 },
 
-  "// models": "Each block: model (claude CLI model name), effort, maxBudgetUSD (0 = no cap), maxTurns (0 = no cap). architect/answerer/triage should always be set; the rest are optional as noted.",
   "models": {
-    "architect": { "model": "opus", "effort": "high", "maxBudgetUSD": 15, "maxTurns": 100 },
-    "answerer": { "model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 5 },
-    "triage": { "model": "sonnet", "effort": "medium", "maxBudgetUSD": 1, "maxTurns": 5 },
-    "// execute": "Optional — the plan-execution session. Any unset field falls back to architect's value, so you can raise just the caps.",
-    "execute": { "model": "opus", "effort": "high", "maxBudgetUSD": 40, "maxTurns": 400 },
-    "// uat": "Optional — the UAT-checklist session. No fallback: an absent block means the CLI's defaults with no caps. Short and read-only, so cheap + low caps is the right shape.",
-    "uat": { "model": "sonnet", "effort": "medium", "maxBudgetUSD": 2, "maxTurns": 30 },
-    "// codeReview": "Optional — the post-ship review-and-fix loop (a recorded, resumable session stage). ABSENT BLOCK = the whole step is skipped. rounds <= 0 is treated as 1; the loop stops early on a clean or blocked round, and a failed round parks the issue to ai-rework with the PR left up.",
-    "codeReview": { "model": "opus", "effort": "medium", "maxBudgetUSD": 10, "maxTurns": 60, "rounds": 2 }
+    "architect": { "model": "opus", "effort": "high" },
+    "answerer": { "model": "sonnet", "effort": "medium" },
+    "triage": { "model": "sonnet", "effort": "medium" },
+    "execute": { "model": "opus", "effort": "high" },
+    "uat": { "model": "sonnet", "effort": "medium" },
+    "codeReview": { "model": "opus", "effort": "medium", "rounds": 2 },
+    "mergeResolve": { "model": "opus", "effort": "medium" }
   },
 
-  "// telemetry": "Optional — OPT-IN fleet telemetry. ABSENT BLOCK = no exporter goroutine, no extra network calls. When present the daemon also writes <workDir>/logs/daemon.log (rotating) and pushes its log tail + Claude usage to <serverURL>/v1/push every pushIntervalSec (default 15). token must match the server's -token. See docs/telemetry.md.",
   "telemetry": {
     "serverURL": "http://telemetry-host:9090",
     "token": "your-shared-secret",
