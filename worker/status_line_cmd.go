@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -237,4 +238,80 @@ func planRemove(settings map[string]json.RawMessage, loopePath, settingsPath str
 		message: fmt.Sprintf("status-line: removed from %s", settingsPath),
 		changed: true,
 	}
+}
+
+// runStatusLineCmd implements `loope status-line`: it wires (or, with
+// --remove, unwires) Claude Code's statusLine setting to also capture usage
+// for the fleet telemetry dashboard. See docs/telemetry.md.
+func runStatusLineCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("status-line", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to loope config file (required)")
+	remove := fs.Bool("remove", false, "remove the statusLine wiring installed by a previous run")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: loope status-line --config <FILE> [--remove]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" {
+		fs.Usage()
+		return 2
+	}
+
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	claudeConfigDir, err := resolveClaudeConfigDir(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	loopePath, err := resolveLoopePath()
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	settingsPath := filepath.Join(claudeConfigDir, "settings.json")
+
+	settings, existed, err := loadSettings(settingsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+
+	if *remove {
+		result := planRemove(settings, loopePath, settingsPath, existed)
+		if result.changed {
+			backupSettings(stderr, settingsPath)
+			if err := writeSettings(settingsPath, settings); err != nil {
+				fmt.Fprintf(stderr, "status-line: %v\n", err)
+				return 1
+			}
+		}
+		if result.err {
+			fmt.Fprintln(stderr, result.message)
+			return 1
+		}
+		fmt.Fprintln(stdout, result.message)
+		return 0
+	}
+
+	result, err := planInstall(settings, loopePath, settingsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "status-line: %v\n", err)
+		return 1
+	}
+	if result.changed {
+		backupSettings(stderr, settingsPath)
+		if err := writeSettings(settingsPath, settings); err != nil {
+			fmt.Fprintf(stderr, "status-line: %v\n", err)
+			return 1
+		}
+	}
+	fmt.Fprintln(stdout, result.message)
+	return 0
 }

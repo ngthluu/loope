@@ -343,3 +343,122 @@ func TestPlanRemoveHandEditedErrors(t *testing.T) {
 		t.Errorf("message = %q, want %q", result.message, wantMsg)
 	}
 }
+
+// newTestConfig writes a minimal valid loope.json (repoPath/repoSlug/workDir
+// are LoadConfig's only required fields) with the given claudeConfigDir and
+// returns its path.
+func newTestConfig(t *testing.T, dir, claudeConfigDir string) string {
+	t.Helper()
+	cfg := fmt.Sprintf(`{
+		"repoPath": %q,
+		"repoSlug": "owner/repo",
+		"workDir": %q,
+		"claudeConfigDir": %q
+	}`, dir, filepath.Join(dir, "work"), claudeConfigDir)
+	path := filepath.Join(dir, "loope.json")
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRunStatusLineCmdMissingConfigExits2(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runStatusLineCmd(nil, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if stderr.Len() == 0 {
+		t.Error("stderr is empty, want usage text")
+	}
+}
+
+func TestRunStatusLineCmdFreshInstall(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, "claude")
+	configPath := newTestConfig(t, dir, claudeDir)
+
+	var stdout, stderr bytes.Buffer
+	code := runStatusLineCmd([]string{"--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status-line: configured in") {
+		t.Errorf("stdout = %q, want a \"configured in\" message", stdout.String())
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	settings, existed, err := loadSettings(settingsPath)
+	if err != nil || !existed {
+		t.Fatalf("loadSettings after install: existed=%v err=%v", existed, err)
+	}
+	cmd, ok := statusLineCommand(settings)
+	if !ok || !strings.Contains(cmd, "claude-usage-hook") {
+		t.Errorf("statusLine.command = %q, want it to reference claude-usage-hook", cmd)
+	}
+
+	// Re-run must be a no-op (idempotent) and must not write a backup file,
+	// since nothing changed.
+	stdout.Reset()
+	stderr.Reset()
+	code = runStatusLineCmd([]string{"--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second run: code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already configured") {
+		t.Errorf("second run stdout = %q, want \"already configured\"", stdout.String())
+	}
+}
+
+func TestRunStatusLineCmdRemoveAfterInstall(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, "claude")
+	configPath := newTestConfig(t, dir, claudeDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := runStatusLineCmd([]string{"--config", configPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("install: code = %d, stderr = %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := runStatusLineCmd([]string{"--config", configPath, "--remove"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("remove: code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status-line: removed from") {
+		t.Errorf("stdout = %q, want a \"removed from\" message", stdout.String())
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	settings, _, err := loadSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("loadSettings after remove: %v", err)
+	}
+	if _, ok := statusLineCommand(settings); ok {
+		t.Error("statusLine.command still present after remove")
+	}
+	if _, err := os.Stat(settingsPath + ".bak"); err != nil {
+		t.Errorf("no backup file written before remove: %v", err)
+	}
+}
+
+func TestRunStatusLineCmdDefaultClaudeConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	cfg := fmt.Sprintf(`{"repoPath": %q, "repoSlug": "owner/repo", "workDir": %q}`, dir, filepath.Join(dir, "work"))
+	configPath := filepath.Join(dir, "loope.json")
+	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runStatusLineCmd([]string{"--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err != nil {
+		t.Errorf("settings.json not written under default ~/.claude: %v", err)
+	}
+}
