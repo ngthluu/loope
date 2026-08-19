@@ -87,3 +87,29 @@ func TestTelemetryDetailShowsLogTail(t *testing.T) {
 		t.Fatalf("detail body missing log line:\n%s", rec.Body.String())
 	}
 }
+
+// TestAppCSSCoversTemplateClasses is the guard against the manual Tailwind
+// regeneration step being skipped. telemetry-server/static/app.css must be
+// regenerated from tailwind.css whenever a template's classes change, or the
+// dashboard renders half-styled (or, for a brand-new class, unstyled). A miss
+// here means someone changed a template class without re-running:
+//
+//	tailwindcss -i tailwind.css -o static/app.css --minify
+func TestAppCSSCoversTemplateClasses(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(css) < 2048 {
+		t.Fatalf("static/app.css is only %d bytes — the Tailwind build produced nothing useful", len(css))
+	}
+	for _, want := range []string{
+		`bg-muted`,    // status dot (offline) — templates/rail.html, templates/detail.html
+		`w-\[420px\]`, // #rail width — templates/page.html
+		`grid-cols-2`, // card grid — templates/rail.html
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Fatalf("static/app.css missing %q — regenerate it: tailwindcss -i tailwind.css -o static/app.css --minify", want)
+		}
+	}
+}
