@@ -239,9 +239,10 @@ func TestAppCSSCoversTemplateClasses(t *testing.T) {
 		t.Fatalf("static/app.css is only %d bytes — the Tailwind build produced nothing useful", len(css))
 	}
 	for _, want := range []string{
-		`bg-muted`,    // status dot (offline) — templates/rail.html, templates/detail.html
-		`w-\[420px\]`, // #rail width — templates/page.html
-		`grid-cols-2`, // card grid — templates/rail.html
+		`bg-muted`,                // status dot (offline) — templates/index.html, templates/detail.html
+		`grid-cols-6`,             // index page card grid — templates/index.html
+		`grid-cols-2`,             // usage stats grid — templates/detail.html
+		`grid-cols-\[280px_1fr\]`, // persisted-logs tree/viewer split — templates/detail.html
 	} {
 		if !strings.Contains(string(css), want) {
 			t.Fatalf("static/app.css missing %q — regenerate it: tailwindcss -i tailwind.css -o static/app.css --minify", want)
