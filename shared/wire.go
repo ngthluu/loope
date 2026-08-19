@@ -48,14 +48,29 @@ type UsageSnapshot struct {
 	CapturedAt      time.Time `json:"capturedAt"`
 }
 
+// IssueLogFile is one persisted file from a worker's logs/<dir> tree.
+type IssueLogFile struct {
+	Name    string    `json:"name"`    // e.g. "003-answer-1.output.md", "state", "session"
+	Content string    `json:"content"`
+	ModTime time.Time `json:"modTime"`
+}
+
+// IssueLogDir is one directory under <WorkDir>/logs — one issue's pipeline
+// run ("issue-42") or the shared "triage" dir.
+type IssueLogDir struct {
+	Name  string         `json:"name"` // dir name as on disk: "issue-42", "triage"
+	Files []IssueLogFile `json:"files"`
+}
+
 // PushRequest is the body of POST /v1/push. Usage is nil when unavailable or
 // stale, so the dashboard renders "usage: unknown" instead of a fabricated
 // number.
 type PushRequest struct {
-	Resource Resource       `json:"resource"`
-	Logs     []LogRecord    `json:"logs"`
-	Usage    *UsageSnapshot `json:"usage"`
-	SentAt   time.Time      `json:"sentAt"`
+	Resource  Resource       `json:"resource"`
+	Logs      []LogRecord    `json:"logs"`
+	Usage     *UsageSnapshot `json:"usage"`
+	IssueLogs []IssueLogDir  `json:"issueLogs"`
+	SentAt    time.Time      `json:"sentAt"`
 }
 
 // MachineID is a stable per-(hostname,workDir) identity: sha256(hostname +

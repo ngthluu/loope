@@ -52,6 +52,42 @@ func TestPushRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPushRequestIssueLogsRoundTrip(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	want := PushRequest{
+		Resource: Resource{RepoSlug: "o/r", MachineID: "abc123def456"},
+		IssueLogs: []IssueLogDir{
+			{
+				Name: "issue-42",
+				Files: []IssueLogFile{
+					{Name: "003-answer-1.output.md", Content: "hello", ModTime: now},
+				},
+			},
+			{Name: "triage", Files: []IssueLogFile{}},
+		},
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got PushRequest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.IssueLogs) != 2 {
+		t.Fatalf("issueLogs round-trip = %+v", got.IssueLogs)
+	}
+	if got.IssueLogs[0].Name != "issue-42" || len(got.IssueLogs[0].Files) != 1 ||
+		got.IssueLogs[0].Files[0].Name != "003-answer-1.output.md" ||
+		got.IssueLogs[0].Files[0].Content != "hello" ||
+		!got.IssueLogs[0].Files[0].ModTime.Equal(now) {
+		t.Fatalf("issueLogs[0] round-trip = %+v", got.IssueLogs[0])
+	}
+	if got.IssueLogs[1].Name != "triage" || len(got.IssueLogs[1].Files) != 0 {
+		t.Fatalf("issueLogs[1] round-trip = %+v", got.IssueLogs[1])
+	}
+}
+
 func TestPushRequestNilUsageRoundTrip(t *testing.T) {
 	data, err := json.Marshal(PushRequest{Resource: Resource{RepoSlug: "o/r"}})
 	if err != nil {
