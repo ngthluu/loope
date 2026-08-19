@@ -37,12 +37,8 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 		return err
 	}
 
-	// Upfront confidence gate: judged once, on the first brainstorm turn only.
-	// A threshold <= 0 disables it. Fail open on an unparseable score.
-	if cfg.ConfidenceThreshold > 0 {
-		if score, ok := parseConfidence(res.Result); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(res.Result)}
-		}
+	if err := confidenceGate(cfg, res.Result); err != nil {
+		return err
 	}
 	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 }
@@ -77,10 +73,26 @@ func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, 
 		if err != nil {
 			return err
 		}
+		if err := confidenceGate(cfg, res.Result); err != nil {
+			return err
+		}
 		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 	default:
 		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat, gh, wt, branch, title, n)
 	}
+}
+
+// confidenceGate judges an architect turn's confidence score, shared by the
+// fresh brainstorm-0 call and a resumed brainstorm-resume turn so a resumed
+// session is held to the same threshold as a fresh one. A threshold <= 0
+// disables it, and an unparseable score fails open.
+func confidenceGate(cfg *Config, output string) error {
+	if cfg.ConfidenceThreshold > 0 {
+		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
+			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(output)}
+		}
+	}
+	return nil
 }
 
 // architectCall runs one architect-model turn: the brainstorm-0/brainstorm-N
