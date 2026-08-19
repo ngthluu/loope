@@ -1,21 +1,31 @@
-{{define "tpage"}}<!doctype html>
-<html lang="en"><head>
+{{define "thead"}}<head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loope // fleet telemetry</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx.min.js"></script>
 <script src="/static/idiomorph-ext.min.js"></script>
-</head>
+</head>{{end}}
+
+{{define "tnav"}}<header class="flex shrink-0 items-center gap-3 border-b border-line bg-panel px-5 py-3">
+ <a href="/" class="font-mono text-[15px] font-semibold tracking-tight text-text">loope<span class="text-live">&middot;</span>fleet</a>
+</header>{{end}}
+
+{{define "tindexPage"}}<!doctype html>
+<html lang="en">{{template "thead" .}}
 <body class="font-sans text-text antialiased" hx-ext="morph">
 <div class="flex h-screen flex-col">
- <header class="flex shrink-0 items-center gap-3 border-b border-line bg-panel px-5 py-3">
-  <span class="font-mono text-[15px] font-semibold tracking-tight text-text">loope<span class="text-live">&middot;</span>fleet</span>
- </header>
- <div class="flex min-h-0 flex-1">
-  <nav id="rail" class="scroll w-[420px] shrink-0 overflow-y-auto border-r border-line bg-panel"
-       hx-get="/rail?worker={{if .Selected}}{{.Selected.MachineID}}{{end}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "trail" .}}</nav>
-  <main id="main" class="scroll min-w-0 flex-1 overflow-y-auto"
-        hx-get="/detail?worker={{if .Selected}}{{.Selected.MachineID}}{{end}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tdetail" .}}</main>
- </div>
+{{template "tnav" .}}
+<div id="content" class="scroll min-w-0 flex-1 overflow-y-auto"
+     hx-get="/" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tindex" .}}</div>
+</div>
+</body></html>{{end}}
+
+{{define "tworkerPage"}}<!doctype html>
+<html lang="en">{{template "thead" .}}
+<body class="font-sans text-text antialiased" hx-ext="morph">
+<div class="flex h-screen flex-col">
+{{template "tnav" .}}
+<div id="content" class="scroll min-w-0 flex-1 overflow-y-auto"
+     hx-get="{{.PollURL}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tdetail" .}}</div>
 </div>
 </body></html>{{end}}

@@ -1,11 +1,18 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"bytes"
 	"embed"
+	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,18 +33,103 @@ type telemetryWorkerView struct {
 	SevenDayPct   float64
 	SevenDayReset time.Time
 	Logs          []string
+	IssueLogs     []issueLogDirView
+}
+
+// issueLogFileView is one file entry in the persisted-logs tree.
+type issueLogFileView struct {
+	Name string
+}
+
+// issueLogDirView is one directory entry in the persisted-logs tree,
+// pre-sorted and carrying its display label.
+type issueLogDirView struct {
+	Name        string
+	DisplayName string
+	Files       []issueLogFileView
+}
+
+// issueNumber extracts N from an "issue-N" directory name.
+func issueNumber(name string) (int, bool) {
+	if !strings.HasPrefix(name, "issue-") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "issue-"))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// issueLogDisplayName renders "issue-42" as "Issue 42"; anything else
+// (namely "triage") displays as-is.
+func issueLogDisplayName(name string) string {
+	if n, ok := issueNumber(name); ok {
+		return fmt.Sprintf("Issue %d", n)
+	}
+	return name
+}
+
+// buildIssueLogDirViews converts a worker's raw IssueLogs into the sorted
+// tree the template renders: numeric "issue-N" dirs (newest-modified first)
+// before the shared "triage" dir, each with its files listed by name.
+func buildIssueLogDirViews(dirs map[string]shared.IssueLogDir) []issueLogDirView {
+	names := make([]string, 0, len(dirs))
+	for name := range dirs {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		_, iIsIssue := issueNumber(names[i])
+		_, jIsIssue := issueNumber(names[j])
+		if iIsIssue != jIsIssue {
+			return iIsIssue // numeric issue dirs sort before non-numeric ("triage")
+		}
+		return dirModTime(dirs[names[i]]).After(dirModTime(dirs[names[j]]))
+	})
+	views := make([]issueLogDirView, 0, len(names))
+	for _, name := range names {
+		d := dirs[name]
+		files := make([]issueLogFileView, 0, len(d.Files))
+		for _, f := range d.Files {
+			files = append(files, issueLogFileView{Name: f.Name})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+		views = append(views, issueLogDirView{Name: name, DisplayName: issueLogDisplayName(name), Files: files})
+	}
+	return views
+}
+
+// findIssueLogFileContent looks up one file's raw content within dirs.
+func findIssueLogFileContent(dirs map[string]shared.IssueLogDir, dirName, fileName string) (string, bool) {
+	d, ok := dirs[dirName]
+	if !ok {
+		return "", false
+	}
+	for _, f := range d.Files {
+		if f.Name == fileName {
+			return f.Content, true
+		}
+	}
+	return "", false
+}
+
+// formatIssueLogFileContent pretty-prints .json files server-side; everything
+// else renders as-is — syntax highlighting is explicitly out of scope.
+func formatIssueLogFileContent(name, content string) string {
+	if !strings.HasSuffix(name, ".json") {
+		return content
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(content), "", "  "); err != nil {
+		return content
+	}
+	return pretty.String()
 }
 
 // telemetryGroup is one repoSlug's workers, sorted by hostname.
 type telemetryGroup struct {
 	RepoSlug string
 	Workers  []telemetryWorkerView
-}
-
-// telemetryView is the template payload for one render.
-type telemetryView struct {
-	Groups   []telemetryGroup
-	Selected *telemetryWorkerView
 }
 
 // buildTelemetryWorkerView converts one worker's server-side state into the
@@ -51,6 +143,7 @@ func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerVie
 		Online:     ws.online(now),
 		LastPushAt: ws.LastPushAt,
 		Logs:       ws.Logs.Lines(),
+		IssueLogs:  buildIssueLogDirViews(ws.IssueLogs),
 	}
 	if u := ws.usableUsage(now); u != nil {
 		v.FiveHourPct, v.FiveHourReset = u.FiveHourUsedPct, u.FiveHourResetAt
@@ -61,11 +154,15 @@ func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerVie
 	return v
 }
 
-// buildTelemetryView groups all workers by RepoSlug (sorted), sorts each
-// group's workers by hostname, and selects the worker named by selectedID —
-// or the first worker of the first group when selectedID is empty or not
-// found, or nil when there are no workers at all.
-func (s *TelemetryServer) buildTelemetryView(selectedID string) telemetryView {
+// telemetryIndexView is the template payload for GET /.
+type telemetryIndexView struct {
+	Groups []telemetryGroup
+}
+
+// buildTelemetryIndexView groups all workers by RepoSlug (sorted), and
+// within each group sorts online workers before offline, both buckets by
+// hostname.
+func (s *TelemetryServer) buildTelemetryIndexView() telemetryIndexView {
 	now := s.now()
 	s.mu.Lock()
 	byRepo := map[string][]telemetryWorkerView{}
@@ -80,46 +177,107 @@ func (s *TelemetryServer) buildTelemetryView(selectedID string) telemetryView {
 	}
 	sort.Strings(slugs)
 
-	view := telemetryView{}
+	view := telemetryIndexView{}
 	for _, slug := range slugs {
 		workers := byRepo[slug]
-		sort.Slice(workers, func(i, j int) bool { return workers[i].Hostname < workers[j].Hostname })
-		view.Groups = append(view.Groups, telemetryGroup{RepoSlug: slug, Workers: workers})
-		for i := range workers {
-			if workers[i].MachineID == selectedID {
-				view.Selected = &view.Groups[len(view.Groups)-1].Workers[i]
+		sort.Slice(workers, func(i, j int) bool {
+			if workers[i].Online != workers[j].Online {
+				return workers[i].Online // online sorts before offline
 			}
-		}
-	}
-	if view.Selected == nil && len(view.Groups) > 0 && len(view.Groups[0].Workers) > 0 {
-		view.Selected = &view.Groups[0].Workers[0]
+			return workers[i].Hostname < workers[j].Hostname
+		})
+		view.Groups = append(view.Groups, telemetryGroup{RepoSlug: slug, Workers: workers})
 	}
 	return view
 }
 
-// registerWebHandlers wires the dashboard routes onto mux: GET / (full
-// page), GET /rail and GET /detail (htmx poll fragments), and the
-// embedded static assets (staticHandler, static.go).
+// registerWebHandlers wires the dashboard routes onto mux: GET / (index
+// page), GET /workers/{machineID} (worker detail page), and the embedded
+// static assets (staticHandler, static.go).
 func (s *TelemetryServer) registerWebHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.handleTelemetryIndex)
-	mux.HandleFunc("GET /rail", s.handleTelemetryRail)
-	mux.HandleFunc("GET /detail", s.handleTelemetryDetail)
+	mux.HandleFunc("GET /workers/{machineID}", s.handleTelemetryWorker)
 	mux.Handle("GET /static/", staticHandler())
 }
 
+// handleTelemetryIndex serves the full-width index page. A poll from the
+// page's own #content element (identified by the HX-Request header htmx
+// sets) gets just the grid fragment; any other request gets the full
+// document.
 func (s *TelemetryServer) handleTelemetryIndex(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "tpage", v)
+	v := s.buildTelemetryIndexView()
+	if r.Header.Get("HX-Request") == "true" {
+		renderTelemetryHTML(w, s.tmpl, "tindex", v)
+		return
+	}
+	renderTelemetryHTML(w, s.tmpl, "tindexPage", v)
 }
 
-func (s *TelemetryServer) handleTelemetryRail(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "trail", v)
+// telemetryWorkerPageView is the template payload for GET /workers/{id}.
+// Worker is nil when machineID matches no known worker. SelectedFile is
+// non-empty when a specific log file is being viewed; FileNotFound is set
+// when the requested dir/file no longer exists on the worker's latest push.
+type telemetryWorkerPageView struct {
+	MachineID    string
+	PollURL      string
+	Worker       *telemetryWorkerView
+	SelectedDir  string
+	SelectedFile string
+	FileContent  string
+	FileNotFound bool
 }
 
-func (s *TelemetryServer) handleTelemetryDetail(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "tdetail", v)
+// buildTelemetryWorkerPageView looks up machineID and renders its current
+// state, optionally resolving the file named by dir/file for the log
+// viewer pane. dir and file are both empty when no file is selected.
+func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file string) telemetryWorkerPageView {
+	now := s.now()
+	s.mu.Lock()
+	ws := s.workers[machineID]
+	if ws == nil {
+		s.mu.Unlock()
+		return telemetryWorkerPageView{MachineID: machineID, PollURL: workerPollURL(machineID, dir, file)}
+	}
+	wv := buildTelemetryWorkerView(ws, now)
+	var content string
+	var found bool
+	if dir != "" && file != "" {
+		content, found = findIssueLogFileContent(ws.IssueLogs, dir, file)
+	}
+	s.mu.Unlock()
+
+	v := telemetryWorkerPageView{MachineID: machineID, PollURL: workerPollURL(machineID, dir, file), Worker: &wv, SelectedDir: dir, SelectedFile: file}
+	if dir != "" && file != "" {
+		if !found {
+			v.FileNotFound = true
+		} else {
+			v.FileContent = formatIssueLogFileContent(file, content)
+		}
+	}
+	return v
+}
+
+// workerPollURL builds the worker page's self-poll URL, preserving the
+// selected dir/file so a poll re-renders the same file rather than resetting
+// the viewer pane.
+func workerPollURL(machineID, dir, file string) string {
+	u := "/workers/" + url.PathEscape(machineID)
+	if dir != "" && file != "" {
+		u += "?" + url.Values{"dir": {dir}, "file": {file}}.Encode()
+	}
+	return u
+}
+
+// handleTelemetryWorker serves the worker detail page. Like the index page,
+// a poll from the page's own #content element gets just the content
+// fragment; a plain navigation gets the full document.
+func (s *TelemetryServer) handleTelemetryWorker(w http.ResponseWriter, r *http.Request) {
+	v := s.buildTelemetryWorkerPageView(r.PathValue("machineID"), r.URL.Query().Get("dir"), r.URL.Query().Get("file"))
+	if r.Header.Get("HX-Request") == "true" {
+		renderTelemetryHTML(w, s.tmpl, "tdetail", v)
+		return
+	}
+	renderTelemetryHTML(w, s.tmpl, "tworkerPage", v)
 }
 
 // renderTelemetryHTML mirrors serve.go's renderHTML: it buffers the render
