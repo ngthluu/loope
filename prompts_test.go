@@ -24,6 +24,7 @@ var promptTestData = map[string]map[string]any{
 	"needs-info":               {"Score": 1, "Label": "l", "Feedback": "F"},
 	"park":                     {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
 	"pr-comment":               {"URL": "u"},
+	"plan-comment":             {"Path": "docs/superpowers/plans/2026-plan.md"},
 	"pr-title":                 {"Title": "T", "Number": 1},
 	"pr-body":                  {"Number": 1, "Kind": "bug"},
 	"guidance-usage-limit":     {},

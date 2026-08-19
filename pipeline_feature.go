@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ const planCompleteSentinel = "PLAN_COMPLETE"
 // designing anything.
 // Immediately after the spec is committed — before plan and execute — the
 // non-blocking UAT step publishes a human-verifiable checklist onto the issue.
-func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT) error {
+func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, gh *GitHub, wt *Worktree, branch, title string, n int) error {
 	start := time.Now()
 	res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
 	// Record before the error check: an errored call (e.g. a 429 session limit)
@@ -51,7 +52,7 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(res.Result)}
 		}
 	}
-	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start)
+	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 }
 
 // ResumeFeaturePipeline re-enters a persisted feature-pipeline session at its
@@ -59,13 +60,22 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 // starting a fresh brainstorm-0. An unrecognized stage — the only case with no
 // natural resume point, expected to never happen in practice — falls back to a
 // fully fresh RunFeaturePipeline as a safety net.
-func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, session SessionInfo, prompt string) error {
+func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, session SessionInfo, prompt string, gh *GitHub, wt *Worktree, branch, title string, n int) error {
 	start := time.Now()
 	switch session.Stage {
 	case stagePlan:
-		return runPlanThenExecute(ctx, c, cfg, wtPath, prompt, session.SessionID, start)
+		return runPlanThenExecute(ctx, c, cfg, wtPath, prompt, session.SessionID, start, gh, wt, branch, n)
 	case stageExecute:
-		return resumeExecutePlan(ctx, c, cfg, wtPath, prompt, session.SessionID)
+		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, session.SessionID); err != nil {
+			return err
+		}
+		// Execute complete (spec §1): push once, best-effort — ship's own push at
+		// the end of a successful run is the backstop, so a failure here is
+		// logged and swallowed rather than failing an otherwise-successful resume.
+		if perr := wt.Push(ctx, wtPath, branch); perr != nil {
+			log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
+		}
+		return nil
 	case stageBrainstorm:
 		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", prompt, session.SessionID)
 		if res != nil {
@@ -75,9 +85,9 @@ func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, 
 		if err != nil {
 			return err
 		}
-		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start)
+		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 	default:
-		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat)
+		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat, gh, wt, branch, title, n)
 	}
 }
 
@@ -96,7 +106,7 @@ func architectCall(ctx context.Context, c *Claude, cfg *Config, wtPath, label, p
 // brainstormLoop is the architect Q&A round loop shared by a fresh brainstorm-0
 // call and a resumed brainstorm session: sessionID/output are the id and result
 // text of whichever call preceded it (brainstorm-0, or the resume turn).
-func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, sessionID, output string, start time.Time) error {
+func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, sessionID, output string, start time.Time, gh *GitHub, wt *Worktree, branch, title string, n int) error {
 	for round := 1; ; round++ {
 		// The architect signals a committed spec: hand off to the fresh plan
 		// session, then execute. If it claims a spec but none is on disk, fall
@@ -110,7 +120,12 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 				// context the caller tears down on return.
 				wait := uat.StartFeature(ctx, c, cfg, wtPath, specPath)
 				defer wait()
-				return runPlanThenExecute(ctx, c, cfg, wtPath, planPrompt(specPath), "", start)
+				// Spec complete (spec §1): push, open (or recover) the PR,
+				// comment the URL, and record it — before plan/execute run at
+				// all. Best-effort: pushSpecPR logs and swallows its own
+				// failures rather than turning a completed spec into an error.
+				pushSpecPR(ctx, gh, wt, wtPath, branch, title, n, c.logDir)
+				return runPlanThenExecute(ctx, c, cfg, wtPath, planPrompt(specPath), "", start, gh, wt, branch, n)
 			}
 		}
 
@@ -170,7 +185,7 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 // context — but the SAME entry point serves a resumed plan session too: resume
 // is "" on a fresh call (prompt is planPrompt(specPath)) and the persisted plan
 // session's id when re-entering (prompt is the trigger prompt instead).
-func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string, start time.Time) error {
+func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string, start time.Time, gh *GitHub, wt *Worktree, branch string, n int) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "plan", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.Architect,
@@ -190,7 +205,61 @@ func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, pro
 	if !ok {
 		return fmt.Errorf("feature pipeline: plan session signaled %s but wrote no plan file", readySentinel)
 	}
-	return executePlan(ctx, c, cfg, wtPath, plan)
+	// Plan complete (spec §1): push, then post the fixed "Updated plan: ..."
+	// comment naming the plan file — before execute runs at all.
+	pushPlanUpdate(ctx, gh, wt, wtPath, branch, n, plan)
+	if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
+		return err
+	}
+	// Execute complete (spec §1): push once, best-effort — ship's own push at
+	// the end of a successful run is the backstop.
+	if perr := wt.Push(ctx, wtPath, branch); perr != nil {
+		log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
+	}
+	return nil
+}
+
+// pushSpecPR runs the spec-complete push point (spec §1): push the branch,
+// open (or recover) its PR, comment the URL, and record it for the
+// dashboard. Best-effort — decision 5: any failure here is logged and
+// swallowed, never turning a completed spec stage into a pipeline error.
+// Worktree.Push and GitHub.CreatePR are both idempotent (see worktree.go,
+// github.go), so ship's own push/CreatePR at the very end of a successful
+// run — and any later push/PR-create from the plan or execute stage — safely
+// repeats whatever this call already did.
+func pushSpecPR(ctx context.Context, gh *GitHub, wt *Worktree, wtPath, branch, title string, n int, logDir string) {
+	if err := wt.Push(ctx, wtPath, branch); err != nil {
+		log.Printf("issue #%d: spec-stage push failed: %v", n, err)
+		return
+	}
+	url, err := gh.CreatePR(ctx, branch, prTitle(title, n), prBody(n, "feature"))
+	if err != nil {
+		log.Printf("issue #%d: spec-stage PR create failed: %v", n, err)
+		return
+	}
+	if err := gh.Comment(ctx, n, prComment(url)); err != nil {
+		log.Printf("issue #%d: spec-stage PR comment failed: %v", n, err)
+	}
+	recordPR(logDir, url)
+}
+
+// pushPlanUpdate runs the plan-complete push point (spec §1): push the
+// branch, then post the fixed "Updated plan: ..." comment naming the plan
+// file relative to the worktree root. Best-effort, same as pushSpecPR — no
+// PR is created here, the spec stage already created (or ship's own backstop
+// is about to create) the one PR this branch ever gets.
+func pushPlanUpdate(ctx context.Context, gh *GitHub, wt *Worktree, wtPath, branch string, n int, planPath string) {
+	if err := wt.Push(ctx, wtPath, branch); err != nil {
+		log.Printf("issue #%d: plan-stage push failed: %v", n, err)
+		return
+	}
+	rel, err := filepath.Rel(wtPath, planPath)
+	if err != nil {
+		rel = planPath
+	}
+	if err := gh.Comment(ctx, n, planComment(rel)); err != nil {
+		log.Printf("issue #%d: plan-stage comment failed: %v", n, err)
+	}
 }
 
 // maxExecuteGroups bounds executePlanGrouped: no deterministic total-step

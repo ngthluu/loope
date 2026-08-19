@@ -1222,3 +1222,89 @@ func TestShipReachesDoneWhenCodeReviewErrors(t *testing.T) {
 		t.Errorf("state = %q, want ai-done even though code review errored", env.readLocalState(7))
 	}
 }
+
+// TestShipSkipsPRCommentWhenAlreadyRecorded is spec §3: when the spec stage
+// already created the PR and posted the link comment (hasPR is true), ship
+// must still run CommitCount/Push/CreatePR/the label swap, but skip
+// re-posting the comment and re-writing the pr file.
+func TestShipSkipsPRCommentWhenAlreadyRecorded(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	logDir := o.issueLogDir(7)
+	recordPR(logDir, "https://github.com/org/repo/pull/99")
+	issue := Issue{Number: 7, Title: "Fix crash"}
+	c := &Claude{runner: env.f, logDir: logDir}
+	if err := o.ship(context.Background(), issue, c, worktreePath(o.cfg.WorkDir, 7), branchName(7), "main", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("gh", "pr create")) == 0 {
+		t.Error("ship must still call CreatePR to resolve the canonical URL for the label swap")
+	}
+	prComments := 0
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "pull/99") {
+			prComments++
+		}
+	}
+	if prComments != 0 {
+		t.Error("ship must not re-post the PR-link comment when hasPR is already true")
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
+		t.Errorf("want the wip->done swap to still run, got: %v", swap)
+	}
+}
+
+// TestProcessOnceFeatureOpensPRAfterSpecStage is the spec's required
+// end-to-end check: a full feature-pipeline run (brainstorm -> spec -> plan
+// -> execute -> ship) must have a PR open, and commented, right after the
+// spec stage — before plan or execute run at all — and only ONE "🤖 PR:"
+// comment must exist on the issue by the time the whole run finishes (ship
+// must not re-announce the PR the spec stage already announced).
+func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
+	env := newFakeEnv(t)
+	base := env.f.handler
+	var prCreatedBeforePlan bool
+	env.f.handler = func(c rcall) (string, string, error) {
+		if c.name == "claude" && strings.Contains(c.stdin, "triage agent") {
+			return claudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "brainstorming") {
+			writeSpecFile(t, worktreePath(env.wtDir, 7))
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "writing-plans") {
+			for _, call := range env.f.calls {
+				if call.name == "gh" && strings.Contains(strings.Join(call.args, " "), "pr create") {
+					prCreatedBeforePlan = true
+				}
+			}
+			writePlanFile(t, worktreePath(env.wtDir, 7))
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		}
+		if c.name == "claude" && strings.Contains(c.stdin, "executing-plans") {
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		return base(c)
+	}
+	o := env.orchestrator()
+	if err := runCycle(o); err != nil {
+		t.Fatal(err)
+	}
+	if !prCreatedBeforePlan {
+		t.Error("the PR was not created before the plan session ran")
+	}
+	prComments := 0
+	for _, c := range env.callsMatching("gh", "issue comment") {
+		if strings.Contains(c, "pull/99") {
+			prComments++
+		}
+	}
+	if prComments != 1 {
+		t.Errorf("want exactly one PR-link comment across the whole run, got %d", prComments)
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-done") {
+		t.Errorf("want a single ai-wip->ai-done swap, got: %v", swap)
+	}
+}

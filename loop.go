@@ -260,12 +260,12 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 		if session.Kind == "bug" {
 			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, session, prompt)
 		} else {
-			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, session, prompt)
+			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, session, prompt, o.gh, o.wt, branch, issue.Title, n)
 		}
 	} else if kind == "bug" {
 		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat)
+		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, o.gh, o.wt, branch, issue.Title, n)
 	}
 	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
 	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
@@ -497,14 +497,21 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, c *Claude, wtPath,
 	if err := o.wt.Push(ctx, wtPath, branch); err != nil {
 		return onInfra(err)
 	}
+	logDir := o.issueLogDir(n)
+	// The spec stage may already have created this PR and posted the link
+	// comment (spec §3) — check BEFORE CreatePR so a PR already recorded is
+	// told apart from one ship still needs to announce for the first time.
+	alreadyAnnounced := hasPR(logDir)
 	url, err := o.gh.CreatePR(ctx, branch, prTitle(issue.Title, n), prBody(n, kind))
 	if err != nil {
 		return onInfra(err)
 	}
-	_ = o.gh.Comment(ctx, n, prComment(url))
-	recordPR(o.issueLogDir(n), url)
+	if !alreadyAnnounced {
+		_ = o.gh.Comment(ctx, n, prComment(url))
+		recordPR(logDir, url)
+	}
 	cr := &CodeReview{Target: o.gh, Push: o.wt.Push, Num: n}
-	if err := cr.Run(ctx, c, o.cfg, wtPath, branch, base, o.issueLogDir(n)); err != nil {
+	if err := cr.Run(ctx, c, o.cfg, wtPath, branch, base, logDir); err != nil {
 		// The review loop's own errors never revert or re-park a successful
 		// ship — it is a quality pass layered on top, not a gate on shipping.
 		log.Printf("issue #%d: code review loop error: %v", n, err)
@@ -515,8 +522,8 @@ func (o *Orchestrator) ship(ctx context.Context, issue Issue, c *Claude, wtPath,
 		// idempotent).
 		return fmt.Errorf("issue #%d: PR created (%s) but marking done failed: %w", n, url, err)
 	}
-	recordState(o.issueLogDir(n), o.cfg.StateLabels.Done)
-	clearParkCause(o.issueLogDir(n))
+	recordState(logDir, o.cfg.StateLabels.Done)
+	clearParkCause(logDir)
 	return nil
 }
 
@@ -607,6 +614,12 @@ func prComment(url string) string {
 	d := promptData()
 	d["URL"] = url
 	return mustRender("pr-comment", d)
+}
+
+func planComment(path string) string {
+	d := promptData()
+	d["Path"] = path
+	return mustRender("plan-comment", d)
 }
 
 func prTitle(title string, n int) string {

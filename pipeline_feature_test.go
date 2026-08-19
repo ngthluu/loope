@@ -35,6 +35,25 @@ func writePlanFile(t *testing.T, wt string) string {
 	return p
 }
 
+// testGH/testWT are no-op GitHub/Worktree doubles for the push/PR/comment
+// steps the feature pipeline now runs mid-flight. They're backed by their OWN
+// fakeRunner, deliberately separate from whatever runner a test's *Claude
+// uses — so a push/PR/comment call never lands in a test's claude call count
+// or prompt list.
+func testGH() *GitHub {
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if strings.Contains(strings.Join(c.args, " "), "pr create") {
+			return "https://github.com/org/repo/pull/1\n", "", nil
+		}
+		return "", "", nil
+	}}
+	return NewGitHub(f, &Config{RepoSlug: "org/repo"})
+}
+
+func testWT() *Worktree {
+	return &Worktree{runner: &fakeRunner{}}
+}
+
 func TestParseSpecReady(t *testing.T) {
 	if p, ok := parseSpecReady("Spec done.\nSPEC_READY: docs/superpowers/specs/x-design.md\n"); !ok || p != "docs/superpowers/specs/x-design.md" {
 		t.Errorf("parseSpecReady = %q,%v", p, ok)
@@ -134,7 +153,7 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
@@ -172,6 +191,128 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 	}
 }
 
+// TestBrainstormLoopPushesAndCreatesPRAfterSpec locks in spec §1's ordering:
+// the spec-stage push/PR/comment must complete BEFORE the plan session ever
+// starts, using ship's own idempotent CreatePR/Push (so a later ship at the
+// end of the run recovers the same PR instead of erroring).
+func TestBrainstormLoopPushesAndCreatesPRAfterSpec(t *testing.T) {
+	wt := t.TempDir()
+	logDir := t.TempDir()
+
+	var ghCalls []string
+	gf := &fakeRunner{}
+	// NOTE: fakeRunner invokes the handler while already holding its own mutex,
+	// so the handler must never re-lock gf.mu. The append is already serialized.
+	gf.handler = func(c rcall) (string, string, error) {
+		ghCalls = append(ghCalls, c.name+" "+strings.Join(c.args, " "))
+		if c.name == "gh" && strings.Contains(strings.Join(c.args, " "), "pr create") {
+			return "https://github.com/org/repo/pull/42\n", "", nil
+		}
+		return "", "", nil
+	}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	wtree := &Worktree{runner: gf}
+
+	var prompts []string
+	cf := &fakeRunner{}
+	cf.handler = func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		switch len(prompts) {
+		case 1: // architect: commits the spec straight away
+			writeSpecFile(t, wt)
+			return claudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		case 2: // fresh plan session: the spec-stage push/PR must already have run
+			if len(ghCalls) == 0 {
+				t.Fatal("plan session started before the spec-stage push/PR ran")
+			}
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case 3: // executor
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d: %v", len(prompts), c.args)
+		return "", "", nil
+	}
+	c := &Claude{runner: cf, logDir: logDir}
+
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
+		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 3 {
+		t.Fatalf("got %d claude calls, want 3", len(prompts))
+	}
+	if len(ghCalls) < 3 {
+		t.Fatalf("want at least push+create+comment on the gh/git runner, got %v", ghCalls)
+	}
+	if !strings.HasPrefix(ghCalls[0], "git push") {
+		t.Errorf("first git/gh call should be the push, got %v", ghCalls)
+	}
+	var sawCreate, sawComment bool
+	for _, call := range ghCalls {
+		if strings.Contains(call, "pr create") {
+			sawCreate = true
+		}
+		if strings.Contains(call, "issue comment") && strings.Contains(call, "pull/42") {
+			sawComment = true
+		}
+	}
+	if !sawCreate {
+		t.Errorf("want a pr create call, got %v", ghCalls)
+	}
+	if !sawComment {
+		t.Errorf("want the PR URL commented, got %v", ghCalls)
+	}
+	b, err := os.ReadFile(filepath.Join(logDir, "pr"))
+	if err != nil || string(b) != "https://github.com/org/repo/pull/42" {
+		t.Errorf("recordPR = %q, err=%v", b, err)
+	}
+}
+
+// TestBrainstormLoopContinuesWhenSpecPushFails is decision 5: a push/PR/
+// comment failure at the spec stage must not abort the pipeline — plan and
+// execute still run.
+func TestBrainstormLoopContinuesWhenSpecPushFails(t *testing.T) {
+	wt := t.TempDir()
+	gf := &fakeRunner{}
+	gf.handler = func(c rcall) (string, string, error) {
+		if c.name == "git" && strings.Contains(strings.Join(c.args, " "), "push") {
+			return "", "connection refused", errors.New("git push: connection refused")
+		}
+		return "", "", nil
+	}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	gh.retry = testRetry
+	wtree := &Worktree{runner: gf, retry: testRetry}
+
+	var prompts []string
+	cf := &fakeRunner{}
+	cf.handler = func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		switch len(prompts) {
+		case 1:
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		case 2:
+			writePlanFile(t, wt)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		case 3:
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d", len(prompts))
+		return "", "", nil
+	}
+	c := &Claude{runner: cf}
+
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
+		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
+		t.Fatalf("a failed spec-stage push must not fail the pipeline, got %v", err)
+	}
+	if len(prompts) != 3 {
+		t.Fatalf("pipeline must still run plan+execute despite the push failure, got %d claude calls", len(prompts))
+	}
+}
+
 func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 	wt := t.TempDir()
 	f := &fakeRunner{}
@@ -179,7 +320,7 @@ func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 		return claudeJSON("Still thinking...", "s1"), "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil)
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	if err == nil || !strings.Contains(err.Error(), "rounds") {
 		t.Errorf("want max-rounds error, got %v", err)
 	}
@@ -224,7 +365,7 @@ func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("pipeline should succeed when the spec completes on the last permitted round, got %v", err)
 	}
 	if len(prompts) != 5 {
@@ -269,7 +410,7 @@ func TestFeaturePipelineAlreadyDoneConfirmedOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil)
+	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError when already-done claim arrives on the final permitted round, got %v", err)
@@ -291,7 +432,7 @@ func TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing(t *testing.T) {
 		return claudeJSON("SPEC_READY: nope.md", "s1"), "", nil // lies: no spec file exists
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil); err == nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
 		t.Error("want error when spec sentinel appears but no spec file ever exists")
 	}
 	if count < 3 {
@@ -315,7 +456,7 @@ func TestFeaturePipelineArchitectDoneConfirmed(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil)
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError, got %v", err)
@@ -355,7 +496,7 @@ func TestFeaturePipelineArchitectDonePushbackContinues(t *testing.T) {
 		return "", "", nil
 	}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
@@ -385,7 +526,7 @@ func TestFeaturePipelineLowConfidenceEscalates(t *testing.T) {
 		return claudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-1"), "", nil
 	}}
 	c := &Claude{runner: f}
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil)
+	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -428,7 +569,7 @@ func TestFeaturePipelineHighConfidenceProceeds(t *testing.T) {
 		return "", "", nil
 	}}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "clear issue", "", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "clear issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("high confidence should proceed, got %v", err)
 	}
 	if len(prompts) != 3 {
@@ -457,7 +598,7 @@ func TestFeaturePipelineRecordsExecuteSession(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}, Answerer: ModelConfig{Model: "sonnet"}}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := readSession(logDir)
@@ -477,7 +618,7 @@ func TestFeaturePipelineRecordsSessionOnError(t *testing.T) {
 	wt := t.TempDir()
 	f := &fakeRunner{queue: []rresp{{stdout: claudeErrorJSON("You've hit your session limit", "arch-429")}}}
 	c := &Claude{runner: f, logDir: logDir}
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil); err == nil {
+	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
 		t.Fatal("want the error propagated so the issue is parked")
 	}
 	si, err := readSession(logDir)
@@ -517,7 +658,7 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 		Answerer:  ModelConfig{Model: "sonnet"},
 		Execute:   ModelConfig{Model: "opus", MaxTurns: 300},
 	}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	var execArgs, brainArgs []string
@@ -770,7 +911,7 @@ func TestFeaturePipelineRunsUATOnTheCommittedSpec(t *testing.T) {
 	cfg := featureConfig()
 	cfg.Models.UAT = ModelConfig{Model: "sonnet"}
 	c := &Claude{runner: f}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"architect", "uat", "plan", "execute"} {
@@ -827,7 +968,7 @@ func TestFeaturePipelineRunsUATConcurrentlyWithPlan(t *testing.T) {
 	cfg := featureConfig()
 	cfg.Models.UAT = ModelConfig{Model: "sonnet"}
 	c := &Claude{runner: g}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}); err != nil {
+	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if !overlapped.Load() {
@@ -864,7 +1005,7 @@ func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 	}
 	c := &Claude{runner: f}
 	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA",
-		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}); err != nil {
+		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("a failed UAT session must never block the pipeline: %v", err)
 	}
 	if seen["plan"] != 1 || seen["execute"] != 1 {
@@ -897,7 +1038,7 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
 	session := SessionInfo{SessionID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	// The resumed architect call must carry --resume arch-sess and prompt "continue".
@@ -932,7 +1073,7 @@ func TestResumeFeaturePipelinePlanStage(t *testing.T) {
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
 	session := SessionInfo{SessionID: "plan-sess", Kind: "feature", Stage: stagePlan}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := readSession(logDir)
@@ -954,7 +1095,7 @@ func TestResumeFeaturePipelineExecuteStage(t *testing.T) {
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
 	session := SessionInfo{SessionID: "exec-sess", Kind: "feature", Stage: stageExecute}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue"); err != nil {
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := readSession(logDir)
@@ -985,7 +1126,7 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
 	session := SessionInfo{SessionID: "stale-sess", Kind: "feature", Stage: "bogus"}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue"); err != nil {
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	// Fresh brainstorm-0 call must have fired with no --resume.
@@ -993,5 +1134,219 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 		if call.name == "claude" && strings.Contains(call.stdin, "brainstorming") && argAfter(call.args, "--resume") != "" {
 			t.Error("unknown stage must fall back to a FRESH brainstorm-0 call, not resume the stale session")
 		}
+	}
+}
+
+// TestRunPlanThenExecutePushesAndCommentsPlanUpdate locks in spec §1's
+// plan-stage push point: a push, then a fixed "Updated plan: ..." comment
+// naming the plan file relative to the worktree root — BEFORE the execute
+// session starts. No PR is created here (the spec stage already created it).
+func TestRunPlanThenExecutePushesAndCommentsPlanUpdate(t *testing.T) {
+	wt := t.TempDir()
+
+	var ghCalls []string
+	gf := &fakeRunner{}
+	gf.handler = func(c rcall) (string, string, error) {
+		ghCalls = append(ghCalls, c.name+" "+strings.Join(c.args, " "))
+		return "", "", nil
+	}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	wtree := &Worktree{runner: gf}
+
+	var calls int
+	cf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		calls++
+		switch calls {
+		case 1: // fresh plan session: commits the plan
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case 2: // executor: the plan-stage push/comment must already have run
+			if len(ghCalls) == 0 {
+				t.Fatal("execute session started before the plan-stage push/comment ran")
+			}
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d", calls)
+		return "", "", nil
+	}}
+	c := &Claude{runner: cf}
+
+	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
+		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawComment, sawCreate bool
+	pushes := 0
+	for _, call := range ghCalls {
+		if strings.HasPrefix(call, "git push") {
+			pushes++
+		}
+		if strings.Contains(call, "issue comment") && strings.Contains(call, "Updated plan") &&
+			strings.Contains(call, "docs/superpowers/plans/2026-07-06-thing.md") {
+			sawComment = true
+		}
+		if strings.Contains(call, "pr create") {
+			sawCreate = true
+		}
+	}
+	if pushes != 2 {
+		t.Errorf("want 2 pushes (plan-stage + execute-stage), got %d: %v", pushes, ghCalls)
+	}
+	if !sawComment {
+		t.Errorf("want the 'Updated plan' comment naming the plan file, got %v", ghCalls)
+	}
+	if sawCreate {
+		t.Error("the plan stage must never create a PR — the spec stage already did")
+	}
+}
+
+// TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline is decision 5 for
+// the plan stage: a push/comment failure must not abort the pipeline.
+func TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline(t *testing.T) {
+	wt := t.TempDir()
+	gf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if c.name == "git" && strings.Contains(strings.Join(c.args, " "), "push") {
+			return "", "timeout", errors.New("git push: timeout")
+		}
+		return "", "", nil
+	}}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	gh.retry = testRetry
+	wtree := &Worktree{runner: gf, retry: testRetry}
+
+	var calls int
+	cf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		calls++
+		switch calls {
+		case 1:
+			writePlanFile(t, wt)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		case 2:
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		return "", "", nil
+	}}
+	c := &Claude{runner: cf}
+	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
+		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
+	if err != nil {
+		t.Fatalf("a failed plan-stage push must not fail the pipeline, got %v", err)
+	}
+}
+
+// TestRunPlanThenExecutePushesAfterExecuteCompletes locks in spec §1's third
+// push point: after executePlan succeeds, push once more — no comment.
+func TestRunPlanThenExecutePushesAfterExecuteCompletes(t *testing.T) {
+	wt := t.TempDir()
+	var ghCalls []string
+	gf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		ghCalls = append(ghCalls, c.name+" "+strings.Join(c.args, " "))
+		return "", "", nil
+	}}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	wtree := &Worktree{runner: gf}
+
+	var calls int
+	cf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		calls++
+		switch calls {
+		case 1:
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case 2:
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d", calls)
+		return "", "", nil
+	}}
+	c := &Claude{runner: cf}
+
+	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
+		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushes := 0
+	for _, call := range ghCalls {
+		if strings.HasPrefix(call, "git push") {
+			pushes++
+		}
+		if strings.Contains(call, "issue comment") && !strings.Contains(call, "Updated plan") {
+			t.Errorf("the execute stage must not comment, got %v", call)
+		}
+	}
+	if pushes != 2 {
+		t.Errorf("want 2 pushes (plan-stage + execute-stage), got %d: %v", pushes, ghCalls)
+	}
+}
+
+// TestExecuteStagePushFailureDoesNotFailPipeline is decision 5 for the
+// execute stage: a push failure after executePlan succeeds must not fail an
+// otherwise-successful pipeline run.
+func TestExecuteStagePushFailureDoesNotFailPipeline(t *testing.T) {
+	wt := t.TempDir()
+	gf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if c.name == "git" && strings.Contains(strings.Join(c.args, " "), "push") {
+			return "", "timeout", errors.New("git push: timeout")
+		}
+		return "", "", nil
+	}}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	gh.retry = testRetry
+	wtree := &Worktree{runner: gf, retry: testRetry}
+
+	var calls int
+	cf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		calls++
+		switch calls {
+		case 1:
+			writePlanFile(t, wt)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		case 2:
+			return claudeJSON("Executed.", "exec-1"), "", nil
+		}
+		return "", "", nil
+	}}
+	c := &Claude{runner: cf}
+	if err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
+		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9); err != nil {
+		t.Fatalf("a failed execute-stage push must not fail the pipeline, got %v", err)
+	}
+}
+
+// TestResumeFeaturePipelineExecuteStagePushesAfterSuccess covers the OTHER
+// path to the execute-stage push: ResumeFeaturePipeline's stageExecute case.
+func TestResumeFeaturePipelineExecuteStagePushesAfterSuccess(t *testing.T) {
+	logDir := t.TempDir()
+	var ghCalls []string
+	gf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		ghCalls = append(ghCalls, c.name+" "+strings.Join(c.args, " "))
+		return "", "", nil
+	}}
+	gh := NewGitHub(gf, &Config{RepoSlug: "org/repo"})
+	wtree := &Worktree{runner: gf}
+	cf := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		return claudeJSON("executed more", "exec-sess-2"), "", nil
+	}}
+	c := &Claude{runner: cf, logDir: logDir}
+	cfg := featureConfig()
+	session := SessionInfo{SessionID: "exec-sess", Kind: "feature", Stage: stageExecute}
+	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue",
+		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, call := range ghCalls {
+		if strings.HasPrefix(call, "git push") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a push after the resumed execute session succeeds, got %v", ghCalls)
 	}
 }

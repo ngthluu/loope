@@ -255,6 +255,11 @@ func TestGoldenPRComment(t *testing.T) {
 	check(t, "prComment", prComment("https://example.test/pr/1"), "🤖 PR: https://example.test/pr/1\n\n"+botMarker)
 }
 
+func TestGoldenPlanComment(t *testing.T) {
+	check(t, "planComment", planComment("docs/superpowers/plans/2026-plan.md"),
+		"🤖 Updated plan: `docs/superpowers/plans/2026-plan.md`\n\n"+botMarker)
+}
+
 func TestGoldenPRTitle(t *testing.T) {
 	check(t, "prTitle", prTitle("Externalize prompts", 12), "Externalize prompts (#12)")
 }
