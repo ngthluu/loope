@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"encoding/json"
 	"html/template"
 	"net/http"
@@ -9,18 +11,14 @@ import (
 	"time"
 )
 
-const (
-	defaultPushIntervalSec = 15
-	maxLogLinesPerWorker   = 2000
-	usageStaleAfter        = 30 * time.Minute
-)
+const maxLogLinesPerWorker = 2000
 
 // WorkerState is the server's last-known view of one worker, keyed by
 // Resource.MachineID.
 type WorkerState struct {
-	Resource   Resource
+	Resource   shared.Resource
 	LastPushAt time.Time
-	Usage      *UsageSnapshot
+	Usage      *shared.UsageSnapshot
 	Logs       *LogRingBuffer
 }
 
@@ -31,16 +29,16 @@ type WorkerState struct {
 func (w *WorkerState) online(now time.Time) bool {
 	interval := w.Resource.PushIntervalSec
 	if interval <= 0 {
-		interval = defaultPushIntervalSec
+		interval = shared.DefaultPushIntervalSec
 	}
 	return now.Sub(w.LastPushAt) < time.Duration(3*interval)*time.Second
 }
 
 // usableUsage returns w.Usage if it is fresh enough to show, else nil — a
-// snapshot whose CapturedAt is older than usageStaleAfter renders as
+// snapshot whose CapturedAt is older than shared.UsageStaleAfter renders as
 // "unknown" rather than a stale number.
-func (w *WorkerState) usableUsage(now time.Time) *UsageSnapshot {
-	if w.Usage == nil || now.Sub(w.Usage.CapturedAt) > usageStaleAfter {
+func (w *WorkerState) usableUsage(now time.Time) *shared.UsageSnapshot {
+	if w.Usage == nil || now.Sub(w.Usage.CapturedAt) > shared.UsageStaleAfter {
 		return nil
 	}
 	return w.Usage
@@ -65,7 +63,7 @@ type TelemetryServer struct {
 // out — kept as a returned error (rather than a panic) to match NewServer's
 // convention in serve.go.
 func NewTelemetryServer(token string) (*TelemetryServer, error) {
-	tmpl, err := template.New("telemetry").ParseFS(telemetryFS, "telemetry/templates/*.html")
+	tmpl, err := template.New("telemetry").ParseFS(telemetryFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +95,7 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var req PushRequest
+	var req shared.PushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

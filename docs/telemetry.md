@@ -3,13 +3,24 @@
 Running `loope` across several machines or repos normally means opening N
 terminals or N per-repo dashboards, with no single place to see which workers
 are online, what they're doing, or how close each is to its Claude Code usage
-limit. `loope telemetry-server` is a central, opt-in view across all of them.
+limit. `loope-telemetry-server` — its own binary since the monorepo split
+(`telemetry-server/`) — is a central, opt-in view across all of them.
 
 ## Running the server
 
 ```bash
-loope telemetry-server -addr :9090 -token your-shared-secret
+loope-telemetry-server -addr :9090 -token your-shared-secret
 ```
+
+Or with Docker (build from the repo root — the image needs `shared/`):
+
+```bash
+docker build -f telemetry-server/Dockerfile -t loope-telemetry-server .
+docker run --rm -p 9090:9090 loope-telemetry-server -token your-shared-secret
+```
+
+No volume is needed (state is in-memory) and the image terminates no TLS —
+put a reverse proxy in front for HTTPS.
 
 `-token` is required — it is the shared bearer token every worker must send.
 `-addr` defaults to `:9090`. `-data-dir` is accepted for forward compatibility

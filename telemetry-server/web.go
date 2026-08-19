@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-//go:embed telemetry/templates
+//go:embed templates
 var telemetryFS embed.FS
 
 // telemetryWorkerView is one worker's pre-formatted render data.
@@ -98,8 +98,8 @@ func (s *TelemetryServer) buildTelemetryView(selectedID string) telemetryView {
 }
 
 // registerWebHandlers wires the dashboard routes onto mux: GET / (full
-// page), GET /rail and GET /detail (htmx poll fragments), and the static
-// assets shared with the per-repo dashboard (staticHandler, from web.go).
+// page), GET /rail and GET /detail (htmx poll fragments), and the
+// embedded static assets (staticHandler, static.go).
 func (s *TelemetryServer) registerWebHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.handleTelemetryIndex)
 	mux.HandleFunc("GET /rail", s.handleTelemetryRail)

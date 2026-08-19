@@ -1,10 +1,22 @@
-package main
+// Package shared holds the telemetry wire contract between the loope worker
+// (which POSTs pushes) and the telemetry server (which ingests and renders
+// them). It is the only code both binaries compile in.
+package shared
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"time"
 )
+
+// DefaultPushIntervalSec is the push interval assumed when a worker's
+// Resource never carried one (older workers), and the default the worker's
+// config applies when the telemetry block omits it.
+const DefaultPushIntervalSec = 15
+
+// UsageStaleAfter is how old a UsageSnapshot may be before both sides treat
+// it as unknown: the worker stops sending it, the server stops rendering it.
+const UsageStaleAfter = 30 * time.Minute
 
 // Resource identifies the worker that produced a push: its project grouping,
 // a stable machine identity, build metadata, and the push interval it is
@@ -46,11 +58,11 @@ type PushRequest struct {
 	SentAt   time.Time      `json:"sentAt"`
 }
 
-// machineID is a stable per-(hostname,workDir) identity: sha256(hostname +
+// MachineID is a stable per-(hostname,workDir) identity: sha256(hostname +
 // workDir), hex-encoded and truncated to 12 characters. It survives restarts
 // of the same daemon (same host, same workDir) but distinguishes two daemons
 // on one host watching different repos.
-func machineID(hostname, workDir string) string {
+func MachineID(hostname, workDir string) string {
 	sum := sha256.Sum256([]byte(hostname + workDir))
 	return hex.EncodeToString(sum[:])[:12]
 }

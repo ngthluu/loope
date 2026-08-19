@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +19,7 @@ func newTestTelemetryServer(t *testing.T) *TelemetryServer {
 	return s
 }
 
-func pushWorker(t *testing.T, s *TelemetryServer, req PushRequest) {
+func pushWorker(t *testing.T, s *TelemetryServer, req shared.PushRequest) {
 	t.Helper()
 	rec := doPush(t, s.Handler(), "secret", req)
 	if rec.Code != http.StatusNoContent {
@@ -27,8 +29,8 @@ func pushWorker(t *testing.T, s *TelemetryServer, req PushRequest) {
 
 func TestTelemetryIndexGroupsByRepoSlugAndShowsWorkers(t *testing.T) {
 	s := newTestTelemetryServer(t)
-	pushWorker(t, s, PushRequest{Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})
-	pushWorker(t, s, PushRequest{Resource: Resource{MachineID: "m2", RepoSlug: "o/other", Hostname: "host2", PushIntervalSec: 15}})
+	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})
+	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m2", RepoSlug: "o/other", Hostname: "host2", PushIntervalSec: 15}})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -46,7 +48,7 @@ func TestTelemetryIndexGroupsByRepoSlugAndShowsWorkers(t *testing.T) {
 
 func TestTelemetryDetailShowsUsageUnknownWhenAbsent(t *testing.T) {
 	s := newTestTelemetryServer(t)
-	pushWorker(t, s, PushRequest{Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})
+	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})
 
 	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)
 	rec := httptest.NewRecorder()
@@ -58,9 +60,9 @@ func TestTelemetryDetailShowsUsageUnknownWhenAbsent(t *testing.T) {
 
 func TestTelemetryDetailShowsFreshUsagePercentage(t *testing.T) {
 	s := newTestTelemetryServer(t)
-	pushWorker(t, s, PushRequest{
-		Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
-		Usage:    &UsageSnapshot{FiveHourUsedPct: 33.3, CapturedAt: time.Now()},
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		Usage:    &shared.UsageSnapshot{FiveHourUsedPct: 33.3, CapturedAt: time.Now()},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)
@@ -73,9 +75,9 @@ func TestTelemetryDetailShowsFreshUsagePercentage(t *testing.T) {
 
 func TestTelemetryDetailShowsLogTail(t *testing.T) {
 	s := newTestTelemetryServer(t)
-	pushWorker(t, s, PushRequest{
-		Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
-		Logs:     []LogRecord{{Body: "watching o/r for label ai-agent"}},
+	pushWorker(t, s, shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
+		Logs:     []shared.LogRecord{{Body: "watching o/r for label ai-agent"}},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)

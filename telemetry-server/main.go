@@ -11,11 +11,20 @@ import (
 	"syscall"
 )
 
-// parseTelemetryServerFlags parses `loope telemetry-server`'s flags. token
-// is required — an empty value is treated as a parse error so the caller
-// exits before ever listening without auth configured.
+// version is the loope-telemetry-server release version. It defaults to
+// "dev" for local builds and is overridden at release time via
+// -ldflags "-X main.version=<tag>".
+var version = "dev"
+
+func main() {
+	os.Exit(runTelemetryServerCmd(os.Args[1:]))
+}
+
+// parseTelemetryServerFlags parses the server's flags. token is required —
+// an empty value is treated as a parse error so the caller exits before
+// ever listening without auth configured.
 func parseTelemetryServerFlags(args []string) (addr, token, dataDir string, err error) {
-	fs := flag.NewFlagSet("telemetry-server", flag.ContinueOnError)
+	fs := flag.NewFlagSet("loope-telemetry-server", flag.ContinueOnError)
 	a := fs.String("addr", ":9090", "address to listen on")
 	t := fs.String("token", "", "shared bearer token workers authenticate with (required)")
 	d := fs.String("data-dir", "", "reserved for future persistence; created if given, but unused today")
@@ -28,7 +37,7 @@ func parseTelemetryServerFlags(args []string) (addr, token, dataDir string, err 
 	return *a, *t, *d, nil
 }
 
-// runTelemetryServerCmd implements `loope telemetry-server`: parse flags,
+// runTelemetryServerCmd is the whole server process: parse flags,
 // start the fleet dashboard/ingest HTTP server, and block until a shutdown
 // signal. Returns the process exit code.
 func runTelemetryServerCmd(args []string) int {
@@ -57,7 +66,7 @@ func runTelemetryServerCmd(args []string) int {
 		<-ctx.Done()
 		httpSrv.Close()
 	}()
-	log.Printf("telemetry server on http://%s", addr)
+	log.Printf("loope-telemetry-server %s on http://%s", version, addr)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "telemetry-server: %v\n", err)
 		return 1

@@ -157,13 +157,13 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
-func TestDispatchSubcommandTelemetryServerRequiresToken(t *testing.T) {
-	code, handled := dispatchSubcommand([]string{"loope", "telemetry-server"}, strings.NewReader(""))
-	if !handled {
-		t.Fatal("expected telemetry-server to be handled")
-	}
-	if code != 2 {
-		t.Fatalf("code = %d, want 2 (missing -token)", code)
+// TestDispatchSubcommandTelemetryServerFallsThrough locks in the monorepo
+// split: the worker binary no longer embeds the telemetry server, so the old
+// `loope telemetry-server` invocation falls through to normal flag parsing
+// (and fails there) instead of being silently handled.
+func TestDispatchSubcommandTelemetryServerFallsThrough(t *testing.T) {
+	if _, handled := dispatchSubcommand([]string{"loope", "telemetry-server"}, strings.NewReader("")); handled {
+		t.Fatal("telemetry-server must no longer be a worker subcommand — it is its own binary")
 	}
 }
 

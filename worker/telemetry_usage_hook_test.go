@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"encoding/json"
 	"os"
 	"strings"
@@ -58,7 +60,7 @@ func TestRunClaudeUsageHookCmdWritesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got UsageSnapshot
+	var got shared.UsageSnapshot
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}

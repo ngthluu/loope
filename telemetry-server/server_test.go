@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -9,7 +11,7 @@ import (
 	"time"
 )
 
-func doPush(t *testing.T, h http.Handler, token string, req PushRequest) *httptest.ResponseRecorder {
+func doPush(t *testing.T, h http.Handler, token string, req shared.PushRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -30,7 +32,7 @@ func TestHandlePushAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := s.Handler()
-	req := PushRequest{Resource: Resource{MachineID: "m1"}}
+	req := shared.PushRequest{Resource: shared.Resource{MachineID: "m1"}}
 
 	if rec := doPush(t, h, "", req); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token: status = %d, want 401", rec.Code)
@@ -48,7 +50,7 @@ func TestHandlePushRequiresMachineID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := doPush(t, s.Handler(), "secret", PushRequest{})
+	rec := doPush(t, s.Handler(), "secret", shared.PushRequest{})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
@@ -60,16 +62,16 @@ func TestHandlePushStoresWorkerAndAppendsLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := s.Handler()
-	req1 := PushRequest{
-		Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
-		Logs:     []LogRecord{{Body: "line1"}, {Body: "line2"}},
+	req1 := shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		Logs:     []shared.LogRecord{{Body: "line1"}, {Body: "line2"}},
 	}
 	if rec := doPush(t, h, "secret", req1); rec.Code != http.StatusNoContent {
 		t.Fatalf("push 1 status = %d", rec.Code)
 	}
-	req2 := PushRequest{
-		Resource: Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
-		Logs:     []LogRecord{{Body: "line3"}},
+	req2 := shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		Logs:     []shared.LogRecord{{Body: "line3"}},
 	}
 	if rec := doPush(t, h, "secret", req2); rec.Code != http.StatusNoContent {
 		t.Fatalf("push 2 status = %d", rec.Code)
@@ -95,7 +97,7 @@ func TestHandlePushStoresWorkerAndAppendsLogs(t *testing.T) {
 
 func TestWorkerStateOnlineOfflineTransition(t *testing.T) {
 	base := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
-	ws := &WorkerState{Resource: Resource{PushIntervalSec: 15}, LastPushAt: base}
+	ws := &WorkerState{Resource: shared.Resource{PushIntervalSec: 15}, LastPushAt: base}
 
 	if !ws.online(base.Add(44 * time.Second)) {
 		t.Fatal("expected online just under 3x the 15s interval (45s)")
@@ -115,8 +117,8 @@ func TestWorkerStateOnlineDefaultsIntervalWhenUnset(t *testing.T) {
 
 func TestWorkerStateUsableUsageStaleness(t *testing.T) {
 	base := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
-	fresh := &UsageSnapshot{FiveHourUsedPct: 10, CapturedAt: base.Add(-29 * time.Minute)}
-	stale := &UsageSnapshot{FiveHourUsedPct: 10, CapturedAt: base.Add(-31 * time.Minute)}
+	fresh := &shared.UsageSnapshot{FiveHourUsedPct: 10, CapturedAt: base.Add(-29 * time.Minute)}
+	stale := &shared.UsageSnapshot{FiveHourUsedPct: 10, CapturedAt: base.Add(-31 * time.Minute)}
 
 	ws := &WorkerState{Usage: fresh}
 	if ws.usableUsage(base) == nil {

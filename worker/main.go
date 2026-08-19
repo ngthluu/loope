@@ -156,18 +156,17 @@ func main() {
 	runLoop(ctx, o, cfg, true /* sweep */)
 }
 
-// dispatchSubcommand handles the `telemetry-server` and `claude-usage-hook`
-// subcommands, which take over the whole process instead of running the
-// daemon. handled is false for every other invocation (the normal
-// --config-driven daemon, bare --version/--help), so main falls through to
-// its existing flag-based dispatch unchanged.
+// dispatchSubcommand handles the `claude-usage-hook` subcommand, which takes
+// over the whole process instead of running the daemon. handled is false for
+// every other invocation (the normal --config-driven daemon, bare
+// --version/--help), so main falls through to its existing flag-based
+// dispatch unchanged. The fleet telemetry server is its own binary since the
+// monorepo split: loope-telemetry-server (telemetry-server/).
 func dispatchSubcommand(args []string, stdin io.Reader) (code int, handled bool) {
 	if len(args) < 2 {
 		return 0, false
 	}
 	switch args[1] {
-	case "telemetry-server":
-		return runTelemetryServerCmd(args[2:]), true
 	case "claude-usage-hook":
 		return runClaudeUsageHookCmd(stdin), true
 	}

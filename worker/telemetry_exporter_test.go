@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -12,7 +14,7 @@ import (
 )
 
 func TestExporterPushOnceSendsLogsAndAuth(t *testing.T) {
-	var gotReq PushRequest
+	var gotReq shared.PushRequest
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -46,7 +48,7 @@ func TestExporterPushOnceSendsLogsAndAuth(t *testing.T) {
 }
 
 func TestExporterPushOnceIncludesFreshUsage(t *testing.T) {
-	var gotReq PushRequest
+	var gotReq shared.PushRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		w.WriteHeader(http.StatusNoContent)
@@ -54,7 +56,7 @@ func TestExporterPushOnceIncludesFreshUsage(t *testing.T) {
 	defer srv.Close()
 
 	usagePath := filepath.Join(t.TempDir(), "loope-usage.json")
-	snap := UsageSnapshot{FiveHourUsedPct: 42, CapturedAt: time.Now()}
+	snap := shared.UsageSnapshot{FiveHourUsedPct: 42, CapturedAt: time.Now()}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +97,7 @@ func TestExporterPushOnceReturnsErrorOnNonNoContent(t *testing.T) {
 
 func TestReadUsageSnapshotStaleReturnsNil(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
-	stale := UsageSnapshot{CapturedAt: time.Now().Add(-31 * time.Minute)}
+	stale := shared.UsageSnapshot{CapturedAt: time.Now().Add(-31 * time.Minute)}
 	data, err := json.Marshal(stale)
 	if err != nil {
 		t.Fatal(err)

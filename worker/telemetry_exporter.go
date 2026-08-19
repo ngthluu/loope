@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -61,9 +63,9 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 		log.Printf("telemetry: read log tail: %v", err)
 	}
 	now := time.Now()
-	logs := make([]LogRecord, len(lines))
+	logs := make([]shared.LogRecord, len(lines))
 	for i, l := range lines {
-		logs[i] = LogRecord{Timestamp: now, Body: l}
+		logs[i] = shared.LogRecord{Timestamp: now, Body: l}
 	}
 
 	usage, err := readUsageSnapshot(e.usagePath, now)
@@ -72,10 +74,10 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 	}
 
 	hostname, _ := os.Hostname()
-	req := PushRequest{
-		Resource: Resource{
+	req := shared.PushRequest{
+		Resource: shared.Resource{
 			RepoSlug:        e.cfg.RepoSlug,
-			MachineID:       machineID(hostname, e.cfg.WorkDir),
+			MachineID:       shared.MachineID(hostname, e.cfg.WorkDir),
 			Hostname:        hostname,
 			WorkDir:         e.cfg.WorkDir,
 			Version:         version,
@@ -108,9 +110,9 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 
 // readUsageSnapshot reads the usage-hook file at path, returning nil when
 // path is empty, the file is missing, or its CapturedAt is older than
-// usageStaleAfter — the dashboard then renders "usage: unknown" rather than
+// shared.UsageStaleAfter — the dashboard then renders "usage: unknown" rather than
 // a stale or fabricated number.
-func readUsageSnapshot(path string, now time.Time) (*UsageSnapshot, error) {
+func readUsageSnapshot(path string, now time.Time) (*shared.UsageSnapshot, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -121,11 +123,11 @@ func readUsageSnapshot(path string, now time.Time) (*UsageSnapshot, error) {
 		}
 		return nil, err
 	}
-	var u UsageSnapshot
+	var u shared.UsageSnapshot
 	if err := json.Unmarshal(data, &u); err != nil {
 		return nil, err
 	}
-	if now.Sub(u.CapturedAt) > usageStaleAfter {
+	if now.Sub(u.CapturedAt) > shared.UsageStaleAfter {
 		return nil, nil
 	}
 	return &u, nil

@@ -1,4 +1,4 @@
-package main
+package shared
 
 import (
 	"encoding/json"
@@ -7,15 +7,15 @@ import (
 )
 
 func TestMachineIDStableAndDistinct(t *testing.T) {
-	a := machineID("host1", "/work/a")
-	b := machineID("host1", "/work/a")
+	a := MachineID("host1", "/work/a")
+	b := MachineID("host1", "/work/a")
 	if a != b {
 		t.Fatalf("machineID not stable: %q != %q", a, b)
 	}
 	if len(a) != 12 {
 		t.Fatalf("machineID length = %d, want 12", len(a))
 	}
-	c := machineID("host1", "/work/b")
+	c := MachineID("host1", "/work/b")
 	if a == c {
 		t.Fatalf("machineID for a different workDir must differ")
 	}

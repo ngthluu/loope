@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ngthluu/loope/shared"
+
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,12 +41,12 @@ func usageHookFile() (string, error) {
 // UsageSnapshot stamped with capturedAt. A reset timestamp that fails to
 // parse is left zero rather than failing the whole snapshot — a partial
 // usage read is still worth recording.
-func parseClaudeStatusLine(data []byte, capturedAt time.Time) (UsageSnapshot, error) {
+func parseClaudeStatusLine(data []byte, capturedAt time.Time) (shared.UsageSnapshot, error) {
 	var in claudeStatusLineInput
 	if err := json.Unmarshal(data, &in); err != nil {
-		return UsageSnapshot{}, err
+		return shared.UsageSnapshot{}, err
 	}
-	u := UsageSnapshot{
+	u := shared.UsageSnapshot{
 		FiveHourUsedPct: in.RateLimits.FiveHour.UsedPercentage,
 		SevenDayUsedPct: in.RateLimits.SevenDay.UsedPercentage,
 		CapturedAt:      capturedAt,

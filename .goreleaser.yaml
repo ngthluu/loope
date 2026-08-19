@@ -7,12 +7,29 @@ project_name: loope
 
 before:
   hooks:
-    - go mod tidy
+    - go -C shared mod tidy
+    - go -C worker mod tidy
+    - go -C telemetry-server mod tidy
 
 builds:
   - id: loope
+    dir: worker
     main: .
     binary: loope
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+  - id: telemetry-server
+    dir: telemetry-server
+    main: .
+    binary: loope-telemetry-server
     env:
       - CGO_ENABLED=0
     goos:
@@ -26,6 +43,7 @@ builds:
 
 archives:
   - id: loope
+    ids: [loope]
     # Predictable lowercase names so install.sh can construct the URL directly:
     #   loope_darwin_arm64.tar.gz, loope_linux_amd64.tar.gz, ...
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
@@ -33,8 +51,15 @@ archives:
     files:
       - README.md
       - LICENSE
-      - loope.json.example
-      - persona.example.md
+      - worker/loope.json.example
+      - worker/persona.example.md
+  - id: telemetry-server
+    ids: [telemetry-server]
+    name_template: "loope-telemetry-server_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
 
 checksum:
   name_template: checksums.txt
