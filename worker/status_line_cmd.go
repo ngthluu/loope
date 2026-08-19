@@ -125,3 +125,34 @@ func setStatusLineCommand(settings map[string]json.RawMessage, command string) e
 	settings["statusLine"] = raw
 	return nil
 }
+
+// resolveLoopePath returns the absolute path to the running loope binary,
+// dereferencing symlinks so the command this tool writes keeps working
+// regardless of the shell's PATH when Claude Code invokes it later —
+// os.Executable()'s doc explicitly does not guarantee an unresolved symlink
+// stays valid.
+func resolveLoopePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve loope path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve loope path: %w", err)
+	}
+	return resolved, nil
+}
+
+// resolveClaudeConfigDir returns cfg.ClaudeConfigDir if set, else ~/.claude
+// — the same field and default the daemon itself uses for CLAUDE_CONFIG_DIR
+// (see worker/claude.go).
+func resolveClaudeConfigDir(cfg *Config) (string, error) {
+	if cfg.ClaudeConfigDir != "" {
+		return cfg.ClaudeConfigDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
+}

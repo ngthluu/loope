@@ -161,3 +161,41 @@ func TestBackupSettingsMissingFileIsNoop(t *testing.T) {
 		t.Errorf("stderr = %q, want empty when there's nothing to back up", stderr.String())
 	}
 }
+
+func TestResolveLoopePathIsAbsoluteAndExists(t *testing.T) {
+	path, err := resolveLoopePath()
+	if err != nil {
+		t.Fatalf("resolveLoopePath: %v", err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Errorf("resolveLoopePath = %q, want an absolute path", path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("resolveLoopePath = %q, which does not exist: %v", path, err)
+	}
+}
+
+func TestResolveClaudeConfigDirOverride(t *testing.T) {
+	cfg := &Config{ClaudeConfigDir: "/custom/claude"}
+	dir, err := resolveClaudeConfigDir(cfg)
+	if err != nil {
+		t.Fatalf("resolveClaudeConfigDir: %v", err)
+	}
+	if dir != "/custom/claude" {
+		t.Errorf("dir = %q, want %q", dir, "/custom/claude")
+	}
+}
+
+func TestResolveClaudeConfigDirDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &Config{}
+	dir, err := resolveClaudeConfigDir(cfg)
+	if err != nil {
+		t.Fatalf("resolveClaudeConfigDir: %v", err)
+	}
+	want := filepath.Join(home, ".claude")
+	if dir != want {
+		t.Errorf("dir = %q, want %q", dir, want)
+	}
+}
