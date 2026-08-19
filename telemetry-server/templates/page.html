@@ -26,6 +26,6 @@
 <div class="flex h-screen flex-col">
 {{template "tnav" .}}
 <div id="content" class="scroll min-w-0 flex-1 overflow-y-auto"
-     hx-get="/workers/{{.MachineID}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tdetail" .}}</div>
+     hx-get="{{.PollURL}}" hx-trigger="every 3s" hx-swap="morph:innerHTML">{{template "tdetail" .}}</div>
 </div>
 </body></html>{{end}}

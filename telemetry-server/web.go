@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,6 +219,7 @@ func (s *TelemetryServer) handleTelemetryIndex(w http.ResponseWriter, r *http.Re
 // when the requested dir/file no longer exists on the worker's latest push.
 type telemetryWorkerPageView struct {
 	MachineID    string
+	PollURL      string
 	Worker       *telemetryWorkerView
 	SelectedDir  string
 	SelectedFile string
@@ -234,7 +236,7 @@ func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file stri
 	ws := s.workers[machineID]
 	if ws == nil {
 		s.mu.Unlock()
-		return telemetryWorkerPageView{MachineID: machineID}
+		return telemetryWorkerPageView{MachineID: machineID, PollURL: workerPollURL(machineID, dir, file)}
 	}
 	wv := buildTelemetryWorkerView(ws, now)
 	var content string
@@ -244,7 +246,7 @@ func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file stri
 	}
 	s.mu.Unlock()
 
-	v := telemetryWorkerPageView{MachineID: machineID, Worker: &wv, SelectedDir: dir, SelectedFile: file}
+	v := telemetryWorkerPageView{MachineID: machineID, PollURL: workerPollURL(machineID, dir, file), Worker: &wv, SelectedDir: dir, SelectedFile: file}
 	if dir != "" && file != "" {
 		if !found {
 			v.FileNotFound = true
@@ -253,6 +255,17 @@ func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID, dir, file stri
 		}
 	}
 	return v
+}
+
+// workerPollURL builds the worker page's self-poll URL, preserving the
+// selected dir/file so a poll re-renders the same file rather than resetting
+// the viewer pane.
+func workerPollURL(machineID, dir, file string) string {
+	u := "/workers/" + url.PathEscape(machineID)
+	if dir != "" && file != "" {
+		u += "?" + url.Values{"dir": {dir}, "file": {file}}.Encode()
+	}
+	return u
 }
 
 // handleTelemetryWorker serves the worker detail page. Like the index page,
