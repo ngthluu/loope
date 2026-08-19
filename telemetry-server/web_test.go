@@ -71,45 +71,58 @@ func TestTelemetryIndexOrdersOnlineBeforeOfflineWithinRepoSlug(t *testing.T) {
 	}
 }
 
-func TestTelemetryDetailShowsUsageUnknownWhenAbsent(t *testing.T) {
+func TestTelemetryWorkerShowsUsageUnknownWhenAbsent(t *testing.T) {
 	s := newTestTelemetryServer(t)
 	pushWorker(t, s, shared.PushRequest{Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15}})
 
-	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1", nil)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "unknown") {
-		t.Fatalf("detail body missing 'unknown':\n%s", rec.Body.String())
+		t.Fatalf("worker page body missing 'unknown':\n%s", rec.Body.String())
 	}
 }
 
-func TestTelemetryDetailShowsFreshUsagePercentage(t *testing.T) {
+func TestTelemetryWorkerShowsFreshUsagePercentage(t *testing.T) {
 	s := newTestTelemetryServer(t)
 	pushWorker(t, s, shared.PushRequest{
 		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
 		Usage:    &shared.UsageSnapshot{FiveHourUsedPct: 33.3, CapturedAt: time.Now()},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1", nil)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "33.3%") {
-		t.Fatalf("detail body missing usage percentage:\n%s", rec.Body.String())
+		t.Fatalf("worker page body missing usage percentage:\n%s", rec.Body.String())
 	}
 }
 
-func TestTelemetryDetailShowsLogTail(t *testing.T) {
+func TestTelemetryWorkerShowsLogTail(t *testing.T) {
 	s := newTestTelemetryServer(t)
 	pushWorker(t, s, shared.PushRequest{
 		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1", PushIntervalSec: 15},
 		Logs:     []shared.LogRecord{{Body: "watching o/r for label ai-agent"}},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/detail?worker=m1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/workers/m1", nil)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "watching o/r for label ai-agent") {
-		t.Fatalf("detail body missing log line:\n%s", rec.Body.String())
+		t.Fatalf("worker page body missing log line:\n%s", rec.Body.String())
+	}
+}
+
+func TestTelemetryWorkerUnknownIDRendersNotFound(t *testing.T) {
+	s := newTestTelemetryServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/workers/does-not-exist", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a friendly not-found state, not an error status)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "not found") {
+		t.Fatalf("body missing a not-found message:\n%s", rec.Body.String())
 	}
 }
 

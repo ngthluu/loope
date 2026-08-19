@@ -1,5 +1,5 @@
 {{define "tdetail"}}<div class="max-w-[1000px] px-8 py-6">
-{{with .Selected}}
+{{with .Worker}}
  <div class="mb-4 flex items-center gap-2">
   <span class="inline-block h-2.5 w-2.5 rounded-full {{if .Online}}bg-ok{{else}}bg-muted{{end}}"></span>
   <h1 class="font-mono text-lg font-semibold text-text">{{.Hostname}}</h1>
@@ -21,5 +21,5 @@
  <div class="rounded-md border border-line bg-ink/40 p-3 font-mono text-[11px] leading-relaxed text-muted">
   {{range .Logs}}<div>{{.}}</div>{{else}}<div class="text-faint">No log lines yet.</div>{{end}}
  </div>
-{{else}}<div class="flex h-full items-center justify-center py-20 font-mono text-[12px] text-faint">No worker selected.</div>{{end}}
+{{else}}<div class="flex h-full items-center justify-center py-20 font-mono text-[12px] text-faint">Worker not found.</div>{{end}}
 </div>{{end}}

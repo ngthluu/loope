@@ -34,12 +34,6 @@ type telemetryGroup struct {
 	Workers  []telemetryWorkerView
 }
 
-// telemetryView is the template payload for one render.
-type telemetryView struct {
-	Groups   []telemetryGroup
-	Selected *telemetryWorkerView
-}
-
 // buildTelemetryWorkerView converts one worker's server-side state into the
 // template's flat, pre-formatted shape as of now.
 func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerView {
@@ -59,42 +53,6 @@ func buildTelemetryWorkerView(ws *WorkerState, now time.Time) telemetryWorkerVie
 		v.UsageUnknown = true
 	}
 	return v
-}
-
-// buildTelemetryView groups all workers by RepoSlug (sorted), sorts each
-// group's workers by hostname, and selects the worker named by selectedID —
-// or the first worker of the first group when selectedID is empty or not
-// found, or nil when there are no workers at all.
-func (s *TelemetryServer) buildTelemetryView(selectedID string) telemetryView {
-	now := s.now()
-	s.mu.Lock()
-	byRepo := map[string][]telemetryWorkerView{}
-	for _, ws := range s.workers {
-		byRepo[ws.Resource.RepoSlug] = append(byRepo[ws.Resource.RepoSlug], buildTelemetryWorkerView(ws, now))
-	}
-	s.mu.Unlock()
-
-	var slugs []string
-	for slug := range byRepo {
-		slugs = append(slugs, slug)
-	}
-	sort.Strings(slugs)
-
-	view := telemetryView{}
-	for _, slug := range slugs {
-		workers := byRepo[slug]
-		sort.Slice(workers, func(i, j int) bool { return workers[i].Hostname < workers[j].Hostname })
-		view.Groups = append(view.Groups, telemetryGroup{RepoSlug: slug, Workers: workers})
-		for i := range workers {
-			if workers[i].MachineID == selectedID {
-				view.Selected = &view.Groups[len(view.Groups)-1].Workers[i]
-			}
-		}
-	}
-	if view.Selected == nil && len(view.Groups) > 0 && len(view.Groups[0].Workers) > 0 {
-		view.Selected = &view.Groups[0].Workers[0]
-	}
-	return view
 }
 
 // telemetryIndexView is the template payload for GET /.
@@ -135,11 +93,11 @@ func (s *TelemetryServer) buildTelemetryIndexView() telemetryIndexView {
 }
 
 // registerWebHandlers wires the dashboard routes onto mux: GET / (index
-// page), GET /detail (htmx poll fragment), and the embedded static assets
-// (staticHandler, static.go).
+// page), GET /workers/{machineID} (worker detail page), and the embedded
+// static assets (staticHandler, static.go).
 func (s *TelemetryServer) registerWebHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", s.handleTelemetryIndex)
-	mux.HandleFunc("GET /detail", s.handleTelemetryDetail) // Task 5 removes this
+	mux.HandleFunc("GET /workers/{machineID}", s.handleTelemetryWorker)
 	mux.Handle("GET /static/", staticHandler())
 }
 
@@ -156,9 +114,39 @@ func (s *TelemetryServer) handleTelemetryIndex(w http.ResponseWriter, r *http.Re
 	renderTelemetryHTML(w, s.tmpl, "tindexPage", v)
 }
 
-func (s *TelemetryServer) handleTelemetryDetail(w http.ResponseWriter, r *http.Request) {
-	v := s.buildTelemetryView(r.URL.Query().Get("worker"))
-	renderTelemetryHTML(w, s.tmpl, "tdetail", v)
+// telemetryWorkerPageView is the template payload for GET /workers/{id}.
+// Worker is nil when machineID matches no known worker (e.g. an offline
+// worker evicted after a server restart) — the template then renders a
+// "not found" state instead of erroring.
+type telemetryWorkerPageView struct {
+	MachineID string
+	Worker    *telemetryWorkerView
+}
+
+// buildTelemetryWorkerPageView looks up machineID and renders its current
+// state, or returns a Worker-less view when it has no match.
+func (s *TelemetryServer) buildTelemetryWorkerPageView(machineID string) telemetryWorkerPageView {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ws := s.workers[machineID]
+	if ws == nil {
+		return telemetryWorkerPageView{MachineID: machineID}
+	}
+	v := buildTelemetryWorkerView(ws, now)
+	return telemetryWorkerPageView{MachineID: machineID, Worker: &v}
+}
+
+// handleTelemetryWorker serves the worker detail page. Like the index page,
+// a poll from the page's own #content element gets just the content
+// fragment; a plain navigation gets the full document.
+func (s *TelemetryServer) handleTelemetryWorker(w http.ResponseWriter, r *http.Request) {
+	v := s.buildTelemetryWorkerPageView(r.PathValue("machineID"))
+	if r.Header.Get("HX-Request") == "true" {
+		renderTelemetryHTML(w, s.tmpl, "tdetail", v)
+		return
+	}
+	renderTelemetryHTML(w, s.tmpl, "tworkerPage", v)
 }
 
 // renderTelemetryHTML mirrors serve.go's renderHTML: it buffers the render
