@@ -13,7 +13,7 @@ inject a fake, so the suite runs without git/gh/claude installed.
 ## Prompts
 
 Every prompt loope sends to Claude, and every comment it posts to GitHub, lives
-in [`ai/prompts/`](../ai/prompts) as a `text/template` file — no prompt text is
+in [`worker/ai/prompts/`](../worker/ai/prompts) as a `text/template` file — no prompt text is
 in the Go source. The directory is embedded into the binary with `go:embed`, so a
 release is still a single self-contained file that reads nothing from disk at
 runtime; editing a prompt means rebuilding.

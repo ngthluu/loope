@@ -38,8 +38,8 @@ process.
 
 To have launchd start the daemon at login and restart it if it ever dies:
 
-1. `go build -o loope .`
-2. Copy `launchd/com.loope.plist.example` to
+1. `go -C worker build -o loope .`
+2. Copy `worker/launchd/com.loope.plist.example` to
    `~/Library/LaunchAgents/com.loope.plist` and replace the placeholder paths
    (binary, config, log dir, `PATH`, `HOME`).
 3. `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.loope.plist`

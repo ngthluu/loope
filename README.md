@@ -3,7 +3,7 @@
 [![CI](https://github.com/ngthluu/loope/actions/workflows/ci.yml/badge.svg)](https://github.com/ngthluu/loope/actions/workflows/ci.yml)
 [![Release](https://github.com/ngthluu/loope/actions/workflows/release.yml/badge.svg)](https://github.com/ngthluu/loope/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8.svg)](go.mod)
+[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8.svg)](go.work)
 
 `loope` is an event-driven loop that watches one GitHub repository for issues
 labeled `ai-agent`, picks the best one, and drives it all the way to a pull
@@ -49,8 +49,8 @@ and Linux on `amd64` and `arm64`.
 Then point it at a repo and run:
 
 ```bash
-# grab loope.json.example from this repo (or the release archive), then:
-cp loope.json.example loope.json   # edit repoPath / repoSlug / workDir
+# grab worker/loope.json.example from this repo (or the release archive), then:
+cp worker/loope.json.example loope.json   # edit repoPath / repoSlug / workDir
 loope --config loope.json          # polls for labeled issues, serves the dashboard on http://localhost:8080
 ```
 
