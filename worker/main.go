@@ -169,6 +169,8 @@ func dispatchSubcommand(args []string, stdin io.Reader) (code int, handled bool)
 	switch args[1] {
 	case "claude-usage-hook":
 		return runClaudeUsageHookCmd(stdin), true
+	case "status-line":
+		return runStatusLineCmd(args[2:], os.Stdout, os.Stderr), true
 	}
 	return 0, false
 }
@@ -181,6 +183,15 @@ func usage(fs *flag.FlagSet, w io.Writer) {
 	fmt.Fprintf(w, "\nUsage:\n  %s --config <FILE>\n\nFlags:\n", fs.Name())
 	fs.SetOutput(w)
 	fs.PrintDefaults()
+	fmt.Fprint(w, `
+Subcommands:
+  status-line --config <FILE> [--remove]
+        wire (or unwire) Claude Code's statusLine to capture usage for the
+        fleet dashboard; see docs/telemetry.md
+  claude-usage-hook
+        internal: reads statusLine JSON from stdin, writes the usage
+        snapshot loope reads back (wired automatically by status-line)
+`)
 }
 
 // gate runs the preflight checks before any mode starts. It returns the process
