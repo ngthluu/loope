@@ -5,6 +5,7 @@ import (
 
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -131,5 +132,72 @@ func TestWorkerStateUsableUsageStaleness(t *testing.T) {
 	ws.Usage = nil
 	if ws.usableUsage(base) != nil {
 		t.Fatal("nil usage must stay nil")
+	}
+}
+
+func TestHandlePushReplacesIssueLogsWholesale(t *testing.T) {
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req1 := shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "state", Content: "wip"}}},
+			{Name: "issue-2", Files: []shared.IssueLogFile{{Name: "state", Content: "done"}}},
+		},
+	}
+	pushWorker(t, s, req1)
+
+	req2 := shared.PushRequest{
+		Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r", Hostname: "host1"},
+		IssueLogs: []shared.IssueLogDir{
+			{Name: "issue-1", Files: []shared.IssueLogFile{{Name: "state", Content: "done"}}},
+		},
+	}
+	pushWorker(t, s, req2)
+
+	s.mu.Lock()
+	ws := s.workers["m1"]
+	s.mu.Unlock()
+	if len(ws.IssueLogs) != 1 {
+		t.Fatalf("IssueLogs = %+v, want only issue-1 (issue-2 dropped by the second push)", ws.IssueLogs)
+	}
+	if got := ws.IssueLogs["issue-1"].Files[0].Content; got != "done" {
+		t.Fatalf("issue-1 state = %q, want %q", got, "done")
+	}
+}
+
+func TestHandlePushEvictsLeastRecentlyModifiedIssueLogDirsOverCap(t *testing.T) {
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	base := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	var dirs []shared.IssueLogDir
+	for i := 0; i < 51; i++ {
+		dirs = append(dirs, shared.IssueLogDir{
+			Name:  fmt.Sprintf("issue-%d", i),
+			Files: []shared.IssueLogFile{{Name: "state", Content: "x", ModTime: base.Add(time.Duration(i) * time.Minute)}},
+		})
+	}
+	req := shared.PushRequest{Resource: shared.Resource{MachineID: "m1", RepoSlug: "o/r"}, IssueLogs: dirs}
+	rec := doPush(t, h, "secret", req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("push status = %d", rec.Code)
+	}
+
+	s.mu.Lock()
+	ws := s.workers["m1"]
+	s.mu.Unlock()
+	if len(ws.IssueLogs) != 50 {
+		t.Fatalf("len(IssueLogs) = %d, want 50", len(ws.IssueLogs))
+	}
+	if _, evicted := ws.IssueLogs["issue-0"]; evicted {
+		t.Fatal("issue-0 has the oldest ModTime and should have been evicted")
+	}
+	if _, kept := ws.IssueLogs["issue-50"]; !kept {
+		t.Fatal("issue-50 has the newest ModTime and should have been kept")
 	}
 }

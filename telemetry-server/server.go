@@ -6,12 +6,19 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const maxLogLinesPerWorker = 2000
+
+// maxIssueLogDirsPerWorker caps how many logs/<dir> entries the server keeps
+// per worker, evicting the least-recently-modified ones on ingest — mirrors
+// maxLogLinesPerWorker's role for the daemon-log ring buffer, just scoped to
+// directories instead of lines.
+const maxIssueLogDirsPerWorker = 50
 
 // WorkerState is the server's last-known view of one worker, keyed by
 // Resource.MachineID.
@@ -20,6 +27,7 @@ type WorkerState struct {
 	LastPushAt time.Time
 	Usage      *shared.UsageSnapshot
 	Logs       *LogRingBuffer
+	IssueLogs  map[string]shared.IssueLogDir // keyed by dir name, replaced wholesale each push
 }
 
 // online reports whether the worker has pushed recently enough to be
@@ -120,6 +128,44 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 		lines[i] = l.Body
 	}
 	ws.Logs.Add(lines...)
+	issueLogs := make(map[string]shared.IssueLogDir, len(req.IssueLogs))
+	for _, d := range req.IssueLogs {
+		issueLogs[d.Name] = d
+	}
+	ws.IssueLogs = evictIssueLogs(issueLogs, maxIssueLogDirsPerWorker)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// dirModTime returns the latest ModTime across a dir's files — used both to
+// order the persisted-logs browser (newest first) and to pick eviction
+// candidates (oldest first, below).
+func dirModTime(d shared.IssueLogDir) time.Time {
+	var latest time.Time
+	for _, f := range d.Files {
+		if f.ModTime.After(latest) {
+			latest = f.ModTime
+		}
+	}
+	return latest
+}
+
+// evictIssueLogs drops the least-recently-modified directories when m holds
+// more than max entries, keeping memory bounded on a long-running repo (a
+// live, in-memory view — no DB, no persistence across restarts). Returns m
+// unchanged when it is already within the cap.
+func evictIssueLogs(m map[string]shared.IssueLogDir, max int) map[string]shared.IssueLogDir {
+	if len(m) <= max {
+		return m
+	}
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return dirModTime(m[names[i]]).After(dirModTime(m[names[j]])) })
+	kept := make(map[string]shared.IssueLogDir, max)
+	for _, name := range names[:max] {
+		kept[name] = m[name]
+	}
+	return kept
 }
