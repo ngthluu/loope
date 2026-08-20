@@ -6,19 +6,38 @@
 [![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8.svg)](go.work)
 
 `loope` is an event-driven loop that watches one GitHub repository for issues
-labeled `ai-agent`, picks the best one, and drives it all the way to a pull
-request using headless
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions running
-inside git worktrees. Issue state lives entirely in GitHub labels, so the daemon
-itself is stateless and safe to restart.
+labeled `ai-agent` and drives each one all the way to a pull request using
+headless [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions
+running inside git worktrees. Issue state lives entirely in GitHub labels, so
+the daemon itself is stateless and safe to restart.
 
-Label an issue `ai-agent` and each poll cycle loope picks the oldest candidate
-and runs a pipeline of Claude sessions in an isolated worktree: the entry
-session investigates the repository and either fixes a well-scoped defect
-directly or designs first (spec → plan → execute). If the work produced
-commits, the branch is pushed and a PR opened.
+Label an issue `ai-agent` and, on the next poll cycle, loope claims it into a
+free slot (up to `ticketsPerCycle` issues run concurrently) and runs a pipeline
+of Claude sessions in an isolated worktree on branch `ai/issue-<N>`:
+
+- **Entry** — one session investigates the repository and scores its
+  confidence; below `confidenceThreshold` it parks the issue as
+  `ai-needs-info` with a question instead of guessing. Otherwise it commits to
+  an outcome that loope reads as structured output (enforced with the Claude
+  CLI's `--json-schema`, not by grepping prose): `fix_committed` for a
+  well-scoped defect fixed directly, `spec_ready` for anything that needs
+  design first, or `already_done`.
+- **Design first** — for `spec_ready`, the entry session brainstorms with a
+  cheaper product-owner-proxy agent, then fresh sessions turn the committed
+  spec into a plan and execute it; an `incomplete` execute report parks the
+  issue rather than shipping a half-done branch.
+- **UAT checklist** — a short read-only session posts a checklist on the
+  issue from the diff or the spec.
+- **Ship** — if the work produced commits, the branch is pushed and a PR
+  opened (`Closes #N`). An optional post-ship **code review** loop runs
+  `/code-review --fix` rounds against the shipped diff before the issue is
+  closed `ai-done`.
+
+Add `ai-resolve-merge` to an in-flight issue and loope merges the default
+branch into its branch, resolves conflicts with one session, and pushes.
 A live web dashboard shows every issue it has touched. See
-[How it works](docs/how-it-works.md) for the full lifecycle.
+[How it works](docs/how-it-works.md) for the full lifecycle and label state
+machine.
 
 <p align="center">
   <img src="docs/images/dashboard.png" alt="loope's live telemetry dashboard: the ticket queue with per-issue cost on the left, and a selected issue's pipeline of Claude steps showing tokens, cost, and session id on the right">
@@ -51,10 +70,14 @@ and Linux on `amd64` and `arm64`.
 Then point it at a repo and run:
 
 ```bash
+loope --doctor                     # optional: check git / gh / claude / superpowers before writing a config
 # grab worker/loope.json.example from this repo (or the release archive), then:
 cp worker/loope.json.example loope.json   # edit repoPath / repoSlug / workDir
 loope --config loope.json          # polls for labeled issues, serves the dashboard on http://localhost:8080
 ```
+
+Every run starts with the same preflight; a healthy run prints nothing, a
+failed check prints the report and exits.
 
 ## Documentation
 
@@ -67,6 +90,7 @@ loope --config loope.json          # polls for labeled issues, serves the dashbo
 | [Fleet telemetry](docs/telemetry.md)     | `loope-telemetry-server` (own binary + Dockerfile), worker opt-in, and Claude usage capture |
 | [Operations](docs/operations.md)         | Always-on behavior, failure handling, running as a launchd service |
 | [Development](docs/development.md)        | Testing, prompts, logs, releasing, contributing |
+| [Release notes](docs/release-notes/)     | What changed in each tagged release |
 
 ## Contributing
 
