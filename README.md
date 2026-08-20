@@ -40,11 +40,9 @@ A live web dashboard shows every issue it has touched. See
 machine.
 
 <p align="center">
-  <a href="docs/images/loope-intro.mp4">
-    <img src="docs/images/loope-intro.gif" alt="90-second intro: add one label to an issue; loope asks before it guesses, designs features with a product-owner agent that follows your rules, ships a PR with a UAT checklist and review pass, parks failures instead of looping, scales across many machines and Claude Code accounts with per-worker labels and the issue board as the only ledger, and shows every step's cost">
-  </a>
+  <video src="https://github.com/ngthluu/loope/raw/main/docs/images/loope-intro.mp4" controls muted width="100%"></video>
   <br>
-  <sub><em>Label an issue, get a pull request — what makes loope different, in 90 seconds. (<a href="docs/images/loope-intro.mp4">MP4 version</a>)</em></sub>
+  <sub><em>Label an issue, get a pull request — what makes loope different, in 90 seconds. (<a href="docs/images/loope-intro.mp4">open the MP4</a>)</em></sub>
 </p>
 
 <p align="center">
