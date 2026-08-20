@@ -13,49 +13,6 @@ import (
 	"github.com/ngthluu/loope/worker/testkit"
 )
 
-func TestParseUATBeginAndEnd(t *testing.T) {
-	got, ok := parseUAT("Here you go:\nUAT_BEGIN\n- [ ] click it\nUAT_END\nHope that helps!")
-	if !ok {
-		t.Fatal("want ok=true")
-	}
-	if got != "- [ ] click it" {
-		t.Errorf("got %q, want the checklist with the surrounding prose stripped", got)
-	}
-}
-
-// A session that opened the checklist but forgot the closing sentinel still
-// publishes: take everything to the end of the result.
-func TestParseUATBeginWithoutEnd(t *testing.T) {
-	got, ok := parseUAT("UAT_BEGIN\n- [ ] one\n- [ ] two\n")
-	if !ok {
-		t.Fatal("want ok=true")
-	}
-	if got != "- [ ] one\n- [ ] two" {
-		t.Errorf("got %q, want both items", got)
-	}
-}
-
-func TestParseUATNoBegin(t *testing.T) {
-	if got, ok := parseUAT("I could not find anything to verify."); ok {
-		t.Errorf("want ok=false with no begin sentinel, got %q", got)
-	}
-}
-
-// The bug route self-skips by emitting nothing at all, so an empty result must
-// read as "nothing to publish".
-func TestParseUATEmptyResult(t *testing.T) {
-	if _, ok := parseUAT(""); ok {
-		t.Error("want ok=false for an empty result")
-	}
-}
-
-// Sentinels present but nothing between them is also "nothing to publish".
-func TestParseUATEmptyContent(t *testing.T) {
-	if got, ok := parseUAT("UAT_BEGIN\n\n   \nUAT_END"); ok {
-		t.Errorf("want ok=false for an empty body between the sentinels, got %q", got)
-	}
-}
-
 func TestUATSectionCarriesMarkerAndHeading(t *testing.T) {
 	got := uatSection("- [ ] click it")
 	if !strings.HasPrefix(got, uatMarker) {
@@ -98,14 +55,15 @@ func uatTestConfig() *shared.Config {
 	return &shared.Config{Models: shared.Models{UAT: shared.ModelConfig{Model: "sonnet", Effort: "medium"}}}
 }
 
-// uatResult builds a fake claude payload whose result carries a fenced checklist.
-func uatResult(checklist string) string {
-	return testkit.ClaudeJSON("Sure thing.\n"+uatBeginSentinel+"\n"+checklist+"\n"+uatEndSentinel, "uat-1")
+// uatPayload builds a fake claude payload whose structured output carries the
+// checklist, as the session's --json-schema call produces.
+func uatPayload(checklist string) string {
+	return testkit.ClaudeStructured("uat-1", map[string]any{"checklist": checklist})
 }
 
 func TestUATPublishesChecklist(t *testing.T) {
 	tgt := &fakeUATTarget{body: "the original body"}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] click it")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] click it")}}}
 	c := infra.NewClaude(f, "", "")
 	u := &UAT{Target: tgt, Num: 7}
 	u.RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
@@ -143,7 +101,7 @@ func TestUATPublishesChecklist(t *testing.T) {
 func TestUATSkipsWhenMarkerPresentInComment(t *testing.T) {
 	tgt := &fakeUATTarget{body: "body", comments: []string{"a human comment",
 		uatMarker + "\n\n## 🤖 UAT checklist\n\n- [ ] old"}}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] new")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] new")}}}
 	c := infra.NewClaude(f, "", "")
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 	if len(f.Calls) != 0 {
@@ -158,7 +116,7 @@ func TestUATSkipsWhenMarkerPresentInComment(t *testing.T) {
 // issue must not gain a duplicate as a comment.
 func TestUATSkipsWhenMarkerPresentInBody(t *testing.T) {
 	tgt := &fakeUATTarget{body: "body\n\n" + uatMarker + "\n\n## 🤖 UAT checklist\n\n- [ ] old"}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] new")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] new")}}}
 	c := infra.NewClaude(f, "", "")
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 	if len(f.Calls) != 0 {
@@ -173,7 +131,7 @@ func TestUATSkipsWhenMarkerPresentInBody(t *testing.T) {
 // missing one, and the next run gets another chance.
 func TestUATSkipsWhenBodyFetchFails(t *testing.T) {
 	tgt := &fakeUATTarget{surfacesErr: fmt.Errorf("gh: 503")}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] new")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] new")}}}
 	c := infra.NewClaude(f, "", "")
 	(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
 	if len(f.Calls) != 0 {
@@ -194,15 +152,26 @@ func TestUATSkipsWhenSessionErrors(t *testing.T) {
 	}
 }
 
-// The bug route self-skips a branch with no commits: the session prints nothing,
-// so there is no begin sentinel to parse.
-func TestUATSkipsWhenResultHasNoSentinel(t *testing.T) {
-	tgt := &fakeUATTarget{body: "body"}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("", "uat-1")}}}
-	c := infra.NewClaude(f, "", "")
-	(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
-	if len(tgt.posted) != 0 {
-		t.Errorf("posted %d comments, want 0", len(tgt.posted))
+// The bug route self-skips a branch with no commits: the session reports an
+// empty checklist, which reads as "nothing to publish".
+func TestUATSkipsWhenChecklistEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stdout string
+	}{
+		{"empty checklist", uatPayload("")},
+		{"blank checklist", uatPayload("  \n  ")},
+		{"no structured output at all", testkit.ClaudeJSON("", "uat-1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgt := &fakeUATTarget{body: "body"}
+			f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: tc.stdout}}}
+			c := infra.NewClaude(f, "", "")
+			(&UAT{Target: tgt, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
+			if len(tgt.posted) != 0 {
+				t.Errorf("posted %d comments, want 0", len(tgt.posted))
+			}
+		})
 	}
 }
 
@@ -210,7 +179,7 @@ func TestUATSkipsWhenResultHasNoSentinel(t *testing.T) {
 // session recorded by the debug/architect/execute call.
 func TestUATDoesNotRecordSession(t *testing.T) {
 	logDir := t.TempDir()
-	c := infra.NewClaude(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] click it")}}}, logDir, "")
+	c := infra.NewClaude(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] click it")}}}, logDir, "")
 	c.RecordCheckpoint(shared.SessionInfo{SessionID: "primary-sess", Kind: "bug", Stage: shared.StageDebug})
 	(&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}).RunBug(context.Background(), c, uatTestConfig(), "/wt", "ISSUE", "main")
 	si, err := shared.ReadSession(logDir)
@@ -226,7 +195,7 @@ func TestUATDoesNotRecordSession(t *testing.T) {
 // the "logged as a file" half of the requirement, with no extra plumbing.
 func TestUATLogsResultAsOutputFile(t *testing.T) {
 	logDir := t.TempDir()
-	c := infra.NewClaude(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] click it")}}}, logDir, "")
+	c := infra.NewClaude(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] click it")}}}, logDir, "")
 	(&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 	matches, err := filepath.Glob(filepath.Join(logDir, "*-uat.output.md"))
 	if err != nil {
@@ -247,7 +216,7 @@ func TestUATLogsResultAsOutputFile(t *testing.T) {
 func TestUATTruncatesOversizedChecklist(t *testing.T) {
 	tgt := &fakeUATTarget{body: "body"}
 	huge := strings.Repeat("x", maxUATChars+500)
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult(huge)}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload(huge)}}}
 	c := infra.NewClaude(f, "", "")
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
 	if len(tgt.posted) != 1 {
@@ -260,7 +229,7 @@ func TestUATTruncatesOversizedChecklist(t *testing.T) {
 
 func TestUATSurvivesCommentFailure(t *testing.T) {
 	tgt := &fakeUATTarget{body: "body", commentErr: fmt.Errorf("gh: 422")}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] click it")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] click it")}}}
 	c := infra.NewClaude(f, "", "")
 	// No panic, no error to propagate: the pipeline continues.
 	(&UAT{Target: tgt, Num: 7}).RunFeature(context.Background(), c, uatTestConfig(), "/wt", "docs/spec.md")
@@ -271,7 +240,7 @@ func TestUATSurvivesCommentFailure(t *testing.T) {
 // checklist is published by the time wait returns.
 func TestUATStartFeatureRunsInBackgroundAndWaitJoins(t *testing.T) {
 	tgt := &fakeUATTarget{body: "the issue body"}
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatResult("- [ ] click it")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: uatPayload("- [ ] click it")}}}
 	release := make(chan struct{})
 	g := &gateRunner{inner: f, gate: func(dir, name, stdin string) chan struct{} { return release }}
 	c := infra.NewClaude(g, "", "")

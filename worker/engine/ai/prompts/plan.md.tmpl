@@ -2,5 +2,7 @@
 write a detailed implementation plan for it. Commit the plan into this branch.
 HEADLESS MODE: do not ask questions; the spec is approved and complete — make
 reasonable calls and note any assumptions in the plan.
-When the implementation plan file is written and committed, print {{.ReadySentinel}} on its own
-line.
+When the implementation plan file is written and committed, end the session:
+your final structured output must report status "ready" and the plan file path
+(relative to the repository root) as plan_path. Report status "incomplete"
+(with a brief detail) only if you could not write and commit the plan.

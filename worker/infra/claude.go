@@ -108,6 +108,9 @@ func (c *Claude) Call(ctx context.Context, call shared.ClaudeCall) (*shared.Clau
 	if len(call.DisallowedTools) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(call.DisallowedTools, ","))
 	}
+	if call.JSONSchema != "" {
+		args = append(args, "--json-schema", call.JSONSchema)
+	}
 	if call.Resume != "" {
 		args = append(args, "--resume", call.Resume)
 	}

@@ -18,26 +18,30 @@ func check(t *testing.T, name, got, want string) {
 }
 
 const goldenEntryRoutes = `HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions as plain text (AskUserQuestion is disabled).
+Ask clarifying questions by ending the turn with outcome "question" and the
+question in detail (AskUserQuestion is disabled); the answer arrives as the
+next message.
 
-Investigate the repository first, then commit to whichever route fits:
+Investigate the repository first, then commit to whichever route fits. Your
+final structured output reports where the session ended:
 
 - A small, well-scoped defect with a clear expected behavior: follow the
   systematic-debugging flow — reproduce it with a failing test first, then fix
   it, verify the full test suite passes, and commit. When the fix is committed,
-  print FIX_COMMITTED: <one-sentence summary> on its own line. Make reasonable
-  calls and note them in commit messages.
+  end with outcome "fix_committed" and a one-sentence summary in detail. Make
+  reasonable calls and note them in commit messages.
 - Anything that needs design work (new functionality, refactors, unclear
   scope — including a "fix" whose right behavior first needs designing):
   follow the brainstorming flow to a committed spec — clarifying questions,
   design, then write and commit the spec document into this branch. Do NOT
   invoke the writing-plans skill — a separate session writes the implementation
-  plan. When the spec file is written and committed, print SPEC_READY: <path> on
-  its own line, where <path> is the spec file path relative to the repository root.
+  plan. When the spec file is written and committed, end with outcome
+  "spec_ready" and the spec file path relative to the repository root in
+  spec_path.
 
 If you determine the issue's work is already fully implemented in this
-codebase, do not invent work: print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own
-line instead of continuing.`
+codebase, do not invent work: end with outcome "already_done" and a
+one-sentence reason in detail instead of continuing.`
 
 func TestGoldenEntryPromptWithThreshold(t *testing.T) {
 	want := `Handle this GitHub issue:
@@ -45,18 +49,19 @@ ISSUE BODY
 
 You may read the codebase first to investigate — but do NOT write code, tests,
 or commits yet. Once you understand the issue, assess how confidently it can be
-handled as written and print CONFIDENCE: <0-100> as the FIRST line of your reply.
-Score the issue, not the work: an issue described precisely enough to act on
-scores high however large the change, and it still scores high when
-investigation shows the work is already done — that is a finding about the
+handled as written and report it as the confidence field (0-100) of this turn's
+structured output. Score the issue, not the work: an issue described precisely
+enough to act on scores high however large the change, and it still scores high
+when investigation shows the work is already done — that is a finding about the
 code, not a gap in the issue. Score low only when you cannot tell what behavior
 or outcome is wanted. If that score is below 70, the issue is too
 under-specified or ambiguous to act on responsibly: change no file. Instead,
-list what is missing and the specific questions the author must answer, then stop.
-The CONFIDENCE: line comes first even when an instruction below tells you to
-print another sentinel and stop.
+end the turn with outcome "question", putting what is missing and the specific
+questions the author must answer in detail, then stop.
+The confidence field is reported even when an instruction below has you end
+with another outcome.
 
-Write that reply as a short, skimmable list the author can answer in one comment:
+Write that detail text as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
 - Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
 - Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
@@ -81,18 +86,20 @@ func TestGoldenEntryResumePrompt(t *testing.T) {
 	want := `TRIGGER MSG
 
 HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
-This resumed session still has the same contract, scoped to THIS issue only:
+This resumed session still has the same contract, scoped to THIS issue only.
+Your final structured output reports where the session ended:
 - Do NOT work on other issues in this session — planning and implementation of
   a designed feature happen in separate pipeline sessions.
-- If this issue is a small, well-scoped defect you fix directly, print
-  FIX_COMMITTED: <one-sentence summary> on its own line once the fix is committed.
-  Print it even if the fix was already committed in an earlier turn.
-- If it needs design work instead, print SPEC_READY: <path> on its own line when
-  the spec file is written and committed, where <path> is the spec file path
-  relative to the repository root. Print it even if the spec was already
-  committed in an earlier turn.
-- If nothing remains to fix or build for this issue, print PIPELINE_ALREADY_DONE: <one-sentence reason>
-  on its own line.`
+- If this issue is a small, well-scoped defect you fix directly, end with
+  outcome "fix_committed" (one-sentence summary in detail) once the fix is
+  committed — even if the fix was already committed in an earlier turn.
+- If it needs design work instead, end with outcome "spec_ready" when the spec
+  file is written and committed, with its path relative to the repository root
+  in spec_path — even if the spec was already committed in an earlier turn.
+- If nothing remains to fix or build for this issue, end with outcome
+  "already_done" (one-sentence reason in detail).
+- To ask the product owner something, end with outcome "question" and the
+  question in detail.`
 	check(t, "entryResumePrompt", entryResumePrompt("TRIGGER MSG"), want)
 }
 
@@ -112,9 +119,10 @@ Instructions: if the architect asked questions, answer them decisively.
 If it presented a design or spec for approval, approve it or give concise feedback.
 Stay on this issue: never direct the architect to implement, merge, or pick up other
 issues — planning and implementation are handled by separate pipeline sessions.
-If the message asks for no answer and no approval (e.g. a status or progress update),
-reply with only QA_NOTHING_TO_ANSWER on its own line.
-Reply with your answer only.`
+Report your reply in your final structured output: if the message asks for no
+answer and no approval (e.g. a status or progress update), report has_answer
+false. Otherwise report has_answer true with your answer — and nothing else —
+in answer.`
 	check(t, "answererPrompt", answererPrompt("ISSUE BODY", "PERSONA TEXT", "ARCHITECT MSG"), want)
 }
 
@@ -122,24 +130,28 @@ func TestGoldenBrainstormResumePrompt(t *testing.T) {
 	want := `TRIGGER MSG
 
 HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
-This resumed design session still has the same contract, scoped to THIS issue only:
+This resumed design session still has the same contract, scoped to THIS issue only.
+Your final structured output reports where the session ended:
 - Do NOT implement, merge, or work on other issues in this session — planning and
   implementation happen in separate pipeline sessions.
-- When the spec file is written and committed, print SPEC_READY: <path> on its own line,
-  where <path> is the spec file path relative to the repository root. Print it even if
-  the spec was already committed in an earlier turn.
-- If nothing remains to design or build for this issue, print PIPELINE_ALREADY_DONE: <one-sentence reason>
-  on its own line.`
+- When the spec file is written and committed, end with outcome "spec_ready" and the
+  spec file path relative to the repository root in spec_path — even if the spec was
+  already committed in an earlier turn.
+- If nothing remains to design or build for this issue, end with outcome
+  "already_done" (one-sentence reason in detail).
+- To ask the product owner something, end with outcome "question" and the question
+  in detail.`
 	check(t, "brainstormResumePrompt", brainstormResumePrompt("TRIGGER MSG"), want)
 }
 
 func TestGoldenQANudgePrompt(t *testing.T) {
 	want := `No decision was requested, so there is nothing to answer. Continue toward this
-issue's terminal state: commit the fix and print FIX_COMMITTED: <one-sentence summary>
-on its own line, or finish and commit the spec and print SPEC_READY: <path> on its
-own line, or — if nothing remains to fix or build for this issue — print
-PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line. Do not start work on other
-issues in this session.`
+issue's terminal state, reported in your final structured output: commit the
+fix and end with outcome "fix_committed" (one-sentence summary in detail), or
+finish and commit the spec and end with outcome "spec_ready" (repository-relative
+path in spec_path), or — if nothing remains to fix or build for this issue —
+end with outcome "already_done" (one-sentence reason in detail). Do not start
+work on other issues in this session.`
 	check(t, "qaNudgePrompt", qaNudgePrompt(), want)
 }
 
@@ -156,10 +168,10 @@ The architect claims this issue is ALREADY fully implemented, for this reason:
 REASON TEXT
 
 Instructions: judge whether that claim is consistent with the issue and the
-product owner's intent. If you agree the work is already done, reply with
-exactly DONE_CONFIRMED and nothing else. If you disagree or have doubts, do NOT print that
-token — instead reply with one concise sentence telling the architect what is
-still missing or must be designed.`
+product owner's intent, and report the verdict in your final structured
+output. If you agree the work is already done, report confirmed true. If you
+disagree or have doubts, report confirmed false, with one concise sentence in
+objection telling the architect what is still missing or must be designed.`
 	check(t, "doneConfirmPrompt", doneConfirmPrompt("ISSUE BODY", "PERSONA TEXT", "REASON TEXT"), want)
 }
 
@@ -168,8 +180,10 @@ func TestGoldenPlanPrompt(t *testing.T) {
 write a detailed implementation plan for it. Commit the plan into this branch.
 HEADLESS MODE: do not ask questions; the spec is approved and complete — make
 reasonable calls and note any assumptions in the plan.
-When the implementation plan file is written and committed, print PIPELINE_READY on its own
-line.`
+When the implementation plan file is written and committed, end the session:
+your final structured output must report status "ready" and the plan file path
+(relative to the repository root) as plan_path. Report status "incomplete"
+(with a brief detail) only if you could not write and commit the plan.`
 	check(t, "planPrompt", planPrompt("docs/spec.md"), want)
 }
 
@@ -264,8 +278,8 @@ func TestGoldenUATFeaturePrompt(t *testing.T) {
 	want := `Read the approved spec at docs/spec.md and write a UAT (user acceptance test)
 checklist for a human who will verify the shipped feature by hand.
 
-Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
-UAT_END. Print nothing before or after those two lines.
+Return ONLY the checklist, as the checklist field of your final structured
+output — nothing before or after it inside that field.
 
 Rules for the checklist:
 - Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
@@ -286,11 +300,11 @@ ISSUE BODY
 
 Read the issue above, then inspect what actually changed with
 ` + "`git diff origin/main...HEAD`" + ` and ` + "`git log origin/main..HEAD`" + `, so the checklist
-describes the real fix. If that diff is empty — nothing was committed — print
-nothing at all: no markers, no checklist, no explanation.
+describes the real fix. If that diff is empty — nothing was committed — return
+an empty checklist: no items, no explanation.
 
-Output ONLY the checklist, between a line reading UAT_BEGIN and a line reading
-UAT_END. Print nothing before or after those two lines.
+Return ONLY the checklist, as the checklist field of your final structured
+output — nothing before or after it inside that field.
 
 Rules for the checklist:
 - Two group headings only, in this order: ` + "`### Happy path`" + `, then ` + "`### Edge cases`" + `. Omit a group with no items; never invent items to fill it. No other headings, no intro line, no closing line.
@@ -305,12 +319,11 @@ Rules for the checklist:
 func TestGoldenCodeReviewPrompt(t *testing.T) {
 	want := `Run /code-review against origin/main...HEAD with --fix applied (round 1 of 2), then commit any changes it makes.
 
-Output ONLY a status line and summary between a line reading CODEREVIEW_BEGIN and a line reading
-CODEREVIEW_END. Print nothing before or after those two lines. The
-first line between them is one of:
-- STATUS: clean — /code-review found nothing to fix.
-- STATUS: fixed — followed by a short bullet summary of what was fixed.
-- STATUS: blocked — followed by a short explanation of what can't be safely auto-fixed.
+Report the outcome in your final structured output:
+- status "clean" — /code-review found nothing to fix (empty summary).
+- status "fixed" — with a short bullet summary of what was fixed in summary.
+- status "blocked" — with a short explanation of what can't be safely
+  auto-fixed in summary.
 
 HEADLESS MODE: do not ask questions; make reasonable calls.`
 	check(t, "codeReviewPrompt", codeReviewPrompt(1, 2, "main"), want)

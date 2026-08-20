@@ -18,12 +18,20 @@ in the Go source. The directory is embedded into the binary with `go:embed`, so 
 release is still a single self-contained file that reads nothing from disk at
 runtime; editing a prompt means rebuilding.
 
-Sentinel tokens (`CONFIDENCE:`, `SPEC_READY:`, `PIPELINE_READY`,
-`PIPELINE_ALREADY_DONE:`, `DONE_CONFIRMED`) are injected from the Go constants
-rather than written in the templates, so the instruction given to the model and
-the parser reading its reply cannot drift apart. Rewording a prompt is safe;
-adding a placeholder means adding the matching key in the builder, and the tests
-in `prompts_test.go` will fail loudly if you forget.
+Session outcomes are **structured output, not prose sentinels**. Every primary
+call passes a `--json-schema` (the `*ResultSchema` constants next to each
+stage's code), so the CLI itself constrains the session's final output and the
+daemon reads a typed field — `outcome`, `status`, `confidence` — instead of
+grepping the reply for a token. The schema is enforced on `--resume` turns too,
+which is the point: a resumed session triggered with a bare `continue` used to
+answer in prose and strand the stage, because the trigger taught it nothing
+about the contract.
+
+The prompt still explains, in prose, *which* outcome fits *when* — the schema
+fixes the shape of the answer, not the choice. Rewording a prompt is safe;
+adding a placeholder means adding the matching key in the builder, and the
+tests in `prompts_test.go` fail loudly if a retired sentinel reappears in a
+template or a schema stops being valid JSON.
 
 ## Logs
 

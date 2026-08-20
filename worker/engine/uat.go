@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strings"
 
@@ -12,17 +13,31 @@ const (
 	// uatMarker is the idempotency marker. It is an HTML comment, so it is
 	// invisible in rendered markdown while still being greppable in the raw body.
 	uatMarker = "<!-- loope:uat -->"
-	// uatBeginSentinel / uatEndSentinel fence the checklist inside the session's
-	// result text. Injected into the prompts via promptData(), never hardcoded in
-	// a template.
-	uatBeginSentinel = "UAT_BEGIN"
-	uatEndSentinel   = "UAT_END"
 	// uatLabel is the Claude call label, and so the <seq>-uat.* log file prefix.
 	uatLabel = "uat"
 	// maxUATChars caps the checklist itself, keeping the comment well clear of
 	// GitHub's 65536-character limit.
 	maxUATChars = 8000
 )
+
+// uatResultSchema is the --json-schema for the UAT session. An empty checklist
+// means "nothing to publish" — also how the bug route self-skips a branch with
+// no commits.
+const uatResultSchema = `{
+  "type": "object",
+  "properties": {
+    "checklist": {
+      "type": "string",
+      "description": "The UAT checklist markdown, exactly per the format rules. Empty string when there is nothing to verify (e.g. no commits on the branch)."
+    }
+  },
+  "required": ["checklist"]
+}`
+
+// uatResult mirrors uatResultSchema.
+type uatResult struct {
+	Checklist string `json:"checklist"`
+}
 
 // UATTarget is the GitHub surface the UAT step reads from and publishes to.
 // *GitHub satisfies it; tests substitute a fake.
@@ -113,14 +128,17 @@ func (u *UAT) run(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPat
 		Model:           cfg.Models.UAT,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion", "Write", "Edit", "NotebookEdit"},
+		JSONSchema:      uatResultSchema,
 	})
 	if err != nil {
 		log.Printf("issue #%d: UAT skipped, session failed: %v", u.Num, err)
 		return
 	}
 
-	checklist, ok := parseUAT(res.Result)
-	if !ok {
+	var ur uatResult
+	_ = json.Unmarshal(res.StructuredOutput, &ur)
+	checklist := strings.TrimSpace(ur.Checklist)
+	if checklist == "" {
 		log.Printf("issue #%d: UAT skipped, session produced no checklist", u.Num)
 		return
 	}
@@ -136,24 +154,6 @@ func (u *UAT) run(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPat
 		return
 	}
 	log.Printf("issue #%d: UAT checklist published as an issue comment", u.Num)
-}
-
-// parseUAT extracts the checklist from a UAT session's result: the text after
-// uatBeginSentinel, up to uatEndSentinel if present or to the end of the result
-// if the session omitted it. ok is false when the begin sentinel is absent or
-// the content between the sentinels is blank — both mean "nothing to publish",
-// which is also how the bug route self-skips a branch with no commits.
-func parseUAT(s string) (string, bool) {
-	i := strings.Index(s, uatBeginSentinel)
-	if i < 0 {
-		return "", false
-	}
-	rest := s[i+len(uatBeginSentinel):]
-	if j := strings.Index(rest, uatEndSentinel); j >= 0 {
-		rest = rest[:j]
-	}
-	rest = strings.TrimSpace(rest)
-	return rest, rest != ""
 }
 
 // uatSection renders the outbound comment: the marker, the heading,
@@ -176,9 +176,10 @@ func uatFeaturePrompt(specPath string) string {
 }
 
 // uatBugPrompt drives the bug route's UAT session from the issue plus the diff
-// the fix actually produced. An empty diff means the session prints nothing,
-// which parseUAT reads as "nothing to publish" — that is how the step self-skips
-// a branch with no commits, with no commit-count plumbing in the pipeline.
+// the fix actually produced. An empty diff means the session reports an empty
+// checklist, which run reads as "nothing to publish" — that is how the step
+// self-skips a branch with no commits, with no commit-count plumbing in the
+// pipeline.
 func uatBugPrompt(issue, base string) string {
 	d := promptData()
 	d["Issue"] = issue

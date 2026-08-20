@@ -138,7 +138,7 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 			}
 			return "", "", nil
 		case "claude":
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed", "d"), "", nil
+			return testkit.ClaudeEntry("d", "fix_committed", "fixed"), "", nil
 		}
 		return "", "", nil
 	}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
@@ -13,15 +14,68 @@ import (
 	"github.com/ngthluu/loope/worker/shared"
 )
 
-const readySentinel = "PIPELINE_READY"
+// planStatusReady is the status value a plan session's structured output must
+// carry for the stage to count as complete. The plan stage does NOT use a
+// prose sentinel (the old PIPELINE_READY): every plan call passes
+// planResultSchema as --json-schema, so the CLI itself forces the final output
+// into this shape — on fresh runs and, crucially, on resumed turns, where a
+// prompt-taught sentinel was sometimes forgotten.
+const planStatusReady = "ready"
 
-const specReadySentinel = "SPEC_READY:"
+// planResultSchema is the --json-schema for every plan-stage call. The field
+// descriptions carry the contract so even a resumed session triggered with a
+// bare "continue" knows what to report.
+const planResultSchema = `{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["ready", "incomplete"],
+      "description": "\"ready\" once the implementation plan file is written and committed into this branch; \"incomplete\" otherwise."
+    },
+    "plan_path": {
+      "type": "string",
+      "description": "Path of the committed plan file relative to the repository root. Required when status is \"ready\"."
+    },
+    "detail": {
+      "type": "string",
+      "description": "Brief explanation when status is not \"ready\"."
+    }
+  },
+  "required": ["status"]
+}`
 
-// nothingToAnswerSentinel is printed by the answerer (PO proxy) when the
-// architect's message asked no question and requested no approval — a status
-// update. The loop then nudges the architect toward a terminal sentinel
-// instead of relaying an empty approval.
-const nothingToAnswerSentinel = "QA_NOTHING_TO_ANSWER"
+// planResult mirrors planResultSchema.
+type planResult struct {
+	Status   string `json:"status"`
+	PlanPath string `json:"plan_path"`
+	Detail   string `json:"detail"`
+}
+
+// answererResultSchema is the --json-schema for the answerer (PO proxy) call.
+// has_answer false marks a status update with nothing to answer — the loop
+// then nudges the architect toward a terminal outcome instead of relaying an
+// empty approval.
+const answererResultSchema = `{
+  "type": "object",
+  "properties": {
+    "has_answer": {
+      "type": "boolean",
+      "description": "true when the architect's message asked a question or requested approval and answer responds to it; false when the message asked for no answer and no approval (a status or progress update)."
+    },
+    "answer": {
+      "type": "string",
+      "description": "The reply to relay to the architect. Required when has_answer is true."
+    }
+  },
+  "required": ["has_answer"]
+}`
+
+// answererResult mirrors answererResultSchema.
+type answererResult struct {
+	HasAnswer bool   `json:"has_answer"`
+	Answer    string `json:"answer"`
+}
 
 // This file holds the feature outcome's plan/execute machinery, plus the
 // product-owner-proxy prompt builders (answerer, done-confirm, qa-nudge) and
@@ -31,13 +85,11 @@ const nothingToAnswerSentinel = "QA_NOTHING_TO_ANSWER"
 
 // confidenceGate judges an entry turn's confidence score, shared by the fresh
 // entry-0 call and a resumed re-entry turn so a resumed session is held to the
-// same threshold as a fresh one. A threshold <= 0 disables it, and an
-// unparseable score fails open.
-func confidenceGate(cfg *shared.Config, output string) error {
-	if cfg.ConfidenceThreshold > 0 {
-		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
-			return &lowConfidenceError{score: score, feedback: sanitizeFeedback(output)}
-		}
+// same threshold as a fresh one. A threshold <= 0 disables it, and an absent
+// score fails open (as the old unparseable-sentinel case did).
+func confidenceGate(cfg *shared.Config, er entryResult) error {
+	if cfg.ConfidenceThreshold > 0 && er.Confidence != nil && *er.Confidence < cfg.ConfidenceThreshold {
+		return &lowConfidenceError{score: *er.Confidence, feedback: er.Detail}
 	}
 	return nil
 }
@@ -56,6 +108,7 @@ func runPlanThenExecute(ctx context.Context, c shared.Agent, cfg *shared.Config,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		JSONSchema:      planResultSchema,
 		Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StagePlan, Artifact: specRel},
 	})
 	if err != nil {
@@ -72,12 +125,16 @@ func runPlanThenExecute(ctx context.Context, c shared.Agent, cfg *shared.Config,
 		}
 		return err
 	}
-	if !strings.Contains(res.Result, readySentinel) {
-		return fmt.Errorf("feature pipeline: plan session did not signal %s", readySentinel)
+	var pr planResult
+	if uerr := json.Unmarshal(res.StructuredOutput, &pr); uerr != nil {
+		return fmt.Errorf("feature pipeline: plan session returned no structured status: %v", uerr)
 	}
-	plan, ok := findPlanFile(wtPath, start)
+	if pr.Status != planStatusReady {
+		return fmt.Errorf("feature pipeline: plan session ended %q: %s", pr.Status, pr.Detail)
+	}
+	plan, ok := resolvePlan(wtPath, pr.PlanPath, start)
 	if !ok {
-		return fmt.Errorf("feature pipeline: plan session signaled %s but wrote no plan file", readySentinel)
+		return fmt.Errorf("feature pipeline: plan session reported ready but no plan file found (plan_path=%q)", pr.PlanPath)
 	}
 	// Plan committed: append a PENDING execute node BEFORE the execute call
 	// starts, so a crash in the handoff (push, comment, execute spawn) resumes
@@ -200,14 +257,6 @@ func checkpointArtifact(wtPath, rel string) (string, bool) {
 	return "", false
 }
 
-// parseSpecReady extracts the spec path following specReadySentinel. ok is
-// false only when no line leads with the sentinel (line-anchored via
-// parseSentinelLine, same as the other sentinels); an empty path still
-// counts.
-func parseSpecReady(s string) (string, bool) {
-	return parseSentinelLine(s, specReadySentinel)
-}
-
 // findSpecFile returns the newest *.md under any specs/ directory in root
 // modified after since (mirrors findPlanFile).
 func findSpecFile(root string, since time.Time) (string, bool) {
@@ -238,9 +287,10 @@ func findSpecFile(root string, since time.Time) (string, bool) {
 	return newest, newest != ""
 }
 
-// resolveSpec turns the architect's SPEC_READY path into an existing spec file.
-// An explicit path (absolute, or relative to wtPath) is preferred; otherwise it
-// falls back to the newest spec under a specs/ dir modified after since.
+// resolveSpec turns the architect's reported spec_path into an existing spec
+// file. An explicit path (absolute, or relative to wtPath) is preferred;
+// otherwise it falls back to the newest spec under a specs/ dir modified
+// after since.
 func resolveSpec(wtPath, rel string, since time.Time) (string, bool) {
 	if rel != "" {
 		p := rel
@@ -252,6 +302,20 @@ func resolveSpec(wtPath, rel string, since time.Time) (string, bool) {
 		}
 	}
 	return findSpecFile(wtPath, since)
+}
+
+// resolvePlan turns the plan session's reported plan_path into an existing
+// plan file. The explicit path (absolute, or relative to wtPath) is preferred —
+// it survives a resume, where a plan committed before the resume predates
+// since — otherwise it falls back to the newest plan under a plans/ dir
+// modified after since (mirrors resolveSpec).
+func resolvePlan(wtPath, rel string, since time.Time) (string, bool) {
+	if rel != "" {
+		if p, ok := checkpointArtifact(wtPath, rel); ok {
+			return p, true
+		}
+	}
+	return findPlanFile(wtPath, since)
 }
 
 // findPlanFile returns the newest *.md under any plans/ directory in root
@@ -296,10 +360,11 @@ func readPersona(path string) string {
 }
 
 // brainstormResumePrompt wraps a resumed LEGACY brainstorm session's trigger
-// prompt with a restatement of the old feature-route sentinel contract
-// (SPEC_READY/PIPELINE_ALREADY_DONE — such a session was never taught
-// FIX_COMMITTED). Kept only for chains checkpointed at StageBrainstorm before
-// the merged entry stage existed; fresh sessions use entryResumePrompt.
+// prompt with a restatement of the old feature-route contract (spec_ready /
+// already_done — such a session was never taught fix_committed). Kept only for
+// chains checkpointed at StageBrainstorm before the merged entry stage
+// existed; fresh sessions use entryResumePrompt. The entry schema is enforced
+// on the resumed turn either way.
 func brainstormResumePrompt(trigger string) string {
 	d := promptData()
 	d["Trigger"] = trigger
@@ -321,7 +386,28 @@ func answererPrompt(issue, persona, architectMsg string) string {
 	return mustRender("answerer.md.tmpl", d)
 }
 
-const doneConfirmSentinel = "DONE_CONFIRMED"
+// doneConfirmSchema is the --json-schema for the done-confirm (PO proxy) call
+// that judges an architect's already-implemented claim.
+const doneConfirmSchema = `{
+  "type": "object",
+  "properties": {
+    "confirmed": {
+      "type": "boolean",
+      "description": "true when you agree the issue's work is already fully implemented."
+    },
+    "objection": {
+      "type": "string",
+      "description": "One concise sentence telling the architect what is still missing or must be designed. Required when confirmed is false."
+    }
+  },
+  "required": ["confirmed"]
+}`
+
+// doneConfirmResult mirrors doneConfirmSchema.
+type doneConfirmResult struct {
+	Confirmed bool   `json:"confirmed"`
+	Objection string `json:"objection"`
+}
 
 func doneConfirmPrompt(issue, persona, reason string) string {
 	d := promptData()

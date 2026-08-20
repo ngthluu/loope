@@ -73,7 +73,7 @@ func TestCallCheckpointSurvivesKilledCLI(t *testing.T) {
 func TestCallCheckpointLinksParentFromChain(t *testing.T) {
 	dir := t.TempDir()
 	shared.AppendSessionNode(dir, shared.SessionNode{ID: "sa", Kind: "feature", Stage: shared.StageBrainstorm})
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: streamWithInit("sb", "PIPELINE_READY")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: streamWithInit("sb", "plan ready")}}}
 	c := &Claude{runner: f, logDir: dir}
 	_, err := c.Call(context.Background(), shared.ClaudeCall{
 		Label: "plan", Prompt: "x",

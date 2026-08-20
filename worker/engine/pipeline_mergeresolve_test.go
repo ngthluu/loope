@@ -71,9 +71,9 @@ func newMergeEnv(t *testing.T, labels ...string) *mergeEnv {
 		case "claude":
 			if env.claudeResolves {
 				env.inProgress = false
-				return testkit.ClaudeJSON("Resolved both files.\n"+mergeResolveSentinel+" resolved", "mr1"), "", nil
+				return testkit.ClaudeStructured("mr1", map[string]any{"status": "resolved", "detail": ""}), "", nil
 			}
-			return testkit.ClaudeJSON("Two incompatible designs.\n"+mergeResolveSentinel+" blocked needs a human call", "mr1"), "", nil
+			return testkit.ClaudeStructured("mr1", map[string]any{"status": "blocked", "detail": " needs a human call"}), "", nil
 		}
 		return "", "", nil
 	}

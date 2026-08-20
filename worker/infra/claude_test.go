@@ -71,7 +71,7 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 func TestCallFeedsPromptViaStdin(t *testing.T) {
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("ok", "s1")}}}
 	c := &Claude{runner: f}
-	prompt := "print PIPELINE_READY on its own line"
+	prompt := "report status ready in your structured output"
 	_, err := c.Call(context.Background(), shared.ClaudeCall{
 		Label:           "brainstorm-0",
 		Prompt:          prompt,
@@ -86,7 +86,7 @@ func TestCallFeedsPromptViaStdin(t *testing.T) {
 		t.Errorf("stdin = %q, want the prompt", f.Calls[0].Stdin)
 	}
 	for _, a := range f.Calls[0].Args {
-		if strings.Contains(a, "PIPELINE_READY") {
+		if strings.Contains(a, "structured") {
 			t.Errorf("prompt words must not leak into argv, got %v", f.Calls[0].Args)
 		}
 	}
@@ -562,5 +562,46 @@ func TestFailureSummaryKeepsHeadAndTailOfLongResult(t *testing.T) {
 	got := r.FailureSummary()
 	if !strings.Contains(got, "HEAD-MARKER") || !strings.Contains(got, "TAIL-MARKER") {
 		t.Errorf("failureSummary() dropped an end of the result: %q", got)
+	}
+}
+
+// TestCallPassesJSONSchema: a call carrying a JSONSchema passes it as
+// --json-schema, so the CLI itself constrains the session's final output
+// instead of the prompt asking for a sentinel the model can forget.
+func TestCallPassesJSONSchema(t *testing.T) {
+	schema := `{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}`
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeStructured("s1", map[string]any{"status": "ready"})}}}
+	c := &Claude{runner: f}
+	res, err := c.Call(context.Background(), shared.ClaudeCall{
+		Label: "plan", Prompt: "write the plan", Model: shared.ModelConfig{Model: "opus"},
+		JSONSchema: schema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := testkit.ArgAfter(f.Calls[0].Args, "--json-schema"); got != schema {
+		t.Errorf("--json-schema = %q, want the schema verbatim", got)
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(res.StructuredOutput, &out); err != nil {
+		t.Fatalf("structured output must be decodable: %v", err)
+	}
+	if out.Status != "ready" {
+		t.Errorf("status = %q, want ready", out.Status)
+	}
+}
+
+// A call with no JSONSchema must not pass the flag at all — the ephemeral
+// callers that still read plain result text keep working unchanged.
+func TestCallOmitsJSONSchemaWhenUnset(t *testing.T) {
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("ok", "s1")}}}
+	c := &Claude{runner: f}
+	if _, err := c.Call(context.Background(), shared.ClaudeCall{Label: "x", Prompt: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if testkit.HasArg(f.Calls[0].Args, "--json-schema") {
+		t.Errorf("--json-schema must be absent, got %v", f.Calls[0].Args)
 	}
 }

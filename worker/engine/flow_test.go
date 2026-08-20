@@ -189,16 +189,16 @@ func (e *flowEnv) featureScript() func(c testkit.RCall) (string, string, error) 
 		switch {
 		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
 			writeSpecFile(e.t, e.wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.HasPrefix(c.Stdin, "/superpowers:writing-plans"):
 			writePlanFile(e.t, e.wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.HasPrefix(c.Stdin, "/superpowers:executing-plans"), c.Stdin == "continue":
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		case strings.Contains(c.Stdin, "/code-review"):
-			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nNothing to fix.\n"+codeReviewEndSentinel, "cr-1"), "", nil
+			return testkit.ClaudeStructured("cr-1", map[string]any{"status": "clean", "summary": "Nothing to fix."}), "", nil
 		}
-		return testkit.ClaudeJSON("ok", "eph-1"), "", nil
+		return testkit.ClaudeEphemeral("eph-1", "ok"), "", nil
 	}
 }
 
@@ -368,14 +368,14 @@ func TestFlowEntryUsageLimitParksThenResumesAsFix(t *testing.T) {
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
 		case strings.Contains(c.Stdin, "/code-review"):
-			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nok\n"+codeReviewEndSentinel, "cr-1"), "", nil
+			return testkit.ClaudeStructured("cr-1", map[string]any{"status": "clean", "summary": "ok"}), "", nil
 		case testkit.ArgAfter(c.Args, "--resume") == "s-429":
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed the crash", "debug-2"), "", nil
+			return testkit.ClaudeEntry("debug-2", "fix_committed", "fixed the crash"), "", nil
 		case !limited:
 			limited = true
 			return testkit.ClaudeErrorJSON("Claude AI usage limit reached", "s-429"), "", nil
 		}
-		return testkit.ClaudeJSON("ok", "eph-1"), "", nil
+		return testkit.ClaudeEphemeral("eph-1", "ok"), "", nil
 	}
 	o := env.orchestrator()
 
@@ -416,11 +416,11 @@ func TestFlowLegacyBugChainResumesDebugSession(t *testing.T) {
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
 		case strings.Contains(c.Stdin, "/code-review"):
-			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nok\n"+codeReviewEndSentinel, "cr-1"), "", nil
+			return testkit.ClaudeStructured("cr-1", map[string]any{"status": "clean", "summary": "ok"}), "", nil
 		case testkit.ArgAfter(c.Args, "--resume") == "legacy-debug":
-			return testkit.ClaudeJSON("Fixed and committed.", "debug-2"), "", nil
+			return testkit.ClaudeEntry("debug-2", "fix_committed", "Fixed and committed."), "", nil
 		}
-		return testkit.ClaudeJSON("ok", "eph-1"), "", nil
+		return testkit.ClaudeEphemeral("eph-1", "ok"), "", nil
 	}
 	// Seed the pre-merge chain residue: a debug session checkpointed by the
 	// old bug pipeline.

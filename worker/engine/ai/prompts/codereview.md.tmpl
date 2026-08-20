@@ -1,10 +1,9 @@
 Run /code-review against origin/{{.Base}}...HEAD with --fix applied (round {{.Round}} of {{.Rounds}}), then commit any changes it makes.
 
-Output ONLY a status line and summary between a line reading {{.CodeReviewBeginSentinel}} and a line reading
-{{.CodeReviewEndSentinel}}. Print nothing before or after those two lines. The
-first line between them is one of:
-- STATUS: clean — /code-review found nothing to fix.
-- STATUS: fixed — followed by a short bullet summary of what was fixed.
-- STATUS: blocked — followed by a short explanation of what can't be safely auto-fixed.
+Report the outcome in your final structured output:
+- status "clean" — /code-review found nothing to fix (empty summary).
+- status "fixed" — with a short bullet summary of what was fixed in summary.
+- status "blocked" — with a short explanation of what can't be safely
+  auto-fixed in summary.
 
 HEADLESS MODE: do not ask questions; make reasonable calls.

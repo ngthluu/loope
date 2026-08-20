@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -114,17 +115,52 @@ func TestEntryPromptSharesTheAskFormatBlock(t *testing.T) {
 }
 
 // The merged entry prompt (and its resume wrapper) must teach every terminal
-// sentinel the entry loop parses: a route the prompt forgets to name is a
-// route the session can never terminate on.
-func TestEntryPromptTeachesAllTerminalSentinels(t *testing.T) {
+// outcome the entry loop dispatches on: a route the prompt forgets to name is
+// a route the session never knows to aim for. The schema enforces the SHAPE of
+// the answer; the prose is what tells the session which outcome fits.
+func TestEntryPromptTeachesAllTerminalOutcomes(t *testing.T) {
 	for _, tc := range []struct{ name, got string }{
 		{"entryPrompt", entryPrompt("I", 70)},
 		{"entryResumePrompt", entryResumePrompt("continue")},
+		{"brainstormResumePrompt", brainstormResumePrompt("continue")},
 	} {
-		for _, sentinel := range []string{fixCommittedSentinel, specReadySentinel, alreadyDoneSentinel} {
-			if !strings.Contains(tc.got, sentinel) {
-				t.Errorf("%s is missing the %s contract", tc.name, sentinel)
+		outcomes := []string{entryOutcomeSpec, entryOutcomeDone}
+		if tc.name != "brainstormResumePrompt" {
+			// The legacy design session was never taught the fix route.
+			outcomes = append(outcomes, entryOutcomeFix)
+		}
+		for _, outcome := range outcomes {
+			if !strings.Contains(tc.got, outcome) {
+				t.Errorf("%s is missing the %s contract", tc.name, outcome)
 			}
+		}
+	}
+}
+
+// Every schema a session call passes must be valid JSON naming the fields its
+// parser reads — a typo would otherwise only surface as an off-contract
+// session at runtime.
+func TestSessionSchemasAreValidJSON(t *testing.T) {
+	for name, schema := range map[string]string{
+		"entry":        entryResultSchema,
+		"plan":         planResultSchema,
+		"answerer":     answererResultSchema,
+		"doneConfirm":  doneConfirmSchema,
+		"uat":          uatResultSchema,
+		"codeReview":   codeReviewResultSchema,
+		"mergeResolve": mergeResolveResultSchema,
+	} {
+		var doc struct {
+			Type       string                     `json:"type"`
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+		}
+		if err := json.Unmarshal([]byte(schema), &doc); err != nil {
+			t.Errorf("%s schema is not valid JSON: %v", name, err)
+			continue
+		}
+		if doc.Type != "object" || len(doc.Properties) == 0 || len(doc.Required) == 0 {
+			t.Errorf("%s schema must be an object with properties and required fields, got %+v", name, doc)
 		}
 	}
 }
@@ -205,23 +241,29 @@ func TestEveryPromptFileOnDiskIsParsed(t *testing.T) {
 	}
 }
 
-// Sentinels come from the Go constants, never from literal text in a template.
-func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
+// The old prose sentinels are gone: session outcomes are schema-enforced
+// structured fields now, so no template may reintroduce one as literal text.
+func TestNoLegacySentinelSurvivesInATemplate(t *testing.T) {
 	entries, err := promptFS.ReadDir("ai/prompts")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentinels := []string{confidenceSentinel, specReadySentinel, fixCommittedSentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
-		nothingToAnswerSentinel, uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel, mergeResolveSentinel}
+	legacy := []string{"CONFIDENCE:", "SPEC_READY", "FIX_COMMITTED", "PIPELINE_READY", "PIPELINE_ALREADY_DONE",
+		"DONE_CONFIRMED", "QA_NOTHING_TO_ANSWER", "UAT_BEGIN", "UAT_END", "CODEREVIEW_BEGIN", "CODEREVIEW_END",
+		"MERGE_RESOLVE_STATUS"}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, s := range sentinels {
+		for _, s := range legacy {
 			if strings.Contains(string(b), s) {
-				t.Errorf("%s hardcodes the sentinel %q — inject it via promptData() instead", e.Name(), s)
+				t.Errorf("%s still carries the retired sentinel %q — report the outcome via the call's --json-schema instead", e.Name(), s)
 			}
 		}
+	}
+	// The one marker that IS still injected rather than hardcoded.
+	if !strings.Contains(uatSection("- [ ] x"), uatMarker) {
+		t.Error("uatSection must still carry the idempotency marker from promptData()")
 	}
 }

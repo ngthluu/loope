@@ -46,7 +46,7 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 			}
 			return "", "", nil
 		case "claude":
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed and committed", "d1"), "", nil
+			return testkit.ClaudeEntry("d1", "fix_committed", "fixed and committed"), "", nil
 		}
 		return "", "", nil
 	}

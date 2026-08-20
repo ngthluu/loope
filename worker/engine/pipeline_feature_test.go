@@ -68,15 +68,6 @@ func resumePipelineMain(ctx context.Context, c shared.Agent, cfg *shared.Config,
 	return ResumePipeline(ctx, c, cfg, wtPath, issueContent, persona, "main", uat, node, prompt, gh, wt, branch, title, n)
 }
 
-func TestParseSpecReady(t *testing.T) {
-	if p, ok := parseSpecReady("Spec done.\nSPEC_READY: docs/superpowers/specs/x-design.md\n"); !ok || p != "docs/superpowers/specs/x-design.md" {
-		t.Errorf("parseSpecReady = %q,%v", p, ok)
-	}
-	if _, ok := parseSpecReady("no sentinel"); ok {
-		t.Error("want ok=false when sentinel absent")
-	}
-}
-
 func writeSpecFile(t *testing.T, wt string) string {
 	t.Helper()
 	dir := filepath.Join(wt, "docs", "superpowers", "specs")
@@ -151,15 +142,15 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 		prompts = append(prompts, prompt)
 		switch len(prompts) {
 		case 1: // architect opening: asks a question
-			return testkit.ClaudeJSON("What database should we use?", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "What database should we use?"), "", nil
 		case 2: // answerer
-			return testkit.ClaudeJSON("Use SQLite.", "ans-1"), "", nil
+			return testkit.ClaudeAnswer("ans-1", "Use SQLite."), "", nil
 		case 3: // architect resumed: commits the spec
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case 4: // fresh plan session: commits the plan
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 5: // executor
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -174,7 +165,7 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 		t.Fatalf("got %d calls, want 5", len(prompts))
 	}
 	if !strings.HasPrefix(prompts[0], "Handle this GitHub issue:") || !strings.Contains(prompts[0], "ISSUE CONTENT") ||
-		!strings.Contains(prompts[0], specReadySentinel) || !strings.Contains(prompts[0], fixCommittedSentinel) {
+		!strings.Contains(prompts[0], entryOutcomeSpec) || !strings.Contains(prompts[0], entryOutcomeFix) {
 		t.Errorf("entry prompt = %s", prompts[0])
 	}
 	if !testkit.HasArg(f.Calls[0].Args, "--disallowedTools") {
@@ -234,13 +225,13 @@ func TestBrainstormLoopPushesAndCreatesPRAfterSpec(t *testing.T) {
 		switch len(prompts) {
 		case 1: // architect: commits the spec straight away
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case 2: // fresh plan session: the spec-stage push/PR must already have run
 			if len(ghCalls) == 0 {
 				t.Fatal("plan session started before the spec-stage push/PR ran")
 			}
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 3: // executor
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -305,10 +296,10 @@ func TestBrainstormLoopContinuesWhenSpecPushFails(t *testing.T) {
 		switch len(prompts) {
 		case 1:
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case 2:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 3:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -330,7 +321,7 @@ func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 	wt := t.TempDir()
 	f := &testkit.FakeRunner{}
 	f.Handler = func(c testkit.RCall) (string, string, error) {
-		return testkit.ClaudeJSON("Still thinking...", "s1"), "", nil
+		return testkit.ClaudeEntry("s1", "question", "Still thinking..."), "", nil
 	}
 	c := infra.NewClaude(f, "", "")
 	err := runPipelineMain(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
@@ -341,11 +332,11 @@ func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 
 // TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound locks in the
 // boundary behavior: when the architect finishes the spec (prints
-// specReadySentinel) on the LAST permitted Q&A round, the pipeline must still
+// the spec_ready outcome) on the LAST permitted Q&A round, the pipeline must still
 // detect it and run the plan + execute sessions rather than reporting
 // "exceeded rounds". With MaxQARounds=1, round 1 is the only permitted round;
 // the architect's resumed call made during round 1 ("brainstorm-1") is that
-// final round's output, and it is only inspected for the sentinel at the top
+// final round's output, and it is only inspected for the outcome at the top
 // of the next loop iteration — which must happen before the bound check fires.
 func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 	wt := t.TempDir()
@@ -362,15 +353,15 @@ func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1:
-			return testkit.ClaudeJSON("What database should we use?", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "What database should we use?"), "", nil
 		case 2:
-			return testkit.ClaudeJSON("Use SQLite.", "ans-1"), "", nil
+			return testkit.ClaudeAnswer("ans-1", "Use SQLite."), "", nil
 		case 3: // architect resumed on the LAST permitted round: commits the spec
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case 4:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 5:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -389,7 +380,7 @@ func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 // TestFeaturePipelineAlreadyDoneConfirmedOnFinalRound locks in the symmetric
 // boundary behavior for the already-done path: when the architect's output
 // on the LAST permitted Q&A round is an already-done claim
-// (PIPELINE_ALREADY_DONE: ...), the pipeline must still route it through the
+// (outcome already_done), the pipeline must still route it through the
 // answerer confirmation and return *alreadyDoneError, rather than reporting
 // "exceeded rounds". With MaxQARounds=1, round 1 is the only permitted
 // round; the architect's resumed call made during round 1 ("brainstorm-1")
@@ -411,13 +402,13 @@ func TestFeaturePipelineAlreadyDoneConfirmedOnFinalRound(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1: // architect opening: asks a question
-			return testkit.ClaudeJSON("What database should we use?", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "What database should we use?"), "", nil
 		case 2: // answerer
-			return testkit.ClaudeJSON("Use SQLite.", "ans-1"), "", nil
+			return testkit.ClaudeAnswer("ans-1", "Use SQLite."), "", nil
 		case 3: // architect resumed on the LAST permitted round: claims already done
-			return testkit.ClaudeJSON("Looked around.\nPIPELINE_ALREADY_DONE: dashboard already exists", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "already_done", "dashboard already exists"), "", nil
 		case 4: // answerer confirmation
-			return testkit.ClaudeJSON("Agreed, nothing to build. DONE_CONFIRMED", "ans-1"), "", nil
+			return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 		}
 		t.Fatalf("unexpected call %d: %v", len(prompts), c.Args)
 		return "", "", nil
@@ -442,7 +433,7 @@ func TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing(t *testing.T) {
 	f := &testkit.FakeRunner{}
 	f.Handler = func(c testkit.RCall) (string, string, error) {
 		count++
-		return testkit.ClaudeJSON("SPEC_READY: nope.md", "s1"), "", nil // lies: no spec file exists
+		return testkit.ClaudeSpecReady("s1", "nope.md"), "", nil // lies: no spec file exists
 	}
 	c := infra.NewClaude(f, "", "")
 	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
@@ -461,9 +452,9 @@ func TestFeaturePipelineArchitectDoneConfirmed(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1: // architect opening claims already implemented
-			return testkit.ClaudeJSON("Looked around.\nPIPELINE_ALREADY_DONE: dashboard already exists", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "already_done", "dashboard already exists"), "", nil
 		case 2: // answerer confirmation
-			return testkit.ClaudeJSON("Agreed, nothing to build. DONE_CONFIRMED", "ans-1"), "", nil
+			return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 		}
 		t.Fatalf("unexpected call %d", len(prompts))
 		return "", "", nil
@@ -480,8 +471,8 @@ func TestFeaturePipelineArchitectDoneConfirmed(t *testing.T) {
 	if len(prompts) != 2 {
 		t.Fatalf("want 2 calls (architect + confirm), got %d", len(prompts))
 	}
-	if !strings.Contains(prompts[1], "dashboard already exists") || !strings.Contains(prompts[1], doneConfirmSentinel) {
-		t.Errorf("confirmation prompt should carry the reason and the confirm sentinel: %s", prompts[1])
+	if !strings.Contains(prompts[1], "dashboard already exists") || !strings.Contains(prompts[1], "confirmed") {
+		t.Errorf("confirmation prompt should carry the reason and the confirm contract: %s", prompts[1])
 	}
 }
 
@@ -493,15 +484,15 @@ func TestFeaturePipelineArchitectDonePushbackContinues(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1: // architect claims done
-			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: I think it exists", "arch-1"), "", nil
-		case 2: // answerer disagrees (no DONE_CONFIRMED)
-			return testkit.ClaudeJSON("No — the CSV export is missing. Please design it.", "ans-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "already_done", "I think it exists"), "", nil
+		case 2: // answerer disagrees (confirmed false, with an objection)
+			return testkit.ClaudeDoneConfirm("ans-1", "No — the CSV export is missing. Please design it."), "", nil
 		case 3: // architect resumed with pushback, commits the spec
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case 4: // fresh plan session
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 5: // executor
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -536,7 +527,7 @@ func TestFeaturePipelineLowConfidenceEscalates(t *testing.T) {
 	count := 0
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		count++
-		return testkit.ClaudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-1"), "", nil
+		return testkit.ClaudeEntryConfidence("arch-1", "question", "The issue has no acceptance criteria.\nWhat output format is expected?", 40), "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
 	err := runPipelineMain(context.Background(), c, cfg, wt, "vague issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
@@ -547,8 +538,8 @@ func TestFeaturePipelineLowConfidenceEscalates(t *testing.T) {
 	if lc.score != 40 {
 		t.Errorf("score = %d, want 40", lc.score)
 	}
-	if !strings.Contains(lc.feedback, "acceptance criteria") || strings.Contains(lc.feedback, confidenceSentinel) {
-		t.Errorf("feedback should carry the reasons without the CONFIDENCE line: %q", lc.feedback)
+	if !strings.Contains(lc.feedback, "acceptance criteria") {
+		t.Errorf("feedback should carry the session's reasons: %q", lc.feedback)
 	}
 	if count != 1 {
 		t.Errorf("low confidence must stop after the first turn, got %d calls", count)
@@ -571,10 +562,10 @@ func TestFeaturePipelineHighConfidenceProceeds(t *testing.T) {
 		switch len(prompts) {
 		case 1: // confident, commits spec immediately
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("CONFIDENCE: 90\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeStructured("arch-1", map[string]any{"outcome": "spec_ready", "detail": "spec committed", "spec_path": "docs/superpowers/specs/2026-07-13-thing-design.md", "confidence": 90}), "", nil
 		case 2:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 3:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -600,11 +591,11 @@ func TestFeaturePipelineRecordsExecuteSession(t *testing.T) {
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "architect-sess"), "", nil
+			return testkit.ClaudeSpecReady("architect-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default: // execute
 			return testkit.ClaudeJSON("executed", "execute-sess"), "", nil
 		}
@@ -657,11 +648,11 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "architect-sess"), "", nil
+			return testkit.ClaudeSpecReady("architect-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "execute-sess"), "", nil
 		}
@@ -742,18 +733,18 @@ func TestFeaturePipelineRunsUATOnTheCommittedSpec(t *testing.T) {
 		case strings.Contains(c.Stdin, "/superpowers:writing-plans"):
 			seen["plan"]++
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.Contains(c.Stdin, "/superpowers:executing-plans"):
 			seen["execute"]++
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
-		case strings.Contains(c.Stdin, uatBeginSentinel):
+		case strings.Contains(c.Stdin, "UAT (user acceptance test)"):
 			seen["uat"]++
 			uatPrompt, uatModel = c.Stdin, testkit.ArgAfter(c.Args, "--model")
-			return testkit.ClaudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
+			return testkit.ClaudeStructured("uat-1", map[string]any{"checklist": "- [ ] click it"}), "", nil
 		default: // architect: commits the spec straight away
 			seen["architect"]++
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		}
 	}
 	tgt := &fakeUATTarget{body: "the issue body"}
@@ -792,19 +783,19 @@ func TestFeaturePipelineRunsUATConcurrentlyWithPlan(t *testing.T) {
 		case strings.Contains(c.Stdin, "/superpowers:writing-plans"):
 			close(planStarted)
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.Contains(c.Stdin, "/superpowers:executing-plans"):
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
-		case strings.Contains(c.Stdin, uatBeginSentinel):
-			return testkit.ClaudeJSON(uatBeginSentinel+"\n- [ ] click it\n"+uatEndSentinel, "uat-1"), "", nil
+		case strings.Contains(c.Stdin, "UAT (user acceptance test)"):
+			return testkit.ClaudeStructured("uat-1", map[string]any{"checklist": "- [ ] click it"}), "", nil
 		default: // architect: commits the spec straight away
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		}
 	}
 	var overlapped atomic.Bool
 	g := &gateRunner{inner: f, gate: func(dir, name, stdin string) chan struct{} {
-		if name == "claude" && strings.Contains(stdin, uatBeginSentinel) {
+		if name == "claude" && strings.Contains(stdin, "UAT (user acceptance test)") {
 			select {
 			case <-planStarted:
 				overlapped.Store(true)
@@ -839,17 +830,17 @@ func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 		case strings.Contains(c.Stdin, "/superpowers:writing-plans"):
 			seen["plan"]++
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.Contains(c.Stdin, "/superpowers:executing-plans"):
 			seen["execute"]++
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
-		case strings.Contains(c.Stdin, uatBeginSentinel):
+		case strings.Contains(c.Stdin, "UAT (user acceptance test)"):
 			seen["uat"]++
 			return "", "boom", fmt.Errorf("exit 1") // the UAT session fails
 		default:
 			seen["architect"]++
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		}
 	}
 	c := infra.NewClaude(f, "", "")
@@ -872,11 +863,11 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 		switch {
 		case strings.HasPrefix(c.Stdin, "continue"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
+			return testkit.ClaudeSpecReady("arch-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default: // execute
 			return testkit.ClaudeJSON("executed", "execute-sess"), "", nil
 		}
@@ -921,7 +912,7 @@ func TestResumeFeaturePipelineBrainstormStageLowConfidenceEscalates(t *testing.T
 	count := 0
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		count++
-		return testkit.ClaudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-sess"), "", nil
+		return testkit.ClaudeEntryConfidence("arch-sess", "question", "The issue has no acceptance criteria.\nWhat output format is expected?", 40), "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
 	session := shared.SessionNode{ID: "arch-sess", Kind: "feature", Stage: shared.StageBrainstorm}
@@ -947,7 +938,7 @@ func TestResumeFeaturePipelinePlanStage(t *testing.T) {
 		if testkit.ArgAfter(c.Args, "--resume") == "plan-sess" {
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess-2"), "", nil
+			return testkit.ClaudePlanReady("plan-sess-2"), "", nil
 		}
 		return testkit.ClaudeJSON("executed", "execute-sess"), "", nil
 	}}
@@ -995,11 +986,11 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "fresh-arch"), "", nil
+			return testkit.ClaudeSpecReady("fresh-arch", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "execute-sess"), "", nil
 		}
@@ -1033,7 +1024,7 @@ func TestBrainstormLoopCheckpointsPlanStageBeforePlanCall(t *testing.T) {
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			node, ok := shared.ResumePoint(logDir)
 			if !ok {
@@ -1080,7 +1071,7 @@ func TestResumeFeaturePipelinePlanStageFreshFromSpecCheckpoint(t *testing.T) {
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.Contains(c.Stdin, "executing-plans"):
 			return testkit.ClaudeJSON("executed", "exec-1"), "", nil
 		}
@@ -1114,11 +1105,11 @@ func TestResumeFeaturePipelinePlanStageCheckpointMissingSpecFallsBackFresh(t *te
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "fresh-arch"), "", nil
+			return testkit.ClaudeSpecReady("fresh-arch", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "exec-1"), "", nil
 		}
@@ -1153,11 +1144,11 @@ func TestResumeFeaturePipelineBrainstormPromptRestatesSentinels(t *testing.T) {
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-sess":
 			resumedPrompt = c.Stdin
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
+			return testkit.ClaudeSpecReady("arch-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "exec-1"), "", nil
 		}
@@ -1170,8 +1161,8 @@ func TestResumeFeaturePipelineBrainstormPromptRestatesSentinels(t *testing.T) {
 	if !strings.Contains(resumedPrompt, "continue") {
 		t.Errorf("resumed prompt must carry the trigger, got %q", resumedPrompt)
 	}
-	if !strings.Contains(resumedPrompt, specReadySentinel) || !strings.Contains(resumedPrompt, alreadyDoneSentinel) {
-		t.Errorf("resumed prompt must restate the %s and %s contract, got %q", specReadySentinel, alreadyDoneSentinel, resumedPrompt)
+	if !strings.Contains(resumedPrompt, entryOutcomeSpec) || !strings.Contains(resumedPrompt, entryOutcomeDone) {
+		t.Errorf("resumed prompt must restate the %s and %s contract, got %q", entryOutcomeSpec, entryOutcomeDone, resumedPrompt)
 	}
 }
 
@@ -1179,8 +1170,8 @@ func TestResumeFeaturePipelineBrainstormPromptRestatesSentinels(t *testing.T) {
 // the issue-5 incident: the architect sent pure status updates ("watching CI"),
 // the answerer replied "Approved", and the pair ping-ponged a round away every
 // few seconds. When the answerer signals there was nothing to answer, the loop
-// must send the architect a nudge that restates the terminal sentinels instead
-// of relaying the sentinel reply verbatim.
+// must send the architect a nudge that restates the terminal outcomes instead
+// of relaying an empty approval.
 func TestBrainstormLoopNudgesArchitectWhenNothingToAnswer(t *testing.T) {
 	wt := t.TempDir()
 	var prompts []string
@@ -1188,13 +1179,13 @@ func TestBrainstormLoopNudgesArchitectWhenNothingToAnswer(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1: // architect: a status update, no question
-			return testkit.ClaudeJSON("Watcher armed; waiting on CI. Will merge on green.", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "Watcher armed; waiting on CI. Will merge on green."), "", nil
 		case 2: // answerer: nothing to answer
-			return testkit.ClaudeJSON(nothingToAnswerSentinel, "ans-1"), "", nil
-		case 3: // architect resumed: must receive the sentinel-restating nudge
-			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: shipped and merged already", "arch-1"), "", nil
+			return testkit.ClaudeNothingToAnswer("ans-1"), "", nil
+		case 3: // architect resumed: must receive the outcome-restating nudge
+			return testkit.ClaudeEntry("arch-1", "already_done", "shipped and merged already"), "", nil
 		case 4: // answerer done-confirmation
-			return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+			return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 		}
 		t.Fatalf("unexpected call %d: %q", len(prompts), c.Stdin)
 		return "", "", nil
@@ -1208,11 +1199,11 @@ func TestBrainstormLoopNudgesArchitectWhenNothingToAnswer(t *testing.T) {
 	if len(prompts) != 4 {
 		t.Fatalf("got %d calls, want 4", len(prompts))
 	}
-	if strings.Contains(prompts[2], nothingToAnswerSentinel) {
-		t.Errorf("the architect must never see the raw answerer sentinel, got %q", prompts[2])
+	if !strings.Contains(prompts[2], "nothing to answer") {
+		t.Errorf("the architect must receive the nudge, not an empty approval, got %q", prompts[2])
 	}
-	if !strings.Contains(prompts[2], specReadySentinel) || !strings.Contains(prompts[2], alreadyDoneSentinel) {
-		t.Errorf("nudge must restate the terminal sentinels, got %q", prompts[2])
+	if !strings.Contains(prompts[2], entryOutcomeSpec) || !strings.Contains(prompts[2], entryOutcomeDone) {
+		t.Errorf("nudge must restate the terminal outcomes, got %q", prompts[2])
 	}
 }
 
@@ -1231,7 +1222,7 @@ func TestRunPlanThenExecuteCheckpointsExecuteStageBeforeExecuteCall(t *testing.T
 		switch {
 		case strings.Contains(c.Stdin, "writing-plans"):
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.Contains(c.Stdin, "executing-plans"):
 			node, ok := shared.ResumePoint(logDir)
 			if !ok {
@@ -1323,7 +1314,7 @@ func TestRunPlanThenExecutePushesAndCommentsPlanUpdate(t *testing.T) {
 		switch calls {
 		case 1: // fresh plan session: commits the plan
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 2: // executor: the plan-stage push/comment must already have run
 			if len(ghCalls) == 0 {
 				t.Fatal("execute session started before the plan-stage push/comment ran")
@@ -1386,7 +1377,7 @@ func TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline(t *testing.T) {
 		switch calls {
 		case 1:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 2:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -1420,7 +1411,7 @@ func TestRunPlanThenExecutePushesAfterExecuteCompletes(t *testing.T) {
 		switch calls {
 		case 1:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 2:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -1470,7 +1461,7 @@ func TestExecuteStagePushFailureDoesNotFailPipeline(t *testing.T) {
 		switch calls {
 		case 1:
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case 2:
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
 		}
@@ -1514,5 +1505,76 @@ func TestResumeFeaturePipelineExecuteStagePushesAfterSuccess(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("want a push after the resumed execute session succeeds, got %v", ghCalls)
+	}
+}
+
+// TestResumedPlanSessionReportsReadyForAnAlreadyCommittedPlan is the bug this
+// whole schema conversion fixes. A plan session is resumed with a bare
+// "continue" AFTER it already wrote and committed the plan. Under the old
+// contract the resumed turn explained itself in prose, never re-printed the
+// PIPELINE_READY sentinel, and the stage failed — every time, because the
+// trigger taught the resumed session nothing about the contract.
+//
+// Two things now make it terminate: the CLI enforces the plan schema on the
+// resumed turn (the session cannot answer in unparseable prose), and the
+// reported plan_path resolves a plan committed BEFORE this resume started —
+// which a mod-time cutoff against the resume's own start time would miss.
+func TestResumedPlanSessionReportsReadyForAnAlreadyCommittedPlan(t *testing.T) {
+	wt := t.TempDir()
+	writeSpecFile(t, wt)
+	planPath := writePlanFile(t, wt) // committed by the ORIGINAL session, before this resume
+	planRel, _ := filepath.Rel(wt, planPath)
+	// Backdate it well before the resume's start, the case a since-cutoff misses.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(planPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawSchema bool
+	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
+		if testkit.ArgAfter(c.Args, "--resume") == "plan-sess" {
+			if strings.Contains(testkit.ArgAfter(c.Args, "--json-schema"), "plan_path") {
+				sawSchema = true
+			}
+			// The resumed session reports the plan it already committed.
+			return testkit.ClaudeStructured("plan-sess", map[string]any{
+				"status": "ready", "plan_path": planRel}), "", nil
+		}
+		return testkit.ClaudeJSON("executed", "exec-1"), "", nil
+	}}
+	c := infra.NewClaude(f, t.TempDir(), "")
+	node := shared.SessionNode{ID: "plan-sess", Kind: "feature", Stage: shared.StagePlan,
+		Artifact: "docs/superpowers/specs/2026-07-13-thing-design.md"}
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
+		t.Fatalf("a resumed plan session reporting an already-committed plan must complete the stage, got %v", err)
+	}
+	if !sawSchema {
+		t.Error("the resumed plan turn must carry the plan schema — that is what stops it answering in prose")
+	}
+	// The stage handed off: execute ran on the plan.
+	var executed bool
+	for _, call := range f.Calls {
+		if strings.Contains(call.Stdin, "executing-plans") {
+			executed = true
+		}
+	}
+	if !executed {
+		t.Error("want the execute stage to run after the resumed plan reported ready")
+	}
+}
+
+// A plan session that reports "incomplete" fails the stage with its own
+// explanation, rather than the old opaque "did not signal PIPELINE_READY".
+func TestPlanSessionIncompleteFailsWithItsDetail(t *testing.T) {
+	wt := t.TempDir()
+	specPath := writeSpecFile(t, wt)
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeStructured("plan-1",
+		map[string]any{"status": "incomplete", "detail": "the spec contradicts itself on retries"})}}}
+	c := infra.NewClaude(f, "", "")
+	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md", planPrompt(specPath), "", time.Now(),
+		testGH(), testWT(), "ai/issue-1", 1)
+	if err == nil || !strings.Contains(err.Error(), "contradicts itself") {
+		t.Fatalf("want the session's own detail in the error, got %v", err)
 	}
 }

@@ -50,12 +50,12 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 			return "", "", nil
 		case "claude":
 			if strings.Contains(c.Stdin, "/code-review") {
-				return testkit.ClaudeJSON("Reviewing...\n"+codeReviewBeginSentinel+"\nSTATUS: clean\nNothing to fix.\n"+codeReviewEndSentinel, "cr1"), "", nil
+				return testkit.ClaudeStructured("cr1", map[string]any{"status": "clean", "summary": "Nothing to fix."}), "", nil
 			}
 			if env.failClaude {
 				return "", "boom", fmt.Errorf("exit 1")
 			}
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed and committed", "d1"), "", nil
+			return testkit.ClaudeEntry("d1", "fix_committed", "fixed and committed"), "", nil
 		}
 		return "", "", nil
 	}
@@ -96,7 +96,7 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		// Make the entry session escalate.
 		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
-			return testkit.ClaudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
+			return testkit.ClaudeEntryConfidence("arch-1", "question", "No acceptance criteria — what should the export contain?", 30), "", nil
 		}
 		return base(c)
 	}
@@ -356,9 +356,9 @@ func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		if c.Name == "claude" {
 			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
-				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+				return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 			}
-			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
+			return testkit.ClaudeEntry("d1", "already_done", "already in place"), "", nil
 		}
 		return base(c)
 	}
@@ -395,9 +395,9 @@ func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		if c.Name == "claude" {
 			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
-				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+				return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 			}
-			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: x", "d1"), "", nil
+			return testkit.ClaudeEntry("d1", "already_done", "x"), "", nil
 		}
 		return base(c)
 	}
@@ -465,7 +465,7 @@ func TestProcessOnceHandlesMultipleTickets(t *testing.T) {
 			}
 			return "", "", nil
 		case "claude":
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed", "d"), "", nil
+			return testkit.ClaudeEntry("d", "fix_committed", "fixed"), "", nil
 		}
 		return "", "", nil
 	}
@@ -992,7 +992,7 @@ func TestHandleIssueResumesWithDiffAfterNeedsInfo(t *testing.T) {
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
-			return testkit.ClaudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
+			return testkit.ClaudeEntryConfidence("arch-1", "question", "No acceptance criteria — what should the export contain?", 30), "", nil
 		}
 		return base(c)
 	}
@@ -1052,9 +1052,9 @@ func TestFinishDoneAndNeedsInfoPreserveBranch(t *testing.T) {
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		if c.Name == "claude" {
 			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
-				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+				return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 			}
-			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
+			return testkit.ClaudeEntry("d1", "already_done", "already in place"), "", nil
 		}
 		return base(c)
 	}
@@ -1207,7 +1207,7 @@ func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
 			writeSpecFile(t, shared.WorktreePath(env.wtDir, 7))
-			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+			return testkit.ClaudeSpecReady("arch-1", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		}
 		if c.Name == "claude" && strings.Contains(c.Stdin, "writing-plans") {
 			for _, call := range env.f.Calls {
@@ -1216,7 +1216,7 @@ func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
 				}
 			}
 			writePlanFile(t, shared.WorktreePath(env.wtDir, 7))
-			return testkit.ClaudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+			return testkit.ClaudePlanReady("plan-1"), "", nil
 		}
 		if c.Name == "claude" && strings.Contains(c.Stdin, "executing-plans") {
 			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil

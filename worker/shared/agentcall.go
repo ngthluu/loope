@@ -31,6 +31,11 @@ type ClaudeResult struct {
 	// are the reliable basis for classifying a parked issue.
 	TerminalReason string `json:"terminal_reason"`
 	APIErrorStatus int    `json:"api_error_status"`
+	// StructuredOutput is the schema-validated final object a call made with
+	// JSONSchema set produces. It is emitted by the CLI harness (validated
+	// against the schema), not free model text, so callers gate stage
+	// completion on it instead of grepping Result for a sentinel.
+	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 }
 
 // FailureSummary describes why an is_error result terminated, for the wrapped
@@ -76,6 +81,11 @@ type ClaudeCall struct {
 	Resume          string
 	DisallowedTools []string
 	SkipPermissions bool
+	// JSONSchema, when set, is passed as --json-schema: the session's final
+	// output must conform and comes back in ClaudeResult.StructuredOutput.
+	// Enforced on resumed turns too, which is the point — a resumed session
+	// can forget a prompt-taught sentinel, but not a schema the CLI enforces.
+	JSONSchema string
 	// Checkpoint, when set, marks this call as a primary pipeline session: the
 	// moment its session id appears in the stream, Call appends a SessionNode
 	// to the issue's chain (and keeps the legacy session file in step), so ANY

@@ -23,7 +23,7 @@ A feature issue passes through, in order:
 | P2 | Entry (investigate, confidence gate, fix-or-design decision) | entry-0 / entry-resume | chain node `entry` (in-flight, on session id; kind stamped once the outcome resolves) |
 | P3 | Q&A round loop (PO-proxy answerer, done-confirm) | answer-N / done-confirm-N (ephemeral) | none (rounds resume the entry session) |
 | P4 | Spec→plan handoff: pending plan node, UAT spawn, spec push + PR + comment | UAT (ephemeral, background) | PENDING `plan` node (no id) before the plan call |
-| P5 | Plan session (`PIPELINE_READY` + plan file) | plan | chain node `plan` (in-flight) |
+| P5 | Plan session (structured `status: ready` + plan file) | plan | chain node `plan` (in-flight) |
 | P6 | Plan→execute handoff: pending execute node, plan push + comment | — | PENDING `execute` node before the execute call |
 | P7 | Execute session | execute | chain node `execute` (in-flight) |
 | P8 | Ship: commit count, push, PR create/recover, PR comment | — | `pr` marker (HasPR suppresses duplicate comment) |
@@ -31,7 +31,7 @@ A feature issue passes through, in order:
 | P10 | Done: WIP→Done swap, state marker | — | state marker |
 
 The fix outcome (derived kind `bug`) ends the pipeline at P2 — the entry
-session commits the fix itself (`FIX_COMMITTED:`) and P4–P7 never run — plus
+session commits the fix itself (outcome `fix_committed`) and P4–P7 never run — plus
 the confidence gate, already-done gate, and zero-commit needs-info gate.
 Chains checkpointed before the merged entry existed (stages `brainstorm` and
 `debug`) still resume on their original routes.
@@ -43,7 +43,7 @@ Chains checkpointed before the merged entry existed (stages `brainstorm` and
 | M1 | CLI dies BEFORE its session id streams (instant crash) | no node for this session — head is the previous node or a pending node |
 | M2 | CLI killed AFTER its session id streamed (usage limit kill, network drop) | chain node with the dead session's id |
 | M3 | `is_error` result with a session id (HTTP 429) | chain node with the limited session's id |
-| M4 | Session completes off-contract (missing sentinel, sentinel without file, no commits) | node for the completed session; failure surfaces downstream |
+| M4 | Session completes off-contract (unparseable structured output, reported artifact missing, no commits) | node for the completed session; failure surfaces downstream |
 | M5 | Low confidence score | terminal `ai-needs-info`, session preserved |
 | M6 | Architect claims already implemented | close (confirmed) or push back (objected) |
 | M7 | Infra failure (git/gh call fails persistently) | park at the failing step |
@@ -71,17 +71,17 @@ Recovery invariants every scenario must satisfy:
 | P0 selection | — | deterministic sort; no session, no failure mode at this layer | `TestSelectIssuesPicksOldestFirst` (unit) |
 | P1 pickup | M7 worktree create / fetch fails | park `ai-rework` (abort), artifacts preserved | `TestToolingFailureParksForRework`, `TestToolingFailureParksInsteadOfStayingEligible` |
 | P2 entry | M1 dies before session id | park; chain empty → re-entry runs a FULLY FRESH pipeline (no `--resume` anywhere) | `TestFlowEntryDiesBeforeSessionIdRerunsFresh` (flow_matrix) |
-| P2 entry | M2 killed after id streamed | park; head = entry node → re-entry resumes THAT session with the sentinel-restating resume prompt; no second fresh entry | `TestFlowEntryKilledMidSessionResumesEntrySession` (flow_matrix) |
+| P2 entry | M2 killed after id streamed | park; head = entry node → re-entry resumes THAT session under the enforced outcome schema; no second fresh entry | `TestFlowEntryKilledMidSessionResumesEntrySession` (flow_matrix) |
 | P2 entry | M5 low confidence | `ai-needs-info`, no design work; answer + label removal resumes the SAME session with the added-lines diff as prompt | `TestFlowNeedsInfoAnswerResumesBrainstormWithDiff` (flow_matrix); unit: `TestFeaturePipelineLowConfidenceEscalates`, `TestHandleIssueResumesWithDiffAfterNeedsInfo` |
 | P2 entry | M6 already done | answerer confirms → comment, WIP→Done, issue closed; objection hands back to the session | `TestProcessOnceAlreadyDoneClosesIssue`, `TestFeaturePipelineArchitectDonePushbackContinues` |
 | P3 Q&A loop | M10 rounds exhausted | park with "exceeded N Q&A rounds" | `TestFlowQARoundsExhaustedParks` (flow_matrix); unit: `TestFeaturePipelineFailsAfterMaxRounds` |
-| P3 Q&A loop | M4 SPEC_READY without a spec file | loop keeps prodding (round consumed), no crash | `TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing` |
-| P3 Q&A loop | M4 answerer has nothing to answer | nudge prompt pushes architect to a terminal sentinel | `TestBrainstormLoopNudgesArchitectWhenNothingToAnswer` |
+| P3 Q&A loop | M4 `spec_ready` without a spec file | loop keeps prodding (round consumed), no crash | `TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing` |
+| P3 Q&A loop | M4 answerer has nothing to answer | nudge prompt pushes architect to a terminal outcome | `TestBrainstormLoopNudgesArchitectWhenNothingToAnswer` |
 | P4 spec handoff | M7 spec push / PR create fails | best-effort: logged and swallowed, pipeline continues | `TestBrainstormLoopContinuesWhenSpecPushFails` |
 | P4 spec handoff | crash between spec and plan session | pending plan node → re-entry re-runs plan FRESH from the committed spec (no brainstorm resume — the issue-5 incident) | `TestFlowPlanDiesBeforeSessionStartsResumesFreshFromSpec` (flow) |
 | P5 plan | M2/M3 killed after id | park; head = plan node → resume that plan session | `TestResumeFeaturePipelinePlanStage` (unit; same mechanism flow-verified for execute/brainstorm) |
 | P5 plan | dead resume (session gone, no salvage) | fall back to a fresh plan run on the checkpointed spec | `TestResumeFeaturePipelinePlanStageDeadResumeFallsBackToArtifact` |
-| P5 plan | M4 no `PIPELINE_READY` / no plan file | pipeline error → park | `TestRunPlanThenExecute*` error paths (unit, via `runPlanThenExecute` contract checks) |
+| P5 plan | M4 non-ready status / no plan file | pipeline error → park | `TestRunPlanThenExecute*` error paths (unit, via `runPlanThenExecute` contract checks) |
 | P6 execute handoff | M7 plan push/comment fails | best-effort, swallowed | `TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline` |
 | P6 execute handoff | M1 execute dies before session starts | pending execute node → re-entry re-runs execute FRESH on the committed plan; plan stage NOT re-run | `TestFlowExecuteDiesBeforeSessionStartsRerunsFreshFromPlan` (flow_matrix); unit: `TestResumeFeaturePipelineExecuteStageFreshFromPlanCheckpoint` |
 | P7 execute | M2 killed after id | park; head = execute node → re-entry `--resume` + `continue`, then ship | `TestFlowExecuteKilledParksThenReworkRemovalResumesSameSession` (flow) |
@@ -97,7 +97,7 @@ Recovery invariants every scenario must satisfy:
 | entry | M3 429 mid-session | park; re-entry resumes the limited session with the restated-contract wrapper around `continue` | `TestFlowEntryUsageLimitParksThenResumesAsFix` (flow) |
 | entry | M2/M1 error | park; error propagates with checkpointed session (if id streamed) | `TestRunPipelinePropagatesError`, `TestRunPipelineRecordsSessionOnError` |
 | entry | M5 low confidence | `ai-needs-info`; gate beats already-done claim | `TestRunPipelineLowConfidenceEscalates`, `TestRunPipelineLowConfidenceBeatsAlreadyDone` |
-| entry | M4 FIX_COMMITTED with no commits | `ai-needs-info` with the session's questions (not a "no commits" park) | `TestRunPipelineFixClaimWithNoCommitsEscalatesToNeedsInfo` |
+| entry | M4 `fix_committed` with no commits | `ai-needs-info` with the session's questions (not a "no commits" park) | `TestRunPipelineFixClaimWithNoCommitsEscalatesToNeedsInfo` |
 | entry | M6 already done | proxy confirms, issue closed | `TestRunPipelineAlreadyDoneConfirmed` |
 | UAT | session fails / off-contract | swallowed, pipeline unaffected | `TestBugPipelineReturnsNilWhenUATFails` scenario now in `TestRunPipelineRunsUATAfterFix` family, `TestUATSkips*` |
 | legacy chain | pre-merge `debug`/`brainstorm` head | resumes on the ORIGINAL route (bare `continue` for debug, spec contract for brainstorm) | `TestFlowLegacyBugChainResumesDebugSession` (flow); unit: `TestResumePipelineLegacyBugChainResumesDebugSession`, `TestResumePipelineLegacyBugChainEscalatesWhenStalled`, `TestResumeLegacyBugChainResumesChainNode` |

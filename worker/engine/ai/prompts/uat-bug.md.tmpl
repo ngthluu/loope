@@ -6,10 +6,10 @@ The GitHub issue being fixed:
 
 Read the issue above, then inspect what actually changed with
 `git diff origin/{{.Base}}...HEAD` and `git log origin/{{.Base}}..HEAD`, so the checklist
-describes the real fix. If that diff is empty — nothing was committed — print
-nothing at all: no markers, no checklist, no explanation.
+describes the real fix. If that diff is empty — nothing was committed — return
+an empty checklist: no items, no explanation.
 
-Output ONLY the checklist, between a line reading {{.UATBeginSentinel}} and a line reading
-{{.UATEndSentinel}}. Print nothing before or after those two lines.
+Return ONLY the checklist, as the checklist field of your final structured
+output — nothing before or after it inside that field.
 
 {{template "uat-format" .}}

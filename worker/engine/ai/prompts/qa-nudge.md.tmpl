@@ -1,6 +1,7 @@
 No decision was requested, so there is nothing to answer. Continue toward this
-issue's terminal state: commit the fix and print {{.FixCommittedSentinel}} <one-sentence summary>
-on its own line, or finish and commit the spec and print {{.SpecReadySentinel}} <path> on its
-own line, or — if nothing remains to fix or build for this issue — print
-{{.AlreadyDoneSentinel}} <one-sentence reason> on its own line. Do not start work on other
-issues in this session.
+issue's terminal state, reported in your final structured output: commit the
+fix and end with outcome "fix_committed" (one-sentence summary in detail), or
+finish and commit the spec and end with outcome "spec_ready" (repository-relative
+path in spec_path), or — if nothing remains to fix or build for this issue —
+end with outcome "already_done" (one-sentence reason in detail). Do not start
+work on other issues in this session.

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -42,48 +43,66 @@ func codeReviewTestConfig(rounds int) *shared.Config {
 	}}}
 }
 
-// codeReviewResult builds a fake claude payload whose result carries a
-// fenced STATUS line and summary.
+// codeReviewResult builds a fake claude payload whose structured output
+// carries the round's status and summary.
 func codeReviewResult(status, summary string) string {
-	return testkit.ClaudeJSON("Reviewing...\n"+codeReviewBeginSentinel+"\nSTATUS: "+status+"\n"+summary+"\n"+codeReviewEndSentinel, "cr-1")
+	return testkit.ClaudeStructured("cr-1", map[string]any{"status": status, "summary": summary})
 }
 
 func noopPush(ctx context.Context, wtPath, branch string) error { return nil }
 
-func TestParseCodeReviewClean(t *testing.T) {
-	status, summary := parseCodeReview(codeReviewBeginSentinel + "\nSTATUS: clean\nNothing to fix.\n" + codeReviewEndSentinel)
-	if status != codeReviewClean || summary != "Nothing to fix." {
-		t.Errorf("status=%q summary=%q", status, summary)
+func TestParseCodeReviewStatuses(t *testing.T) {
+	cases := []struct {
+		status  string
+		summary string
+		want    codeReviewStatus
+	}{
+		{"clean", "Nothing to fix.", codeReviewClean},
+		{"fixed", "- fixed A\n- fixed B", codeReviewFixed},
+		{"blocked", "Can't safely fix X.", codeReviewBlocked},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			res := mustResult(t, codeReviewResult(tc.status, tc.summary))
+			status, summary := parseCodeReview(res)
+			if status != tc.want || summary != tc.summary {
+				t.Errorf("status=%q summary=%q, want %q/%q", status, summary, tc.want, tc.summary)
+			}
+		})
 	}
 }
 
-func TestParseCodeReviewFixed(t *testing.T) {
-	status, summary := parseCodeReview(codeReviewBeginSentinel + "\nSTATUS: fixed\n- fixed A\n- fixed B\n" + codeReviewEndSentinel)
-	if status != codeReviewFixed || summary != "- fixed A\n- fixed B" {
-		t.Errorf("status=%q summary=%q", status, summary)
+// An off-contract session — one whose structured output is missing or carries
+// an unrecognized status — is treated as blocked with the raw result as the
+// summary, so it surfaces rather than being silently dropped.
+func TestParseCodeReviewOffContract(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+	}{
+		{"no structured output", testkit.ClaudeJSON("I could not find the marker.", "cr-1")},
+		{"unrecognized status", testkit.ClaudeStructured("cr-1", map[string]any{"status": "weird", "summary": "s"})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := mustResult(t, tc.stdout)
+			status, summary := parseCodeReview(res)
+			if status != codeReviewBlocked || summary != strings.TrimSpace(res.Result) {
+				t.Errorf("status=%q summary=%q, want blocked with the raw result verbatim", status, summary)
+			}
+		})
 	}
 }
 
-func TestParseCodeReviewBlocked(t *testing.T) {
-	status, summary := parseCodeReview(codeReviewBeginSentinel + "\nSTATUS: blocked\nCan't safely fix X.\n" + codeReviewEndSentinel)
-	if status != codeReviewBlocked || summary != "Can't safely fix X." {
-		t.Errorf("status=%q summary=%q", status, summary)
+// mustResult decodes a fake claude payload into the ClaudeResult the parsers
+// consume, the same way infra.Claude hands one back.
+func mustResult(t *testing.T, payload string) *shared.ClaudeResult {
+	t.Helper()
+	var res shared.ClaudeResult
+	if err := json.Unmarshal([]byte(payload), &res); err != nil {
+		t.Fatalf("decode fake payload: %v", err)
 	}
-}
-
-func TestParseCodeReviewFencePresentNoStatusLine(t *testing.T) {
-	raw := codeReviewBeginSentinel + "\nI reviewed the code.\n" + codeReviewEndSentinel
-	status, summary := parseCodeReview(raw)
-	if status != codeReviewBlocked || summary != raw {
-		t.Errorf("status=%q summary=%q, want blocked with the raw result verbatim", status, summary)
-	}
-}
-
-func TestParseCodeReviewNoFence(t *testing.T) {
-	status, summary := parseCodeReview("I could not find the marker.")
-	if status != codeReviewBlocked || summary != "I could not find the marker." {
-		t.Errorf("status=%q summary=%q, want blocked with the raw result verbatim", status, summary)
-	}
+	return &res
 }
 
 func TestCodeReviewStopsOnClean(t *testing.T) {

@@ -54,7 +54,7 @@ func TestFlowEntryKilledMidSessionResumesEntrySession(t *testing.T) {
 		switch {
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-dead":
 			writeSpecFile(t, env.wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-2"), "", nil
+			return testkit.ClaudeSpecReady("arch-2", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.HasPrefix(c.Stdin, entryPromptPrefix) && !killed:
 			killed = true
 			return killedAfterID("arch-dead")
@@ -146,11 +146,11 @@ func TestFlowQARoundsExhaustedParks(t *testing.T) {
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
 		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
-			return testkit.ClaudeJSON("What color should the button be?", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "What color should the button be?"), "", nil
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-1":
-			return testkit.ClaudeJSON("And what size?", "arch-1"), "", nil
+			return testkit.ClaudeEntry("arch-1", "question", "And what size?"), "", nil
 		}
-		return testkit.ClaudeJSON("ok", "eph-1"), "", nil // answerer replies
+		return testkit.ClaudeEphemeral("eph-1", "ok"), "", nil // answerer replies
 	}
 
 	if err := runCycle(env.orchestrator()); err != nil {
@@ -295,7 +295,7 @@ func TestFlowCodeReviewKilledParksThenReentersShipOnly(t *testing.T) {
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
 		case testkit.ArgAfter(c.Args, "--resume") == "cr-dead":
-			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nok\n"+codeReviewEndSentinel, "cr-2"), "", nil
+			return testkit.ClaudeStructured("cr-2", map[string]any{"status": "clean", "summary": "ok"}), "", nil
 		case strings.Contains(c.Stdin, "/code-review") && !killed:
 			killed = true
 			return killedAfterID("cr-dead")
@@ -352,9 +352,9 @@ func TestFlowNeedsInfoAnswerResumesBrainstormWithDiff(t *testing.T) {
 		switch {
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-low":
 			writeSpecFile(t, env.wt)
-			return testkit.ClaudeJSON("CONFIDENCE: 90\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-2"), "", nil
+			return testkit.ClaudeStructured("arch-2", map[string]any{"outcome": "spec_ready", "detail": "spec committed", "spec_path": "docs/superpowers/specs/2026-07-13-thing-design.md", "confidence": 90}), "", nil
 		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
-			return testkit.ClaudeJSON("CONFIDENCE: 30\nWhich database should the exporter target?", "arch-low"), "", nil
+			return testkit.ClaudeEntryConfidence("arch-low", "question", "Which database should the exporter target?", 30), "", nil
 		}
 		return happy(c)
 	}

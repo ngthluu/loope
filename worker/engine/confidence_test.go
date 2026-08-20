@@ -1,46 +1,42 @@
 package engine
 
-import "testing"
+import (
+	"testing"
 
-func TestParseConfidence(t *testing.T) {
+	"github.com/ngthluu/loope/worker/shared"
+)
+
+func TestConfidenceGate(t *testing.T) {
+	score := func(n int) *int { return &n }
 	cases := []struct {
-		in    string
-		score int
-		ok    bool
+		name      string
+		threshold int
+		er        entryResult
+		wantLow   bool
 	}{
-		{"CONFIDENCE: 85\nrest", 85, true},
-		{"CONFIDENCE:40", 40, true},
-		{"some preamble\nCONFIDENCE: 12/100\nmore", 12, true},
-		{"CONFIDENCE: high", 0, false},
-		{"no sentinel here", 0, false},
-		{"CONFIDENCE:", 0, false},
+		{"below threshold", 50, entryResult{Confidence: score(30), Detail: "what format?"}, true},
+		{"at threshold passes", 50, entryResult{Confidence: score(50)}, false},
+		{"above threshold passes", 50, entryResult{Confidence: score(85)}, false},
+		{"absent score fails open", 50, entryResult{}, false},
+		{"disabled gate ignores score", 0, entryResult{Confidence: score(1)}, false},
 	}
-	for _, c := range cases {
-		score, ok := parseConfidence(c.in)
-		if ok != c.ok || (ok && score != c.score) {
-			t.Errorf("parseConfidence(%q) = %d,%v; want %d,%v", c.in, score, ok, c.score, c.ok)
-		}
-	}
-}
-
-func TestSanitizeFeedback(t *testing.T) {
-	in := "CONFIDENCE: 30\nMissing acceptance criteria.\nWhat is the target format?"
-	got := sanitizeFeedback(in)
-	want := "Missing acceptance criteria.\nWhat is the target format?"
-	if got != want {
-		t.Errorf("sanitizeFeedback = %q, want %q", got, want)
-	}
-	// No sentinel: returned trimmed but otherwise unchanged.
-	if got := sanitizeFeedback("  hello  "); got != "hello" {
-		t.Errorf("sanitizeFeedback(no sentinel) = %q", got)
-	}
-	// A low-confidence reply that also claims already-done: the gate deliberately
-	// ignored that claim, so the sentinel must not reach the public needs-info
-	// comment either.
-	in = "CONFIDENCE: 20\nI cannot tell what behavior is wrong.\nPIPELINE_ALREADY_DONE: looks fine to me"
-	want = "I cannot tell what behavior is wrong."
-	if got := sanitizeFeedback(in); got != want {
-		t.Errorf("sanitizeFeedback = %q, want %q", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &shared.Config{ConfidenceThreshold: tc.threshold}
+			err := confidenceGate(cfg, tc.er)
+			if got := err != nil; got != tc.wantLow {
+				t.Fatalf("confidenceGate = %v, want low=%v", err, tc.wantLow)
+			}
+			if tc.wantLow {
+				lc, ok := err.(*lowConfidenceError)
+				if !ok {
+					t.Fatalf("error type = %T, want *lowConfidenceError", err)
+				}
+				if lc.score != *tc.er.Confidence || lc.feedback != tc.er.Detail {
+					t.Errorf("lowConfidenceError = (%d, %q), want (%d, %q)", lc.score, lc.feedback, *tc.er.Confidence, tc.er.Detail)
+				}
+			}
+		})
 	}
 }
 

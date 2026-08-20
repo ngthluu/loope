@@ -110,6 +110,61 @@ func ClaudeJSON(result, session string) string {
 	return string(b)
 }
 
+// ClaudeStructured builds a fake claude payload whose terminal event carries a
+// schema-validated structured_output object, as a --json-schema call produces.
+// result mirrors the real CLI, whose result text is the JSON-encoded object.
+func ClaudeStructured(session string, structured map[string]any) string {
+	so, _ := json.Marshal(structured)
+	b, _ := json.Marshal(map[string]any{
+		"result": string(so), "session_id": session, "is_error": false, "total_cost_usd": 0.5,
+		"structured_output": structured,
+	})
+	return string(b)
+}
+
+// ClaudeEntry builds a fake entry-turn payload: outcome plus optional detail.
+func ClaudeEntry(session, outcome, detail string) string {
+	return ClaudeStructured(session, map[string]any{"outcome": outcome, "detail": detail})
+}
+
+// ClaudeEntryConfidence is ClaudeEntry with the opening turn's confidence score.
+func ClaudeEntryConfidence(session, outcome, detail string, confidence int) string {
+	return ClaudeStructured(session, map[string]any{"outcome": outcome, "detail": detail, "confidence": confidence})
+}
+
+// ClaudeSpecReady builds a fake entry-turn payload reporting a committed spec.
+func ClaudeSpecReady(session, path string) string {
+	return ClaudeStructured(session, map[string]any{"outcome": "spec_ready", "detail": "spec committed", "spec_path": path})
+}
+
+// ClaudePlanReady builds a fake plan-session payload reporting the plan ready.
+func ClaudePlanReady(session string) string {
+	return ClaudeStructured(session, map[string]any{"status": "ready"})
+}
+
+// ClaudeAnswer builds a fake answerer payload carrying a reply.
+func ClaudeAnswer(session, answer string) string {
+	return ClaudeStructured(session, map[string]any{"has_answer": true, "answer": answer})
+}
+
+// ClaudeNothingToAnswer builds a fake answerer payload for a status update.
+func ClaudeNothingToAnswer(session string) string {
+	return ClaudeStructured(session, map[string]any{"has_answer": false})
+}
+
+// ClaudeEphemeral builds a catch-all payload for the ephemeral sessions a flow
+// test does not script individually (answerer, UAT). It carries every field
+// those parsers read, so whichever one receives it decodes cleanly.
+func ClaudeEphemeral(session, answer string) string {
+	return ClaudeStructured(session, map[string]any{"has_answer": true, "answer": answer, "checklist": ""})
+}
+
+// ClaudeDoneConfirm builds a fake done-confirm payload: a confirmation when
+// objection is "", an objection otherwise.
+func ClaudeDoneConfirm(session, objection string) string {
+	return ClaudeStructured(session, map[string]any{"confirmed": objection == "", "objection": objection})
+}
+
 // ClaudeErrorJSON builds a fake claude payload that reports an error but still
 // carries a valid session id — e.g. a session/rate limit (HTTP 429). This is
 // exactly the case where we most want to preserve the session for -rework.

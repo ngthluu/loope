@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ngthluu/loope/worker/shared"
 )
@@ -18,13 +20,33 @@ import (
 // classifies, never resumes or records the issue's pipeline session, and restores
 // whatever state label the issue had when it is done.
 
+// mergeResolveResultSchema is the --json-schema for the resolve session. Its
+// status only improves the outbound comment — pass/fail is decided by git
+// state (MergeInProgress/HasUnmergedPaths), never by the session's
+// self-report, matching afterFix's distrust-and-verify stance.
+const mergeResolveResultSchema = `{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["resolved", "blocked"],
+      "description": "resolved: the merge was concluded with a merge commit. blocked: conflicts were left unresolved for a human decision."
+    },
+    "detail": {
+      "type": "string",
+      "description": "One-sentence reason. Required when status is blocked."
+    }
+  },
+  "required": ["status"]
+}`
+
+// mergeResolveResult mirrors mergeResolveResultSchema.
+type mergeResolveResult struct {
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
 const (
-	// mergeResolveSentinel prefixes the one status line the resolve session
-	// prints last: "MERGE_RESOLVE_STATUS: resolved" or "MERGE_RESOLVE_STATUS:
-	// blocked <reason>". It only improves the outbound comment — pass/fail is
-	// decided by git state (MergeInProgress/HasUnmergedPaths), never by the
-	// session's self-report, matching afterFix's distrust-and-verify stance.
-	mergeResolveSentinel = "MERGE_RESOLVE_STATUS:"
 	// mergeResolvePriorFile records the state label the issue carried when the
 	// merge-resolve run picked it up, so the label survives a daemon crash:
 	// SweepOrphans strips the orphaned ai-wip but has no idea this run swapped
@@ -64,11 +86,17 @@ func RunMergeResolve(ctx context.Context, c shared.Agent, cfg *shared.Config, wt
 		Model:           cfg.Models.MergeResolveConfig(),
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		JSONSchema:      mergeResolveResultSchema,
 	})
 	if cerr != nil {
 		return "", cerr
 	}
-	summary, _ = parseSentinelLine(res.Result, mergeResolveSentinel)
+	// Best-effort: the summary only feeds the outbound comment, so an
+	// undecodable structured output leaves it "" rather than failing the run.
+	var mr mergeResolveResult
+	if json.Unmarshal(res.StructuredOutput, &mr) == nil {
+		summary = strings.TrimSpace(mr.Status + " " + mr.Detail)
+	}
 	// Git state, not the sentinel, decides the outcome. Both checks are needed:
 	// unmerged paths alone misses a session that resolved every file but never
 	// committed, and MERGE_HEAD alone misses one that committed with `git

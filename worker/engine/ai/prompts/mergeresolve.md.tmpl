@@ -18,6 +18,6 @@ NOT commit — and explain why.
 HEADLESS MODE: you cannot ask questions (AskUserQuestion is disabled). Make
 reasonable calls and note them in the merge commit message.
 
-End your reply with exactly one line, the LAST line, in one of these forms:
-{{.MergeResolveSentinel}} resolved
-{{.MergeResolveSentinel}} blocked <one-sentence reason>
+Report the outcome in your final structured output: status "resolved" when the
+merge was concluded with a merge commit, or status "blocked" with a
+one-sentence reason in detail.

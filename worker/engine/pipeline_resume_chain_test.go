@@ -23,11 +23,11 @@ func TestFeaturePipelineRecordsLineageChain(t *testing.T) {
 		switch {
 		case strings.Contains(c.Stdin, "brainstorming"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
+			return testkit.ClaudeSpecReady("arch-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "exec-sess"), "", nil
 		}
@@ -78,7 +78,7 @@ func TestResumeFeaturePipelinePlanStageDeadResumeFallsBackToArtifact(t *testing.
 		case strings.Contains(c.Stdin, "writing-plans"):
 			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-2"), "", nil
+			return testkit.ClaudePlanReady("plan-2"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "exec-1"), "", nil
 		}
@@ -166,7 +166,7 @@ func TestResumeLegacyBugChainResumesChainNode(t *testing.T) {
 	logDir := t.TempDir()
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		if testkit.ArgAfter(c.Args, "--resume") == "debug-sess" {
-			return testkit.ClaudeJSON("fixed", "debug-sess-2"), "", nil
+			return testkit.ClaudeEntry("debug-sess-2", "fix_committed", "fixed"), "", nil
 		}
 		t.Errorf("unexpected call: %+v", c)
 		return "", "", nil

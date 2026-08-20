@@ -49,26 +49,14 @@ func mustRender(name string, data map[string]any) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
-// promptData seeds template data with every sentinel constant. The sentinels are
-// never written as literal text in a .tmpl file: the same constants drive the
-// parsers in confidence.go, done.go, and pipeline_feature.go, and hardcoding
-// them in the prompts would let the instruction and the parser drift apart.
+// promptData seeds template data with the shared markers. Session outcomes are
+// no longer prompt-taught sentinels: every session call passes a --json-schema
+// whose field descriptions carry the contract, so the templates only describe
+// intent (which outcome to reach when) in prose.
 func promptData() map[string]any {
 	return map[string]any{
-		"ConfidenceSentinel":      confidenceSentinel,
-		"SpecReadySentinel":       specReadySentinel,
-		"FixCommittedSentinel":    fixCommittedSentinel,
-		"ReadySentinel":           readySentinel,
-		"AlreadyDoneSentinel":     alreadyDoneSentinel,
-		"NothingToAnswerSentinel": nothingToAnswerSentinel,
-		"DoneConfirmSentinel":     doneConfirmSentinel,
-		"UATBeginSentinel":        uatBeginSentinel,
-		"UATEndSentinel":          uatEndSentinel,
-		"UATMarker":               uatMarker,
-		"BotMarker":               shared.BotMarker,
-		"CodeReviewBeginSentinel": codeReviewBeginSentinel,
-		"CodeReviewEndSentinel":   codeReviewEndSentinel,
-		"MergeResolveSentinel":    mergeResolveSentinel,
+		"UATMarker": uatMarker,
+		"BotMarker": shared.BotMarker,
 	}
 }
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,20 +13,30 @@ import (
 	"github.com/ngthluu/loope/worker/shared"
 )
 
-const (
-	// codeReviewBeginSentinel / codeReviewEndSentinel fence the status line and
-	// summary inside the session's result text. Injected into the prompt via
-	// promptData(), never hardcoded in a template.
-	codeReviewBeginSentinel = "CODEREVIEW_BEGIN"
-	codeReviewEndSentinel   = "CODEREVIEW_END"
-	// codeReviewRoundFile holds the last completed round number, so a daemon
-	// restart mid-loop resumes at the next round instead of redoing finished
-	// ones (the CLAUDE.md "continue from existing state" principle).
-	codeReviewRoundFile = "codereview-round"
-)
+// codeReviewRoundFile holds the last completed round number, so a daemon
+// restart mid-loop resumes at the next round instead of redoing finished
+// ones (the CLAUDE.md "continue from existing state" principle).
+const codeReviewRoundFile = "codereview-round"
+
+// codeReviewResultSchema is the --json-schema for each review round's session.
+const codeReviewResultSchema = `{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["clean", "fixed", "blocked"],
+      "description": "clean: /code-review found nothing to fix. fixed: fixes were applied and committed. blocked: a finding can't be safely auto-fixed."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short bullet summary of what was fixed, or explanation of what is blocked. Empty when clean."
+    }
+  },
+  "required": ["status", "summary"]
+}`
 
 // codeReviewStatus is the outcome a review-and-fix session reports for one
-// round, parsed from its STATUS: line.
+// round, from its structured output's status field.
 type codeReviewStatus string
 
 const (
@@ -93,6 +104,7 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 			Dir: wtPath, Label: fmt.Sprintf("codereview-%d", i), Prompt: codeReviewPrompt(i, rounds, base),
 			Model:           cfg.Models.CodeReview.ModelConfig,
 			SkipPermissions: true,
+			JSONSchema:      codeReviewResultSchema,
 			// Each round is a primary session: checkpointed in-flight, so even
 			// a round killed mid-run (429, crash) is the chain head the
 			// post-park re-entry resumes.
@@ -112,7 +124,7 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 		if err := r.Push(ctx, wtPath, branch); err != nil {
 			return fmt.Errorf("issue #%d: code review round %d push failed: %w", r.Num, i, err)
 		}
-		status, summary := parseCodeReview(res.Result)
+		status, summary := parseCodeReview(res)
 		if err := r.Target.ReviewComment(ctx, prNum, codeReviewComment(i, rounds, status, summary)); err != nil {
 			log.Printf("issue #%d: code review round %d comment failed: %v", r.Num, i, err)
 		}
@@ -127,40 +139,23 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 }
 
 // parseCodeReview extracts the status and summary from a review session's
-// result: the text between codeReviewBeginSentinel/codeReviewEndSentinel,
-// whose first line is "STATUS: clean|fixed|blocked" and the rest is the
-// summary. A missing fence, a missing/unrecognized STATUS line, is treated as
-// blocked with the raw result as the summary, so an off-contract session
-// still surfaces something rather than being silently dropped.
-func parseCodeReview(s string) (codeReviewStatus, string) {
-	i := strings.Index(s, codeReviewBeginSentinel)
-	if i < 0 {
-		return codeReviewBlocked, strings.TrimSpace(s)
+// schema-validated structured output. An undecodable or unrecognized result
+// is treated as blocked with the raw result text as the summary, so an
+// off-contract session still surfaces something rather than being silently
+// dropped.
+func parseCodeReview(res *shared.ClaudeResult) (codeReviewStatus, string) {
+	var cr struct {
+		Status  string `json:"status"`
+		Summary string `json:"summary"`
 	}
-	rest := s[i+len(codeReviewBeginSentinel):]
-	if j := strings.Index(rest, codeReviewEndSentinel); j >= 0 {
-		rest = rest[:j]
+	if json.Unmarshal(res.StructuredOutput, &cr) != nil {
+		return codeReviewBlocked, strings.TrimSpace(res.Result)
 	}
-	rest = strings.TrimSpace(rest)
-	lines := strings.SplitN(rest, "\n", 2)
-	first := strings.TrimSpace(lines[0])
-	statusText, ok := strings.CutPrefix(first, "STATUS:")
-	if !ok {
-		return codeReviewBlocked, strings.TrimSpace(s)
-	}
-	summary := ""
-	if len(lines) > 1 {
-		summary = strings.TrimSpace(lines[1])
-	}
-	switch strings.TrimSpace(statusText) {
-	case string(codeReviewClean):
-		return codeReviewClean, summary
-	case string(codeReviewFixed):
-		return codeReviewFixed, summary
-	case string(codeReviewBlocked):
-		return codeReviewBlocked, summary
+	switch codeReviewStatus(cr.Status) {
+	case codeReviewClean, codeReviewFixed, codeReviewBlocked:
+		return codeReviewStatus(cr.Status), strings.TrimSpace(cr.Summary)
 	default:
-		return codeReviewBlocked, strings.TrimSpace(s)
+		return codeReviewBlocked, strings.TrimSpace(res.Result)
 	}
 }
 

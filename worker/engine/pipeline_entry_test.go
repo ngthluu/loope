@@ -12,10 +12,10 @@ import (
 	"github.com/ngthluu/loope/worker/testkit"
 )
 
-// The fix route: one entry session commits the fix and prints FIX_COMMITTED —
+// The fix route: one entry session commits the fix and reports fix_committed —
 // the whole pipeline is that single call.
 func TestRunPipelineSingleFixSession(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("FIX_COMMITTED: fixed the crash", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntry("s1", "fix_committed", "fixed the crash")}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus", Effort: "high"}}}
 	if err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1); err != nil {
@@ -54,9 +54,9 @@ func TestRunPipelineAlreadyDoneConfirmed(t *testing.T) {
 		prompts = append(prompts, c.Stdin)
 		switch len(prompts) {
 		case 1:
-			return testkit.ClaudeJSON("I reproduced nothing; the guard already exists.\nPIPELINE_ALREADY_DONE: fixed in guard.go", "s1"), "", nil
+			return testkit.ClaudeEntry("s1", "already_done", "fixed in guard.go"), "", nil
 		case 2: // answerer confirmation
-			return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+			return testkit.ClaudeDoneConfirm("ans-1", ""), "", nil
 		}
 		t.Fatalf("unexpected call %d", len(prompts))
 		return "", "", nil
@@ -78,7 +78,7 @@ func TestRunPipelineAlreadyDoneConfirmed(t *testing.T) {
 func TestRunPipelineFixOutcomeStampsBugKind(t *testing.T) {
 	logDir := t.TempDir()
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
-		return testkit.ClaudeJSON("FIX_COMMITTED: done", "entry-sess"), "", nil
+		return testkit.ClaudeEntry("entry-sess", "fix_committed", "done"), "", nil
 	}}
 	c := infra.NewClaude(f, logDir, "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
@@ -106,10 +106,10 @@ func TestRunPipelineSpecOutcomeStampsFeatureKind(t *testing.T) {
 		switch {
 		case strings.HasPrefix(c.Stdin, "Handle this GitHub issue:"):
 			writeSpecFile(t, wt)
-			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "entry-sess"), "", nil
+			return testkit.ClaudeSpecReady("entry-sess", "docs/superpowers/specs/2026-07-13-thing-design.md"), "", nil
 		case strings.Contains(c.Stdin, "writing-plans"):
 			writePlanFile(t, wt)
-			return testkit.ClaudeJSON("PIPELINE_READY", "plan-sess"), "", nil
+			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
 			return testkit.ClaudeJSON("executed", "exec-sess"), "", nil
 		}
@@ -152,8 +152,8 @@ func TestRunPipelineLowConfidenceEscalates(t *testing.T) {
 	// A one-element queue, not a handler: a handler would answer every call with
 	// the same low score, so the call-count assertion below could never catch a
 	// pipeline that kept going.
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON(
-		"CONFIDENCE: 40\nNo stack trace and no repro steps.\nWhich command triggers the crash?", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence(
+		"s1", "question", "No stack trace and no repro steps.\nWhich command triggers the crash?", 40)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
 	err := RunPipeline(context.Background(), c, cfg, "/wt", "crashes sometimes on startup", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1)
@@ -164,8 +164,8 @@ func TestRunPipelineLowConfidenceEscalates(t *testing.T) {
 	if lc.score != 40 {
 		t.Errorf("score = %d, want 40", lc.score)
 	}
-	if !strings.Contains(lc.feedback, "repro steps") || strings.Contains(lc.feedback, confidenceSentinel) {
-		t.Errorf("feedback should carry the reasons without the CONFIDENCE line: %q", lc.feedback)
+	if !strings.Contains(lc.feedback, "repro steps") {
+		t.Errorf("feedback should carry the session's reasons: %q", lc.feedback)
 	}
 	if len(f.Calls) != 1 {
 		t.Errorf("low confidence must stop after the entry turn, got %d calls", len(f.Calls))
@@ -173,7 +173,7 @@ func TestRunPipelineLowConfidenceEscalates(t *testing.T) {
 }
 
 func TestRunPipelineHighConfidenceProceeds(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("CONFIDENCE: 85\nFIX_COMMITTED: done", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence("s1", "fix_committed", "done", 85)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
 	if err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1); err != nil {
@@ -183,7 +183,7 @@ func TestRunPipelineHighConfidenceProceeds(t *testing.T) {
 
 // A score exactly at the threshold is not below it, so it proceeds.
 func TestRunPipelineConfidenceAtThresholdProceeds(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("CONFIDENCE: 70\nFIX_COMMITTED: done", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence("s1", "fix_committed", "done", 70)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
 	if err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1); err != nil {
@@ -194,7 +194,7 @@ func TestRunPipelineConfidenceAtThresholdProceeds(t *testing.T) {
 // confidenceThreshold: 0 disables the gate entirely — even an explicit low score
 // in the output is ignored.
 func TestRunPipelineZeroThresholdIgnoresScore(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("CONFIDENCE: 5\nFIX_COMMITTED: done", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence("s1", "fix_committed", "done", 5)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
 	if err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1); err != nil {
@@ -205,8 +205,8 @@ func TestRunPipelineZeroThresholdIgnoresScore(t *testing.T) {
 // Confidence outranks already-done: a session too unsure must not be able to
 // close the issue as already implemented either.
 func TestRunPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON(
-		"CONFIDENCE: 20\nI cannot tell what behavior is wrong.\nPIPELINE_ALREADY_DONE: looks fine to me", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence(
+		"s1", "already_done", "I cannot tell what behavior is wrong; looks fine to me", 20)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
 	err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1)
@@ -218,10 +218,12 @@ func TestRunPipelineLowConfidenceBeatsAlreadyDone(t *testing.T) {
 	if errors.As(err, &done) {
 		t.Error("a low-confidence session must not close the issue as already done")
 	}
-	// The feedback is posted verbatim as a public GitHub comment, so the ignored
-	// already-done claim must not leak into it.
-	if strings.Contains(lc.feedback, alreadyDoneSentinel) {
-		t.Errorf("needs-info feedback must not leak the already-done sentinel: %q", lc.feedback)
+	// The feedback is posted verbatim as a public GitHub comment. It carries the
+	// session's own detail text — the outcome itself lives in a separate
+	// structured field, so an ignored already-done claim can no longer leak
+	// into the comment as a stray sentinel line.
+	if !strings.Contains(lc.feedback, "cannot tell what behavior is wrong") {
+		t.Errorf("needs-info feedback must carry the session's detail: %q", lc.feedback)
 	}
 }
 
@@ -231,9 +233,9 @@ func TestRunPipelineRunsUATAfterFix(t *testing.T) {
 	f.Handler = func(c testkit.RCall) (string, string, error) {
 		prompts = append(prompts, c.Stdin)
 		if len(prompts) == 1 {
-			return testkit.ClaudeJSON("FIX_COMMITTED: fixed", "entry-1"), "", nil
+			return testkit.ClaudeEntry("entry-1", "fix_committed", "fixed"), "", nil
 		}
-		return testkit.ClaudeJSON(uatBeginSentinel+"\n- [ ] reproduce the old crash and see it gone\n"+uatEndSentinel, "uat-1"), "", nil
+		return testkit.ClaudeStructured("uat-1", map[string]any{"checklist": "- [ ] reproduce the old crash and see it gone"}), "", nil
 	}
 	tgt := &fakeUATTarget{body: "the issue body"}
 	c := infra.NewClaude(f, "", "")
@@ -257,12 +259,12 @@ func TestRunPipelineRunsUATAfterFix(t *testing.T) {
 	}
 }
 
-// A FIX_COMMITTED claim with zero commits ahead of base is not a fix: the run
+// A fix_committed outcome with zero commits ahead of base is not a fix: the run
 // escalates to needs-info with the session's output as the public comment,
 // instead of reaching ship's "produced no commits" park (issues #70/#83).
 func TestRunPipelineFixClaimWithNoCommitsEscalatesToNeedsInfo(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON(
-		"I found the root cause in parseCodeReview. Want me to proceed with a fix?\nFIX_COMMITTED: pending", "s1")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntry("s1", "fix_committed",
+		"I found the root cause in parseCodeReview. Want me to proceed with a fix?")}}}
 	tgt := &fakeUATTarget{body: "body"}
 	wt := infra.NewWorktreeAt(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: "0\n"}}}, "", testkit.TestRetry)
 	c := infra.NewClaude(f, "", "")
@@ -283,14 +285,18 @@ func TestRunPipelineFixClaimWithNoCommitsEscalatesToNeedsInfo(t *testing.T) {
 	}
 }
 
-// A FIX_COMMITTED quoted mid-sentence must not terminate the loop — the
-// sentinel is line-anchored, same as SPEC_READY (issues #73/#76).
-func TestParseFixCommittedIsLineAnchored(t *testing.T) {
-	if _, ok := parseFixCommitted("I will print `FIX_COMMITTED:` once done."); ok {
-		t.Error("mid-sentence mention must not parse as the terminal sentinel")
-	}
-	if got, ok := parseFixCommitted("all tests pass\nFIX_COMMITTED: fixed the guard\n"); !ok || got != "fixed the guard" {
-		t.Errorf("parseFixCommitted = %q,%v", got, ok)
+// A session that merely MENTIONS a terminal outcome in its prose can no longer
+// terminate the loop: the outcome is a schema-enforced enum field, so prose is
+// only ever carried in detail (the class of false positive behind issues
+// #73/#76, now unrepresentable).
+func TestEntryOutcomeComesFromStructuredFieldNotProse(t *testing.T) {
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntry("s1", "question",
+		"I will report fix_committed once done.")}}}
+	c := infra.NewClaude(f, "", "")
+	cfg := &shared.Config{MaxQARounds: 0, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
+	err := RunPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, testGH(), nil, "ai/issue-1", "T", 1)
+	if err == nil || !strings.Contains(err.Error(), "Q&A rounds") {
+		t.Fatalf("prose naming an outcome must not terminate the loop, got %v", err)
 	}
 }
 
@@ -301,7 +307,7 @@ func TestResumePipelineEntryStage(t *testing.T) {
 	logDir := t.TempDir()
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		if testkit.ArgAfter(c.Args, "--resume") == "entry-sess" && strings.HasPrefix(c.Stdin, "continue") {
-			return testkit.ClaudeJSON("FIX_COMMITTED: done", "entry-sess-2"), "", nil
+			return testkit.ClaudeEntry("entry-sess-2", "fix_committed", "done"), "", nil
 		}
 		return "", "unexpected call", fmt.Errorf("unexpected call: %+v", c)
 	}}
@@ -311,12 +317,17 @@ func TestResumePipelineEntryStage(t *testing.T) {
 	if err := ResumePipeline(context.Background(), c, cfg, "/wt", "the issue", "", "main", nil, node, "continue", testGH(), nil, "ai/issue-1", "T", 1); err != nil {
 		t.Fatal(err)
 	}
-	// The resumed prompt restates all three terminal sentinels.
+	// The resumed prompt restates all three terminal outcomes.
 	prompt := f.Calls[0].Stdin
-	for _, sentinel := range []string{fixCommittedSentinel, specReadySentinel, alreadyDoneSentinel} {
-		if !strings.Contains(prompt, sentinel) {
-			t.Errorf("resumed prompt must restate %s, got %q", sentinel, prompt)
+	for _, outcome := range []string{entryOutcomeFix, entryOutcomeSpec, entryOutcomeDone} {
+		if !strings.Contains(prompt, outcome) {
+			t.Errorf("resumed prompt must restate %s, got %q", outcome, prompt)
 		}
+	}
+	// And the schema is enforced on the resumed turn, so the contract holds even
+	// if the prose is ignored (the issue-5 incident).
+	if !strings.Contains(testkit.ArgAfter(f.Calls[0].Args, "--json-schema"), "fix_committed") {
+		t.Error("resumed entry turn must carry the entry outcome schema")
 	}
 	if got := shared.ResolvedKind(logDir); got != "bug" {
 		t.Errorf("ResolvedKind = %q, want bug stamped on the resumed fix outcome", got)
@@ -326,7 +337,7 @@ func TestResumePipelineEntryStage(t *testing.T) {
 // TestResumePipelineEntryStageLowConfidenceEscalates: the confidence gate runs
 // against a resumed entry turn too.
 func TestResumePipelineEntryStageLowConfidenceEscalates(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("CONFIDENCE: 20\nstill unclear", "entry-sess-2")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntryConfidence("entry-sess-2", "question", "still unclear", 20)}}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}, ConfidenceThreshold: 70}
 	node := shared.SessionNode{ID: "entry-sess", Stage: shared.StageEntry}
@@ -344,7 +355,7 @@ func TestResumePipelinePendingEntryNodeRunsFresh(t *testing.T) {
 		if testkit.ArgAfter(c.Args, "--resume") != "" {
 			t.Errorf("a pending entry node must not resume anything, got %+v", c)
 		}
-		return testkit.ClaudeJSON("FIX_COMMITTED: done", "fresh-entry"), "", nil
+		return testkit.ClaudeEntry("fresh-entry", "fix_committed", "done"), "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
@@ -364,7 +375,7 @@ func TestResumePipelineLegacyBugChainResumesDebugSession(t *testing.T) {
 	logDir := t.TempDir()
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		if testkit.ArgAfter(c.Args, "--resume") == "debug-sess" && c.Stdin == "continue" {
-			return testkit.ClaudeJSON("Fixed and committed.", "debug-sess-2"), "", nil
+			return testkit.ClaudeEntry("debug-sess-2", "fix_committed", "Fixed and committed."), "", nil
 		}
 		return "", "unexpected call", fmt.Errorf("unexpected call: %+v", c)
 	}}
@@ -384,8 +395,8 @@ func TestResumePipelineLegacyBugChainResumesDebugSession(t *testing.T) {
 // without committing (issue #83) must route back to needs-info, not fall
 // through to ship's "produced no commits" park.
 func TestResumePipelineLegacyBugChainEscalatesWhenStalled(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON(
-		"I still can't responsibly pick a fix. Please answer the 5 questions above.", "s2")}}}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntry("s2", "question",
+		"I still can't responsibly pick a fix. Please answer the 5 questions above.")}}}
 	wt := infra.NewWorktreeAt(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: "0\n"}}}, "", testkit.TestRetry)
 	c := infra.NewClaude(f, t.TempDir(), "")
 	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}

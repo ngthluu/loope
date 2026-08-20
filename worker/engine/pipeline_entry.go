@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -12,11 +13,74 @@ import (
 
 // This file is the unified pipeline: one merged entry session investigates the
 // issue and decides its own route — fix a defect directly (bug outcome,
-// FIX_COMMITTED) or design first (feature outcome, SPEC_READY into plan and
+// fix_committed) or design first (feature outcome, spec_ready into plan and
 // execute). The kind is DERIVED from that outcome and stamped onto the session
 // chain (Agent.SetKind), not decided up front: the pre-pipeline triage
 // classifier this replaced kept routing design-shaped "fixes" into the one-shot
 // debug session.
+
+// Entry outcome values — the enum an entry turn's structured output must pick
+// from. Terminal outcomes derive the pipeline kind (fix → bug, spec →
+// feature); "question" keeps the Q&A loop going.
+const (
+	entryOutcomeFix      = "fix_committed"
+	entryOutcomeSpec     = "spec_ready"
+	entryOutcomeDone     = "already_done"
+	entryOutcomeQuestion = "question"
+)
+
+// entryResultSchema is the --json-schema for every entry-stage turn (fresh,
+// round, and resumed — including legacy brainstorm/debug resumes). The CLI
+// enforces the shape on every turn, so a resumed session cannot "forget" the
+// contract the way prompt-taught sentinels were forgotten (the issue-5
+// incident); the field descriptions carry the semantics for turns whose
+// prompt is a bare trigger.
+const entryResultSchema = `{
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["fix_committed", "spec_ready", "already_done", "question"],
+      "description": "fix_committed: a fix for this issue is committed on this branch. spec_ready: the spec document for this issue is written and committed on this branch. already_done: the issue's work is already fully implemented in this codebase. question: you need an answer or approval from the product owner before reaching a terminal outcome (also used for a status update)."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "How confidently the issue can be handled as written, 0-100. Report it on the opening turn of the session; omit on later turns."
+    },
+    "spec_path": {
+      "type": "string",
+      "description": "Committed spec file path relative to the repository root. Required when outcome is spec_ready."
+    },
+    "detail": {
+      "type": "string",
+      "description": "fix_committed: one-sentence summary of the fix. spec_ready: one-sentence summary of the spec. already_done: one-sentence reason. question: the full question or message for the product owner."
+    }
+  },
+  "required": ["outcome", "detail"]
+}`
+
+// entryResult mirrors entryResultSchema. Confidence is a pointer so an absent
+// score is distinguishable from 0 — the gate fails open on absence, exactly
+// as the old parser did on an unparseable sentinel.
+type entryResult struct {
+	Outcome    string `json:"outcome"`
+	Confidence *int   `json:"confidence"`
+	SpecPath   string `json:"spec_path"`
+	Detail     string `json:"detail"`
+}
+
+// parseEntry decodes an entry turn's schema-validated structured output. An
+// undecodable result is off-contract (only possible when the CLI failed to
+// enforce the schema) and surfaces as a hard error rather than a guess.
+func parseEntry(res *shared.ClaudeResult) (entryResult, error) {
+	var er entryResult
+	if err := json.Unmarshal(res.StructuredOutput, &er); err != nil {
+		return er, fmt.Errorf("entry session returned no structured outcome: %v", err)
+	}
+	return er, nil
+}
 
 // RunPipeline drives the merged entry session for a fresh issue: score
 // confidence, then loop the entry session against the product-owner proxy
@@ -31,10 +95,14 @@ func RunPipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath
 	if err != nil {
 		return err
 	}
-	if err := confidenceGate(cfg, res.Result); err != nil {
+	er, err := parseEntry(res)
+	if err != nil {
 		return err
 	}
-	return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+	if err := confidenceGate(cfg, er); err != nil {
+		return err
+	}
+	return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
 }
 
 // ResumePipeline re-enters the pipeline at the chain node a re-entry resolved
@@ -56,17 +124,22 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 			return fresh()
 		}
 		c.RecordSnapshot(issueContent)
-		// The trigger alone teaches a resumed session nothing about the sentinel
-		// contract; restate all three terminal sentinels so a session re-entered
-		// past its fix or spec can still terminate (issue-5 incident).
+		// The schema enforces the outcome contract on the resumed turn; the
+		// resume prompt still restates it in prose so the session reaches the
+		// right terminal outcome by intent, not by forced guess (issue-5
+		// incident).
 		res, err := entryCall(ctx, c, cfg, wtPath, "entry-resume", entryResumePrompt(prompt), node.ID)
 		if err != nil {
 			return err
 		}
-		if err := confidenceGate(cfg, res.Result); err != nil {
+		er, err := parseEntry(res)
+		if err != nil {
 			return err
 		}
-		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+		if err := confidenceGate(cfg, er); err != nil {
+			return err
+		}
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
 	case shared.StagePlan:
 		if node.ID == "" {
 			// Pending node: the plan session never started (or a legacy
@@ -105,7 +178,7 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 		return nil
 	case shared.StageBrainstorm:
 		// LEGACY: a design session from before the merged entry. Resume it on
-		// the old feature contract (brainstormResumePrompt restates SPEC_READY /
+		// the old feature contract (brainstormResumePrompt restates spec_ready /
 		// already-done only) and continue through the shared entry loop.
 		if node.ID == "" {
 			return fresh()
@@ -116,15 +189,20 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 			Model:           cfg.Models.Architect,
 			SkipPermissions: true,
 			DisallowedTools: []string{"AskUserQuestion"},
+			JSONSchema:      entryResultSchema,
 			Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageBrainstorm},
 		})
 		if err != nil {
 			return err
 		}
-		if err := confidenceGate(cfg, res.Result); err != nil {
+		er, err := parseEntry(res)
+		if err != nil {
 			return err
 		}
-		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+		if err := confidenceGate(cfg, er); err != nil {
+			return err
+		}
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
 	default:
 		// LEGACY: chains whose kind was decided up front by triage. A "bug"
 		// chain resumes its debug session whatever stage string it carries
@@ -137,12 +215,17 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 				Model:           cfg.Models.Architect,
 				SkipPermissions: true,
 				DisallowedTools: []string{"AskUserQuestion"},
+				JSONSchema:      entryResultSchema,
 				Checkpoint:      &shared.CallCheckpoint{Kind: "bug", Stage: shared.StageDebug},
 			})
 			if err != nil {
 				return err
 			}
-			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, res.Result)
+			er, err := parseEntry(res)
+			if err != nil {
+				return err
+			}
+			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, er)
 		}
 		return fresh()
 	}
@@ -150,16 +233,17 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 
 // entryLoop is the entry session's Q&A round loop, shared by a fresh entry-0
 // call, a resumed entry session, and a resumed legacy brainstorm session:
-// sessionID/output are the id and result text of whichever call preceded it.
-// Each round it checks the three terminal sentinels, stamping the derived kind
-// the moment one resolves, and otherwise relays a product-owner-proxy reply.
-func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, sessionID, output string, start time.Time, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+// sessionID/er are the id and structured outcome of whichever call preceded
+// it. Each round it dispatches on the terminal outcomes, stamping the derived
+// kind the moment one resolves, and otherwise relays a product-owner-proxy
+// reply.
+func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, sessionID string, er entryResult, start time.Time, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
 	for round := 1; ; round++ {
-		// The session signals a committed spec: the feature outcome. Hand off to
+		// The session reports a committed spec: the feature outcome. Hand off to
 		// the fresh plan session, then execute. If it claims a spec but none is
 		// on disk, fall through and keep prodding (mirrors the plan-file behavior).
-		if rel, ok := parseSpecReady(output); ok {
-			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
+		if er.Outcome == entryOutcomeSpec {
+			if specPath, ok := resolveSpec(wtPath, er.SpecPath, start); ok {
 				c.SetKind("feature")
 				// Spec committed: append a PENDING plan node BEFORE the plan
 				// call starts, so a crash anywhere in the handoff (push, PR,
@@ -182,33 +266,38 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(specPath), "", start, gh, wt, branch, n)
 			}
 		}
-		// The session signals a committed fix: the bug outcome. afterFix's gates
+		// The session reports a committed fix: the bug outcome. afterFix's gates
 		// (confidence, already-done, zero-commit needs-info fallback, UAT) are
 		// the same ones the old debug pipeline ran.
-		if _, ok := parseFixCommitted(output); ok {
+		if er.Outcome == entryOutcomeFix {
 			c.SetKind("bug")
-			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, output)
+			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, er)
 		}
 
 		var reply string
 		donePushback := false
-		if reason, ok := parseAlreadyDone(output); ok {
+		if er.Outcome == entryOutcomeDone {
 			// The session claims already implemented — the answerer (PO proxy)
 			// must confirm before we close. This confirmation is terminal, not a
 			// bounded round.
 			confirm, err := c.Call(ctx, shared.ClaudeCall{
 				Dir: wtPath, Label: fmt.Sprintf("done-confirm-%d", round),
-				Prompt:          doneConfirmPrompt(issueContent, persona, reason),
+				Prompt:          doneConfirmPrompt(issueContent, persona, er.Detail),
 				Model:           cfg.Models.Answerer,
 				SkipPermissions: true,
+				JSONSchema:      doneConfirmSchema,
 			})
 			if err != nil {
 				return err
 			}
-			if strings.Contains(confirm.Result, doneConfirmSentinel) {
-				return &alreadyDoneError{reason: reason}
+			var dc doneConfirmResult
+			if derr := json.Unmarshal(confirm.StructuredOutput, &dc); derr != nil {
+				return fmt.Errorf("done-confirm returned no structured verdict: %v", derr)
 			}
-			reply = confirm.Result // objection; hand it back to the session
+			if dc.Confirmed {
+				return &alreadyDoneError{reason: er.Detail}
+			}
+			reply = dc.Objection // objection; hand it back to the session
 			donePushback = true
 		}
 
@@ -219,19 +308,24 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 		if !donePushback {
 			ans, err := c.Call(ctx, shared.ClaudeCall{
 				Dir: wtPath, Label: fmt.Sprintf("answer-%d", round),
-				Prompt:          answererPrompt(issueContent, persona, output),
+				Prompt:          answererPrompt(issueContent, persona, er.Detail),
 				Model:           cfg.Models.Answerer,
 				SkipPermissions: true,
+				JSONSchema:      answererResultSchema,
 			})
 			if err != nil {
 				return err
 			}
-			reply = ans.Result
-			if strings.Contains(reply, nothingToAnswerSentinel) {
+			var ar answererResult
+			if aerr := json.Unmarshal(ans.StructuredOutput, &ar); aerr != nil {
+				return fmt.Errorf("answerer returned no structured reply: %v", aerr)
+			}
+			reply = ar.Answer
+			if !ar.HasAnswer || strings.TrimSpace(reply) == "" {
 				// A status update, not a question: an "Approved" relay would
 				// only invite the next status update (issue-5 burned every
 				// round this way). Push the session toward a terminal
-				// sentinel instead.
+				// outcome instead.
 				reply = qaNudgePrompt()
 			}
 		}
@@ -240,7 +334,9 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 		if err != nil {
 			return err
 		}
-		output = res.Result
+		if er, err = parseEntry(res); err != nil {
+			return err
+		}
 	}
 }
 
@@ -249,17 +345,17 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 // non-blocking UAT step. Shared by the merged entry's fix-committed branch and
 // the legacy debug-session resume; the body is the old debug pipeline's
 // afterDebug, unchanged.
-func afterFix(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, base string, uat *UAT, wt shared.Workspace, output string) error {
-	// Confidence gate, shared with the feature route: same threshold, sentinel,
-	// parser and terminal outcome. It runs before the already-done check on
-	// purpose — a session too unsure to fix the bug must not get to close the
-	// issue as already implemented instead. An unparseable score fails open so
-	// a session that forgot the sentinel but fixed the bug still ships.
-	if err := confidenceGate(cfg, output); err != nil {
+func afterFix(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, base string, uat *UAT, wt shared.Workspace, er entryResult) error {
+	// Confidence gate, shared with the feature route: same threshold, field
+	// and terminal outcome. It runs before the already-done check on purpose —
+	// a session too unsure to fix the bug must not get to close the issue as
+	// already implemented instead. An absent score fails open so a session
+	// that omitted it but fixed the bug still ships.
+	if err := confidenceGate(cfg, er); err != nil {
 		return err
 	}
-	if reason, ok := parseAlreadyDone(output); ok {
-		return &alreadyDoneError{reason: reason}
+	if er.Outcome == entryOutcomeDone {
+		return &alreadyDoneError{reason: er.Detail}
 	}
 	// A session can claim a fix (or a resumed legacy debug session can end)
 	// without one actually existing — e.g. it investigates and stops to ask a
@@ -272,7 +368,7 @@ func afterFix(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, i
 	// session. Fail open on a CommitCount error, same as the confidence gate.
 	if wt != nil {
 		if n, err := wt.CommitCount(ctx, wtPath, base); err == nil && n == 0 {
-			return &lowConfidenceError{score: noConfidenceScore, feedback: sanitizeFeedback(output)}
+			return &lowConfidenceError{score: noConfidenceScore, feedback: er.Detail}
 		}
 	}
 	if uat == nil || uat.Target == nil {
@@ -296,6 +392,7 @@ func entryCall(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		JSONSchema:      entryResultSchema,
 		Checkpoint:      &shared.CallCheckpoint{Kind: "", Stage: shared.StageEntry},
 	})
 }
@@ -308,10 +405,10 @@ func entryPrompt(issue string, threshold int) string {
 }
 
 // entryResumePrompt wraps a resumed entry session's trigger prompt with a
-// restatement of all three terminal sentinels. A bare trigger taught the
-// resumed session nothing about the contract, so a session re-entered past its
-// fix or spec reported completion in prose the loop could not parse and burned
-// every Q&A round (the issue-5 incident, on the old brainstorm resume).
+// restatement of the outcome contract. The schema already forces the shape of
+// the final output, but the prose keeps the session aiming at the right
+// terminal outcome instead of defaulting to another question (the issue-5
+// incident, on the old brainstorm resume).
 func entryResumePrompt(trigger string) string {
 	d := promptData()
 	d["Trigger"] = trigger
