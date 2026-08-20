@@ -26,7 +26,6 @@
   "models": {
     "architect": { "model": "opus", "effort": "high" },
     "answerer": { "model": "sonnet", "effort": "medium" },
-    "triage": { "model": "sonnet", "effort": "medium" },
     "execute": { "model": "opus", "effort": "high" },
     "uat": { "model": "sonnet", "effort": "medium" },
     "codeReview": { "model": "opus", "effort": "medium", "rounds": 2 },

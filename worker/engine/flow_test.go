@@ -127,7 +127,6 @@ func (e *flowEnv) orchestrator() *Orchestrator {
 		Models: shared.Models{
 			Architect:  shared.ModelConfig{Model: "opus", Effort: "high"},
 			Answerer:   shared.ModelConfig{Model: "sonnet"},
-			Triage:     shared.ModelConfig{Model: "sonnet"},
 			CodeReview: &shared.CodeReviewConfig{ModelConfig: shared.ModelConfig{Model: "opus"}, Rounds: 1},
 		},
 	}
@@ -139,9 +138,10 @@ func (e *flowEnv) logDir() string {
 }
 
 // claudePrompts returns the stdin of every claude call whose prompt STARTS
-// with prefix. Prompts are classified by their leading skill invocation
-// (e.g. "/superpowers:writing-plans"), never by substring: the brainstorm
-// prompt mentions the writing-plans skill in prose, so substring matching
+// with prefix. Prompts are classified by their leading text (the entry
+// prompt's fixed first line, or a skill invocation like
+// "/superpowers:writing-plans"), never by substring: the entry prompt
+// mentions the writing-plans skill in prose, so substring matching
 // misclassifies it.
 func (e *flowEnv) claudePrompts(prefix string) []string {
 	var out []string
@@ -175,16 +175,19 @@ func (e *flowEnv) realChain() []shared.SessionNode {
 	return out
 }
 
-// featureScript scripts a well-behaved feature pipeline: triage picks the
-// issue, brainstorm commits a spec, plan commits a plan, execute succeeds,
-// code review is clean, and any other session (UAT, answerer) returns a bland
-// success. Tests override individual phases by wrapping it.
+// entryPromptPrefix is the merged entry prompt's fixed first line — the flow
+// tests classify entry calls by it, mirroring how the other phases are
+// classified by their leading skill invocation.
+const entryPromptPrefix = "Handle this GitHub issue"
+
+// featureScript scripts a well-behaved feature-outcome pipeline: the entry
+// session commits a spec, plan commits a plan, execute succeeds, code review
+// is clean, and any other session (UAT, answerer) returns a bland success.
+// Tests override individual phases by wrapping it.
 func (e *flowEnv) featureScript() func(c testkit.RCall) (string, string, error) {
 	return func(c testkit.RCall) (string, string, error) {
 		switch {
-		case strings.Contains(c.Stdin, "triage agent"):
-			return testkit.ClaudeJSON(fmt.Sprintf(`{"issueNumber": %d, "kind": "feature", "reason": "small"}`, flowIssue), "t1"), "", nil
-		case strings.HasPrefix(c.Stdin, "/superpowers:brainstorming"):
+		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
 			writeSpecFile(e.t, e.wt)
 			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
 		case strings.HasPrefix(c.Stdin, "/superpowers:writing-plans"):
@@ -219,9 +222,9 @@ func TestFlowFeatureHappyPath(t *testing.T) {
 
 	chain := env.realChain()
 	if len(chain) != 4 {
-		t.Fatalf("real chain = %+v, want brainstorm/plan/execute/codereview", chain)
+		t.Fatalf("real chain = %+v, want entry/plan/execute/codereview", chain)
 	}
-	wantStages := []string{shared.StageBrainstorm, shared.StagePlan, shared.StageExecute, shared.StageCodeReview}
+	wantStages := []string{shared.StageEntry, shared.StagePlan, shared.StageExecute, shared.StageCodeReview}
 	for i, want := range wantStages {
 		if chain[i].Stage != want {
 			t.Errorf("chain[%d].Stage = %q, want %q", i, chain[i].Stage, want)
@@ -281,7 +284,7 @@ func TestFlowExecuteKilledParksThenReworkRemovalResumesSameSession(t *testing.T)
 	if got := env.claudeResumes("exec-dead"); len(got) != 1 || got[0] != "continue" {
 		t.Errorf("resumes of exec-dead = %q, want exactly one with prompt \"continue\"", got)
 	}
-	if n := len(env.claudePrompts("/superpowers:brainstorming")); n != 1 {
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 1 {
 		t.Errorf("brainstorm calls = %d, want 1 — a resume must not restart the pipeline", n)
 	}
 	if n := len(env.claudePrompts("/superpowers:writing-plans")); n != 1 {
@@ -336,7 +339,7 @@ func TestFlowPlanDiesBeforeSessionStartsResumesFreshFromSpec(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := len(env.claudePrompts("/superpowers:brainstorming")); n != 1 {
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 1 {
 		t.Errorf("brainstorm calls = %d, want 1 — the spec is committed, re-entry must not redesign", n)
 	}
 	planCalls := env.claudePrompts("/superpowers:writing-plans")
@@ -354,20 +357,20 @@ func TestFlowPlanDiesBeforeSessionStartsResumesFreshFromSpec(t *testing.T) {
 	}
 }
 
-// TestFlowBugUsageLimitParksThenResumes drives the bug lane through a 429:
-// the debug session errors with is_error (session id intact), parks, and the
-// rework-removal re-entry resumes that exact session with "continue".
-func TestFlowBugUsageLimitParksThenResumes(t *testing.T) {
+// TestFlowEntryUsageLimitParksThenResumesAsFix drives the fix lane through a
+// 429: the entry session errors with is_error (session id intact), parks, and
+// the rework-removal re-entry resumes that exact session with the
+// restated-contract wrapper around "continue". The resumed session commits a
+// fix, so the run ships with the derived kind "bug".
+func TestFlowEntryUsageLimitParksThenResumesAsFix(t *testing.T) {
 	env := newFlowEnv(t)
 	limited := false
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
-		case strings.Contains(c.Stdin, "triage agent"):
-			return testkit.ClaudeJSON(fmt.Sprintf(`{"issueNumber": %d, "kind": "bug", "reason": "crash"}`, flowIssue), "t1"), "", nil
 		case strings.Contains(c.Stdin, "/code-review"):
 			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nok\n"+codeReviewEndSentinel, "cr-1"), "", nil
 		case testkit.ArgAfter(c.Args, "--resume") == "s-429":
-			return testkit.ClaudeJSON("Fixed and committed.", "debug-2"), "", nil
+			return testkit.ClaudeJSON("FIX_COMMITTED: fixed the crash", "debug-2"), "", nil
 		case !limited:
 			limited = true
 			return testkit.ClaudeErrorJSON("Claude AI usage limit reached", "s-429"), "", nil
@@ -382,8 +385,10 @@ func TestFlowBugUsageLimitParksThenResumes(t *testing.T) {
 	if !env.hasGHLabel("ai-rework") {
 		t.Fatalf("labels after 429 = %v, want parked as ai-rework", env.labels)
 	}
-	if head, _ := shared.HeadSession(env.logDir()); head.ID != "s-429" || head.Kind != "bug" || head.Stage != shared.StageDebug {
-		t.Fatalf("head after 429 = %+v, want the limited debug session", head)
+	// The kind is empty on the checkpoint: the session died before its outcome
+	// could resolve it.
+	if head, _ := shared.HeadSession(env.logDir()); head.ID != "s-429" || head.Kind != "" || head.Stage != shared.StageEntry {
+		t.Fatalf("head after 429 = %+v, want the limited entry session", head)
 	}
 
 	env.humanRemovesLabel("ai-rework")
@@ -391,10 +396,47 @@ func TestFlowBugUsageLimitParksThenResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := env.claudeResumes("s-429"); len(got) != 1 || got[0] != "continue" {
-		t.Errorf("resumes of s-429 = %q, want exactly one with prompt \"continue\"", got)
+	got := env.claudeResumes("s-429")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "continue") {
+		t.Errorf("resumes of s-429 = %q, want exactly one leading with the continue trigger", got)
 	}
 	if !env.hasGHLabel("ai-done") || env.hasGHLabel("ai-rework") {
+		t.Errorf("final labels = %v, want ai-done", env.labels)
+	}
+	if got := shared.ResolvedKind(env.logDir()); got != "bug" {
+		t.Errorf("ResolvedKind = %q, want bug derived from the fix outcome", got)
+	}
+}
+
+// A LEGACY bug chain (checkpointed by the pre-merge pipeline as kind "bug",
+// stage "debug") still resumes its debug session with the bare "continue"
+// trigger and ships — old in-flight work is never restarted from zero.
+func TestFlowLegacyBugChainResumesDebugSession(t *testing.T) {
+	env := newFlowEnv(t)
+	env.claude = func(c testkit.RCall) (string, string, error) {
+		switch {
+		case strings.Contains(c.Stdin, "/code-review"):
+			return testkit.ClaudeJSON(codeReviewBeginSentinel+"\nSTATUS: clean\nok\n"+codeReviewEndSentinel, "cr-1"), "", nil
+		case testkit.ArgAfter(c.Args, "--resume") == "legacy-debug":
+			return testkit.ClaudeJSON("Fixed and committed.", "debug-2"), "", nil
+		}
+		return testkit.ClaudeJSON("ok", "eph-1"), "", nil
+	}
+	// Seed the pre-merge chain residue: a debug session checkpointed by the
+	// old bug pipeline.
+	shared.AppendSessionNode(env.logDir(), shared.SessionNode{ID: "legacy-debug", Kind: "bug", Stage: shared.StageDebug})
+	o := env.orchestrator()
+
+	if err := runCycle(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.claudeResumes("legacy-debug"); len(got) != 1 || got[0] != "continue" {
+		t.Errorf("resumes of legacy-debug = %q, want exactly one with the bare \"continue\"", got)
+	}
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 0 {
+		t.Errorf("fresh entry calls = %d, want 0 — a legacy chain resumes its own route", n)
+	}
+	if !env.hasGHLabel("ai-done") {
 		t.Errorf("final labels = %v, want ai-done", env.labels)
 	}
 }

@@ -49,17 +49,13 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 			}
 			return "", "", nil
 		case "claude":
-			prompt := c.Stdin
-			if strings.Contains(prompt, "triage agent") {
-				return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "small"}`, "t1"), "", nil
-			}
-			if strings.Contains(prompt, "/code-review") {
+			if strings.Contains(c.Stdin, "/code-review") {
 				return testkit.ClaudeJSON("Reviewing...\n"+codeReviewBeginSentinel+"\nSTATUS: clean\nNothing to fix.\n"+codeReviewEndSentinel, "cr1"), "", nil
 			}
 			if env.failClaude {
 				return "", "boom", fmt.Errorf("exit 1")
 			}
-			return testkit.ClaudeJSON("Fixed and committed.", "d1"), "", nil
+			return testkit.ClaudeJSON("FIX_COMMITTED: fixed and committed", "d1"), "", nil
 		}
 		return "", "", nil
 	}
@@ -77,7 +73,6 @@ func (e *fakeEnv) orchestratorWithLabels(sl shared.StateLabels) *Orchestrator {
 		Models: shared.Models{
 			Architect: shared.ModelConfig{Model: "opus", Effort: "high"},
 			Answerer:  shared.ModelConfig{Model: "sonnet"},
-			Triage:    shared.ModelConfig{Model: "sonnet"},
 		},
 	}
 	return newTestOrch(cfg, e.f)
@@ -99,11 +94,8 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		// Triage picks a feature; make the brainstorm session escalate.
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "brainstorming") {
+		// Make the entry session escalate.
+		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
 			return testkit.ClaudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
 		}
 		return base(c)
@@ -142,47 +134,6 @@ func TestProcessOnceLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
 	// resume into it, not restart from zero.
 	if len(env.callsMatching("git", "worktree remove")) != 0 {
 		t.Error("needs-info path must preserve the worktree, not remove it")
-	}
-}
-
-// The gate is route-agnostic: a bug whose debug session scores low must reach the
-// same ai-needs-info outcome as an under-specified feature, with no PR and the
-// issue left open.
-func TestProcessOnceBugLowConfidenceEscalatesToNeedsInfo(t *testing.T) {
-	env := newFakeEnv(t)
-	base := env.f.Handler
-	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "small defect"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "systematic-debugging") {
-			return testkit.ClaudeJSON("CONFIDENCE: 25\nNo stack trace — which command reproduces the crash?", "dbg-1"), "", nil
-		}
-		return base(c)
-	}
-	o := env.orchestrator()
-	o.cfg.ConfidenceThreshold = 70
-	if err := runCycle(o); err != nil {
-		t.Fatalf("needs-info is a clean outcome, want nil error, got %v", err)
-	}
-	swap := env.callsMatching("gh", "--remove-label ai-wip")
-	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-needs-info") {
-		t.Errorf("want single ai-wip->ai-needs-info swap, got: %v", swap)
-	}
-	var commented bool
-	for _, c := range env.callsMatching("gh", "issue comment") {
-		if strings.Contains(c, "stack trace") {
-			commented = true
-		}
-	}
-	if !commented {
-		t.Error("needs-info path should comment the debug session's questions on the issue")
-	}
-	if len(env.callsMatching("gh", "pr create")) != 0 {
-		t.Error("needs-info must not create a PR")
-	}
-	if len(env.callsMatching("gh", "issue close")) != 0 {
-		t.Error("needs-info must not close the issue")
 	}
 }
 
@@ -396,15 +347,17 @@ func TestDoneSwapFailureIsSurfaced(t *testing.T) {
 	}
 }
 
-// The pipeline (not triage) now reports "already implemented": triage picks a
-// bug, and the debug session prints the done sentinel. handleIssue must close
-// the issue via finishDone — no PR, no push — but it DID take the pipeline path,
-// so a worktree was created (and must be removed) and ai-wip was applied.
+// The entry session reports "already implemented" and the PO proxy confirms
+// it. handleIssue must close the issue via finishDone — no PR, no push — but
+// it DID take the pipeline path, so a worktree was created and ai-wip applied.
 func TestProcessOnceAlreadyDoneClosesIssue(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && !strings.Contains(c.Stdin, "triage agent") {
+		if c.Name == "claude" {
+			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
+				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+			}
 			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
 		}
 		return base(c)
@@ -440,7 +393,10 @@ func TestFinishDoneUsesConfiguredDoneLabel(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && !strings.Contains(c.Stdin, "triage agent") {
+		if c.Name == "claude" {
+			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
+				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+			}
 			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: x", "d1"), "", nil
 		}
 		return base(c)
@@ -482,8 +438,8 @@ func TestHandleIssueZeroCommitsEscalatesToNeedsInfo(t *testing.T) {
 
 // With ticketsPerCycle=2 and two eligible issues, one cycle selects and handles
 // both (each in its own worktree/branch, each to its own PR). Selection is
-// sequential (the fake triage picks the first still-eligible issue in the
-// prompt); execution fans out. Run under -race to guard the parallel path.
+// deterministic (oldest first); execution fans out. Run under -race to guard
+// the parallel path.
 func TestProcessOnceHandlesMultipleTickets(t *testing.T) {
 	env := &fakeEnv{f: &testkit.FakeRunner{}, wtDir: t.TempDir()}
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
@@ -509,14 +465,7 @@ func TestProcessOnceHandlesMultipleTickets(t *testing.T) {
 			}
 			return "", "", nil
 		case "claude":
-			if strings.Contains(c.Stdin, "triage agent") {
-				// Pick the first issue still present in the candidate list.
-				if strings.Contains(c.Stdin, `"number": 7`) {
-					return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "a"}`, "t"), "", nil
-				}
-				return testkit.ClaudeJSON(`{"issueNumber": 8, "kind": "bug", "reason": "b"}`, "t"), "", nil
-			}
-			return testkit.ClaudeJSON("Fixed and committed.", "d"), "", nil
+			return testkit.ClaudeJSON("FIX_COMMITTED: fixed", "d"), "", nil
 		}
 		return "", "", nil
 	}
@@ -709,8 +658,7 @@ func TestHandleIssuePanicParksIssue(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		prompt := c.Stdin
-		if c.Name == "claude" && !strings.Contains(prompt, "triage agent") {
+		if c.Name == "claude" {
 			panic("pipeline bug")
 		}
 		return base(c)
@@ -996,10 +944,7 @@ func TestHandleIssueResumesPersistedFeatureSession(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "brainstorming") {
+		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
 			// First (fresh) attempt fails outright (e.g. a session-limit 429) but
 			// still returns a session id, so the issue parks with a recorded
 			// session and the worktree preserved.
@@ -1015,15 +960,10 @@ func TestHandleIssueResumesPersistedFeatureSession(t *testing.T) {
 		t.Fatal("setup: first attempt must park as ai-rework")
 	}
 
-	// Second cycle: the architect now resumes instead of failing, and the fake
-	// triage still returns the same issue as eligible (no state-label filtering
-	// in this harness, mirroring "label removed -> eligible again").
-	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "resumed"}`, "t1"), "", nil
-		}
-		return base(c)
-	}
+	// Second cycle: the entry session now resumes instead of failing, and the
+	// issue is still listed as eligible (no state-label filtering in this
+	// harness, mirroring "label removed -> eligible again").
+	env.f.Handler = base
 	if err := runCycle(o); err != nil {
 		t.Fatalf("cycle error = %v, want nil", err)
 	}
@@ -1051,10 +991,7 @@ func TestHandleIssueResumesWithDiffAfterNeedsInfo(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "brainstorming") {
+		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
 			return testkit.ClaudeJSON("CONFIDENCE: 30\nNo acceptance criteria — what should the export contain?", "arch-1"), "", nil
 		}
 		return base(c)
@@ -1066,14 +1003,11 @@ func TestHandleIssueResumesWithDiffAfterNeedsInfo(t *testing.T) {
 	}
 
 	// Second cycle: the issue now carries a human's answer in its comments, and
-	// the architect resumes instead of scoring low again.
+	// the entry session resumes instead of scoring low again.
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
 		joined := strings.Join(c.Args, " ")
 		if c.Name == "gh" && strings.HasPrefix(joined, "issue view") {
 			return `{"title": "Fix crash", "body": "boom", "comments": [{"author": {"login": "alice"}, "body": "export should include CSV rows only"}]}`, "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "answered"}`, "t1"), "", nil
 		}
 		return base(c)
 	}
@@ -1116,7 +1050,10 @@ func TestFinishDoneAndNeedsInfoPreserveBranch(t *testing.T) {
 	env := newFakeEnv(t)
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && !strings.Contains(c.Stdin, "triage agent") {
+		if c.Name == "claude" {
+			if strings.Contains(c.Stdin, "ALREADY fully implemented") {
+				return testkit.ClaudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+			}
 			return testkit.ClaudeJSON("PIPELINE_ALREADY_DONE: already in place", "d1"), "", nil
 		}
 		return base(c)
@@ -1268,10 +1205,7 @@ func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
 	base := env.f.Handler
 	var prCreatedBeforePlan bool
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "needs design"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && strings.Contains(c.Stdin, "brainstorming") {
+		if c.Name == "claude" && strings.HasPrefix(c.Stdin, "Handle this GitHub issue") {
 			writeSpecFile(t, shared.WorktreePath(env.wtDir, 7))
 			return testkit.ClaudeJSON("Spec written.\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
 		}
@@ -1328,11 +1262,8 @@ func TestHandleIssueRoutesCodeReviewStageToShip(t *testing.T) {
 	}
 	base := env.f.Handler
 	env.f.Handler = func(c testkit.RCall) (string, string, error) {
-		if c.Name == "claude" && strings.Contains(c.Stdin, "triage agent") {
-			return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "feature", "reason": "resume"}`, "t1"), "", nil
-		}
-		if c.Name == "claude" && (strings.Contains(c.Stdin, "brainstorming") ||
-			strings.Contains(c.Stdin, "writing-plans") || strings.Contains(c.Stdin, "executing-plans")) {
+		if c.Name == "claude" && (strings.HasPrefix(c.Stdin, "Handle this GitHub issue") ||
+			strings.Contains(c.Stdin, "/superpowers:writing-plans") || strings.Contains(c.Stdin, "/superpowers:executing-plans")) {
 			t.Errorf("a codereview-stage re-entry must never run a pipeline session, got prompt: %.60s", c.Stdin)
 		}
 		return base(c)

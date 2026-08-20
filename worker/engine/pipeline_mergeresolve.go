@@ -15,7 +15,7 @@ import (
 // the daemon merges origin/<default-branch> into the issue's branch, resolves
 // conflicts with ONE Claude session if the merge stops on them, and pushes.
 // It is a maintenance pass over existing work, not a pipeline: it never
-// triages, never resumes or records the issue's pipeline session, and restores
+// classifies, never resumes or records the issue's pipeline session, and restores
 // whatever state label the issue had when it is done.
 
 const (
@@ -23,7 +23,7 @@ const (
 	// prints last: "MERGE_RESOLVE_STATUS: resolved" or "MERGE_RESOLVE_STATUS:
 	// blocked <reason>". It only improves the outbound comment — pass/fail is
 	// decided by git state (MergeInProgress/HasUnmergedPaths), never by the
-	// session's self-report, matching afterDebug's distrust-and-verify stance.
+	// session's self-report, matching afterFix's distrust-and-verify stance.
 	mergeResolveSentinel = "MERGE_RESOLVE_STATUS:"
 	// mergeResolvePriorFile records the state label the issue carried when the
 	// merge-resolve run picked it up, so the label survives a daemon crash:

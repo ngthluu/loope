@@ -46,10 +46,7 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 			}
 			return "", "", nil
 		case "claude":
-			if strings.Contains(c.Stdin, "triage agent") {
-				return testkit.ClaudeJSON(`{"issueNumber": 7, "kind": "bug", "reason": "small"}`, "t1"), "", nil
-			}
-			return testkit.ClaudeJSON("Fixed and committed.", "d1"), "", nil
+			return testkit.ClaudeJSON("FIX_COMMITTED: fixed and committed", "d1"), "", nil
 		}
 		return "", "", nil
 	}

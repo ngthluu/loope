@@ -25,7 +25,6 @@ type ModelConfig struct {
 type Models struct {
 	Architect ModelConfig `json:"architect"`
 	Answerer  ModelConfig `json:"answerer"`
-	Triage    ModelConfig `json:"triage"`
 	// Execute is the config for the plan-execution step of the feature pipeline.
 	// Any field left unset falls back to Architect (see executeConfig), so
 	// existing configs without an execute block behave exactly as before.

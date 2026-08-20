@@ -149,9 +149,9 @@ func TestProcessOnceFiltersInFlightIssues(t *testing.T) {
 	if wip := env.callsMatching("gh", "--add-label ai-wip"); len(wip) != 1 {
 		t.Fatalf("ai-wip labels = %d, want 1 (no duplicate pipeline for #7)", len(wip))
 	}
-	// The second cycle must not have burned a triage call either: the filtered
-	// list was empty, so selection was skipped.
-	if triage := env.callsMatching("claude", ""); len(triage) == 0 {
+	// Sanity: the pipeline itself did run (the first cycle made claude calls),
+	// so the empty second cycle above really was the in-flight filter at work.
+	if calls := env.callsMatching("claude", ""); len(calls) == 0 {
 		t.Fatal("sanity: the first cycle should have made claude calls")
 	}
 }

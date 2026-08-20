@@ -42,47 +42,11 @@ func killedAfterID(id string) (string, string, error) {
 		"usage limit", errors.New("signal: killed")
 }
 
-// TestFlowTriageFailureLeavesIssueUntouched: the triage session fails (P0/M7).
-// The cycle surfaces the error and the issue is completely untouched — no
-// ai-wip, no state marker — so the next cycle simply tries again.
-func TestFlowTriageFailureLeavesIssueUntouched(t *testing.T) {
-	env := newFlowEnv(t)
-	happy := env.featureScript()
-	var failTriage atomic.Bool
-	failTriage.Store(true)
-	env.claude = func(c testkit.RCall) (string, string, error) {
-		if strings.Contains(c.Stdin, "triage agent") && failTriage.Load() {
-			return "", "api unreachable", errors.New("exit 1")
-		}
-		return happy(c)
-	}
-	o := env.orchestrator()
-
-	if err := runCycle(o); err == nil {
-		t.Fatal("cycle with a failing triage session must return its error")
-	}
-	if env.hasGHLabel("ai-wip") || env.hasGHLabel("ai-rework") {
-		t.Errorf("labels after triage failure = %v, want the issue untouched", env.labels)
-	}
-	if got := shared.ReadState(env.logDir()); got != "" {
-		t.Errorf("state marker = %q, want none — triage failed before pickup", got)
-	}
-
-	// Next cycle: triage works, the issue runs to done.
-	failTriage.Store(false)
-	if err := runCycle(o); err != nil {
-		t.Fatal(err)
-	}
-	if !env.hasGHLabel("ai-done") {
-		t.Errorf("final labels = %v, want ai-done", env.labels)
-	}
-}
-
-// TestFlowBrainstormKilledMidSessionResumesArchitectSession: the brainstorm
-// CLI is killed after its session id streamed (P2/M2). The issue parks with
-// the dead session as the chain head, and the rework-removal re-entry resumes
-// THAT session — no second fresh brainstorm.
-func TestFlowBrainstormKilledMidSessionResumesArchitectSession(t *testing.T) {
+// TestFlowEntryKilledMidSessionResumesEntrySession: the entry CLI is killed
+// after its session id streamed (P2/M2). The issue parks with the dead session
+// as the chain head, and the rework-removal re-entry resumes THAT session — no
+// second fresh entry.
+func TestFlowEntryKilledMidSessionResumesEntrySession(t *testing.T) {
 	env := newFlowEnv(t)
 	happy := env.featureScript()
 	killed := false
@@ -91,7 +55,7 @@ func TestFlowBrainstormKilledMidSessionResumesArchitectSession(t *testing.T) {
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-dead":
 			writeSpecFile(t, env.wt)
 			return testkit.ClaudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-2"), "", nil
-		case strings.HasPrefix(c.Stdin, "/superpowers:brainstorming") && !killed:
+		case strings.HasPrefix(c.Stdin, entryPromptPrefix) && !killed:
 			killed = true
 			return killedAfterID("arch-dead")
 		}
@@ -105,8 +69,8 @@ func TestFlowBrainstormKilledMidSessionResumesArchitectSession(t *testing.T) {
 	if !env.hasGHLabel("ai-rework") {
 		t.Fatalf("labels after kill = %v, want parked as ai-rework", env.labels)
 	}
-	if head, _ := shared.HeadSession(env.logDir()); head.ID != "arch-dead" || head.Stage != shared.StageBrainstorm {
-		t.Fatalf("head after kill = %+v, want the killed brainstorm session", head)
+	if head, _ := shared.HeadSession(env.logDir()); head.ID != "arch-dead" || head.Stage != shared.StageEntry {
+		t.Fatalf("head after kill = %+v, want the killed entry session", head)
 	}
 
 	env.humanRemovesLabel("ai-rework")
@@ -118,8 +82,8 @@ func TestFlowBrainstormKilledMidSessionResumesArchitectSession(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(got[0], "continue") {
 		t.Errorf("resumes of arch-dead = %q, want exactly one carrying the continue trigger", got)
 	}
-	if n := len(env.claudePrompts("/superpowers:brainstorming")); n != 1 {
-		t.Errorf("fresh brainstorm calls = %d, want 1 — a resume must not restart the design", n)
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 1 {
+		t.Errorf("fresh entry calls = %d, want 1 — a resume must not restart the run", n)
 	}
 	if !env.hasGHLabel("ai-done") {
 		t.Errorf("final labels = %v, want ai-done", env.labels)
@@ -132,15 +96,15 @@ func TestFlowBrainstormKilledMidSessionResumesArchitectSession(t *testing.T) {
 	}
 }
 
-// TestFlowBrainstormDiesBeforeSessionIdRerunsFresh: the brainstorm CLI dies
-// before any session id streams (P2/M1). Nothing is checkpointed, so the
-// re-entry has no resume point and must run a fully fresh pipeline.
-func TestFlowBrainstormDiesBeforeSessionIdRerunsFresh(t *testing.T) {
+// TestFlowEntryDiesBeforeSessionIdRerunsFresh: the entry CLI dies before any
+// session id streams (P2/M1). Nothing is checkpointed, so the re-entry has no
+// resume point and must run a fully fresh pipeline.
+func TestFlowEntryDiesBeforeSessionIdRerunsFresh(t *testing.T) {
 	env := newFlowEnv(t)
 	happy := env.featureScript()
 	crashed := false
 	env.claude = func(c testkit.RCall) (string, string, error) {
-		if strings.HasPrefix(c.Stdin, "/superpowers:brainstorming") && !crashed {
+		if strings.HasPrefix(c.Stdin, entryPromptPrefix) && !crashed {
 			crashed = true
 			return "", "cannot reach api.anthropic.com", errors.New("exit 1")
 		}
@@ -163,8 +127,8 @@ func TestFlowBrainstormDiesBeforeSessionIdRerunsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := len(env.claudePrompts("/superpowers:brainstorming")); n != 2 {
-		t.Errorf("brainstorm calls = %d, want the crashed one plus one fresh re-run", n)
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 2 {
+		t.Errorf("entry calls = %d, want the crashed one plus one fresh re-run", n)
 	}
 	if n := env.claudeCallsWithResume(); n != 0 {
 		t.Errorf("calls with --resume = %d, want 0 — there was never a session to resume", n)
@@ -174,16 +138,14 @@ func TestFlowBrainstormDiesBeforeSessionIdRerunsFresh(t *testing.T) {
 	}
 }
 
-// TestFlowQARoundsExhaustedParks: the architect never reaches a terminal
+// TestFlowQARoundsExhaustedParks: the entry session never reaches a terminal
 // sentinel (P3/M10). After MaxQARounds replies the pipeline errors and the
 // issue parks with the budget error as the handover.
 func TestFlowQARoundsExhaustedParks(t *testing.T) {
 	env := newFlowEnv(t)
 	env.claude = func(c testkit.RCall) (string, string, error) {
 		switch {
-		case strings.Contains(c.Stdin, "triage agent"):
-			return testkit.ClaudeJSON(fmt.Sprintf(`{"issueNumber": %d, "kind": "feature", "reason": "small"}`, flowIssue), "t1"), "", nil
-		case strings.HasPrefix(c.Stdin, "/superpowers:brainstorming"):
+		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
 			return testkit.ClaudeJSON("What color should the button be?", "arch-1"), "", nil
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-1":
 			return testkit.ClaudeJSON("And what size?", "arch-1"), "", nil
@@ -311,7 +273,7 @@ func TestFlowShipPushFailureParksThenResumesExecuteHead(t *testing.T) {
 	if got := env.claudeResumes("exec-1"); len(got) != 1 || got[0] != "continue" {
 		t.Errorf("resumes of exec-1 = %q, want exactly one with prompt \"continue\"", got)
 	}
-	if n := len(env.claudePrompts("/superpowers:brainstorming")); n != 1 {
+	if n := len(env.claudePrompts(entryPromptPrefix)); n != 1 {
 		t.Errorf("brainstorm calls = %d, want 1 — a ship failure must not restart the pipeline", n)
 	}
 	if !env.hasGHLabel("ai-done") {
@@ -360,7 +322,7 @@ func TestFlowCodeReviewKilledParksThenReentersShipOnly(t *testing.T) {
 	if got := env.claudeResumes("cr-dead"); len(got) != 1 || got[0] != "continue" {
 		t.Errorf("resumes of cr-dead = %q, want exactly one with prompt \"continue\"", got)
 	}
-	for _, stage := range []string{"/superpowers:brainstorming", "/superpowers:writing-plans", "/superpowers:executing-plans"} {
+	for _, stage := range []string{entryPromptPrefix, "/superpowers:writing-plans", "/superpowers:executing-plans"} {
 		if n := len(env.claudePrompts(stage)); n != 1 {
 			t.Errorf("%s calls = %d, want 1 — a review re-entry must skip the pipelines", stage, n)
 		}
@@ -391,7 +353,7 @@ func TestFlowNeedsInfoAnswerResumesBrainstormWithDiff(t *testing.T) {
 		case testkit.ArgAfter(c.Args, "--resume") == "arch-low":
 			writeSpecFile(t, env.wt)
 			return testkit.ClaudeJSON("CONFIDENCE: 90\nSPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-2"), "", nil
-		case strings.HasPrefix(c.Stdin, "/superpowers:brainstorming"):
+		case strings.HasPrefix(c.Stdin, entryPromptPrefix):
 			return testkit.ClaudeJSON("CONFIDENCE: 30\nWhich database should the exporter target?", "arch-low"), "", nil
 		}
 		return happy(c)

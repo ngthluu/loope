@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -114,6 +115,48 @@ func ResumePoint(logDir string) (SessionNode, bool) {
 		return SessionNode{Kind: si.Kind, Stage: StageExecute, Artifact: si.PlanPath}, true
 	}
 	return SessionNode{ID: si.SessionID, Kind: si.Kind, Stage: si.Stage}, true
+}
+
+// SetHeadKind rewrites the chain head's Kind in place — the merged entry stage
+// checkpoints with an empty kind (unknown mid-session), and this stamps the
+// resolved kind ("bug"/"feature") the moment the entry session's outcome
+// sentinel is parsed. Best-effort, like every other lineage writer: on any
+// error the chain is left unchanged and the caller's pipeline result is
+// unaffected — a failed stamp only degrades display (the dashboard's kind
+// column and the PR body's flow label), never resume correctness, because
+// resume dispatch keys on Stage, not Kind, for entry nodes. The legacy
+// single-record session file is kept in step for the dashboard.
+func SetHeadKind(logDir, kind string) {
+	chain := ReadSessionChain(logDir)
+	if len(chain) == 0 {
+		return
+	}
+	chain[len(chain)-1].Kind = kind
+	var buf bytes.Buffer
+	for _, n := range chain {
+		b, err := json.Marshal(n)
+		if err != nil {
+			return
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(logDir, ChainFile), buf.Bytes(), 0o644); err != nil {
+		return
+	}
+	head := chain[len(chain)-1]
+	RecordCheckpoint(logDir, SessionInfo{SessionID: head.ID, Kind: kind, Stage: head.Stage})
+}
+
+// ResolvedKind returns the chain head's stamped kind for the ship stage (PR
+// body, code-review criteria). "bug" is a defensive fallback only: a pipeline
+// stamps its kind synchronously before returning nil, so an empty kind here
+// means the stamp write itself failed — cosmetic, never resume-relevant.
+func ResolvedKind(logDir string) string {
+	if head, ok := HeadSession(logDir); ok && head.Kind != "" {
+		return head.Kind
+	}
+	return "bug"
 }
 
 // LastRealSessionID walks the chain backwards for the newest node with a real

@@ -45,19 +45,17 @@ label is treated as eligible again.
 
 ## Confidence gate
 
-Both routes score how confidently the issue can be implemented as written
-(0–100) before committing to an implementation. The feature pipeline's
-brainstorm session scores from the issue text, before designing anything. The
-bug pipeline's debug session may read the codebase first — a terse bug report can
-still be trivially fixable once you open the file — but writes nothing until
-after it has scored.
+The entry session scores how confidently the issue can be handled as written
+(0–100) before committing to an implementation. It may read the codebase first
+— a terse bug report can still be trivially fixable once you open the file —
+but writes nothing until after it has scored.
 
 When that score is below `confidenceThreshold` (default `70`), the loop does
 **not** guess: it comments the score and the session's specific questions on the
 issue, applies the `ai-needs-info` label, removes the worktree, and stops. The
 issue leaves the queue and the daemon never touches it again — a human answers
 the questions and removes the `ai-needs-info` label, which re-queues the issue
-from scratch. Set `confidenceThreshold` to `0` to disable the gate on both routes and
+from scratch. Set `confidenceThreshold` to `0` to disable the gate and
 always attempt an implementation.
 
 ## `githubRetry`
@@ -98,7 +96,6 @@ Each role is a `{model, effort}` block:
 - `architect` — the heavy lifter: brainstorms, plans, debugs, and (unless
   `execute` overrides it) executes.
 - `answerer` — the product-owner proxy answering the architect's questions.
-- `triage` — picks and classifies the next issue.
 - `execute` — optional. The feature pipeline's plan-execution step. Any field
   left unset inherits from `architect`, so omitting the block entirely keeps the
   old behavior (execute runs with the architect config).

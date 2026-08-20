@@ -18,10 +18,10 @@ A feature issue passes through, in order:
 
 | # | Phase | Claude session | Checkpointing |
 |---|-------|----------------|---------------|
-| P0 | Triage (pick issue + kind) | triage (ephemeral) | none |
+| P0 | Selection (deterministic: oldest eligible first) | — | none |
 | P1 | Pickup: `ai-wip` label, comment, worktree create, fetch content | — | state marker |
-| P2 | Brainstorm (architect, confidence gate) | brainstorm-0 / brainstorm-resume | chain node `brainstorm` (in-flight, on session id) |
-| P3 | Q&A round loop (PO-proxy answerer, done-confirm) | answer-N / done-confirm-N (ephemeral) | none (rounds resume the brainstorm session) |
+| P2 | Entry (investigate, confidence gate, fix-or-design decision) | entry-0 / entry-resume | chain node `entry` (in-flight, on session id; kind stamped once the outcome resolves) |
+| P3 | Q&A round loop (PO-proxy answerer, done-confirm) | answer-N / done-confirm-N (ephemeral) | none (rounds resume the entry session) |
 | P4 | Spec→plan handoff: pending plan node, UAT spawn, spec push + PR + comment | UAT (ephemeral, background) | PENDING `plan` node (no id) before the plan call |
 | P5 | Plan session (`PIPELINE_READY` + plan file) | plan | chain node `plan` (in-flight) |
 | P6 | Plan→execute handoff: pending execute node, plan push + comment | — | PENDING `execute` node before the execute call |
@@ -30,8 +30,11 @@ A feature issue passes through, in order:
 | P9 | Code review rounds | codereview-N | chain node `codereview` (in-flight) + round counter file |
 | P10 | Done: WIP→Done swap, state marker | — | state marker |
 
-A bug issue replaces P2–P7 with one debug session (chain stage `debug`), plus
+The fix outcome (derived kind `bug`) ends the pipeline at P2 — the entry
+session commits the fix itself (`FIX_COMMITTED:`) and P4–P7 never run — plus
 the confidence gate, already-done gate, and zero-commit needs-info gate.
+Chains checkpointed before the merged entry existed (stages `brainstorm` and
+`debug`) still resume on their original routes.
 
 ## Interruption modes
 
@@ -65,13 +68,12 @@ Recovery invariants every scenario must satisfy:
 
 | Phase | Interruption | Expected outcome | Verified by |
 |-------|--------------|------------------|-------------|
-| P0 triage | M1/M7 session fails | cycle returns the error; issue untouched (no label, no state), retried next cycle | `TestFlowTriageFailureLeavesIssueUntouched` (flow_matrix) |
-| P0 triage | M4 bad JSON / unknown issue / bad kind | triage error, same as above | `TestTriageRejects*` (unit) |
+| P0 selection | — | deterministic sort; no session, no failure mode at this layer | `TestSelectIssuesPicksOldestFirst` (unit) |
 | P1 pickup | M7 worktree create / fetch fails | park `ai-rework` (abort), artifacts preserved | `TestToolingFailureParksForRework`, `TestToolingFailureParksInsteadOfStayingEligible` |
-| P2 brainstorm | M1 dies before session id | park; chain empty → re-entry runs a FULLY FRESH pipeline (no `--resume` anywhere) | `TestFlowBrainstormDiesBeforeSessionIdRerunsFresh` (flow_matrix) |
-| P2 brainstorm | M2 killed after id streamed | park; head = brainstorm node → re-entry resumes THAT session with the sentinel-restating resume prompt; no second fresh brainstorm | `TestFlowBrainstormKilledMidSessionResumesArchitectSession` (flow_matrix) |
-| P2 brainstorm | M5 low confidence | `ai-needs-info`, no design work; answer + label removal resumes the SAME session with the added-lines diff as prompt | `TestFlowNeedsInfoAnswerResumesBrainstormWithDiff` (flow_matrix); unit: `TestFeaturePipelineLowConfidenceEscalates`, `TestHandleIssueResumesWithDiffAfterNeedsInfo` |
-| P2 brainstorm | M6 already done | answerer confirms → comment, WIP→Done, issue closed; objection hands back to architect | `TestProcessOnceAlreadyDoneClosesIssue`, `TestFeaturePipelineArchitectDonePushbackContinues` |
+| P2 entry | M1 dies before session id | park; chain empty → re-entry runs a FULLY FRESH pipeline (no `--resume` anywhere) | `TestFlowEntryDiesBeforeSessionIdRerunsFresh` (flow_matrix) |
+| P2 entry | M2 killed after id streamed | park; head = entry node → re-entry resumes THAT session with the sentinel-restating resume prompt; no second fresh entry | `TestFlowEntryKilledMidSessionResumesEntrySession` (flow_matrix) |
+| P2 entry | M5 low confidence | `ai-needs-info`, no design work; answer + label removal resumes the SAME session with the added-lines diff as prompt | `TestFlowNeedsInfoAnswerResumesBrainstormWithDiff` (flow_matrix); unit: `TestFeaturePipelineLowConfidenceEscalates`, `TestHandleIssueResumesWithDiffAfterNeedsInfo` |
+| P2 entry | M6 already done | answerer confirms → comment, WIP→Done, issue closed; objection hands back to the session | `TestProcessOnceAlreadyDoneClosesIssue`, `TestFeaturePipelineArchitectDonePushbackContinues` |
 | P3 Q&A loop | M10 rounds exhausted | park with "exceeded N Q&A rounds" | `TestFlowQARoundsExhaustedParks` (flow_matrix); unit: `TestFeaturePipelineFailsAfterMaxRounds` |
 | P3 Q&A loop | M4 SPEC_READY without a spec file | loop keeps prodding (round consumed), no crash | `TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing` |
 | P3 Q&A loop | M4 answerer has nothing to answer | nudge prompt pushes architect to a terminal sentinel | `TestBrainstormLoopNudgesArchitectWhenNothingToAnswer` |
@@ -88,16 +90,17 @@ Recovery invariants every scenario must satisfy:
 | P7 execute | M9 user Stop, then Continue | `ai-stopped` (worktree + chain preserved); Continue re-queues; next cycle resumes the SAME session | `TestFlowContinueAfterStopResumesChainHead` (flow_matrix); unit: `TestStopDuringPipelineParksAsStopped`, `TestPauseTransitionsToStoppedAndPreservesState` |
 | P7 pipeline goroutine | panic | park with the panic cause, daemon and siblings unharmed, stop flag consumed | `TestHandleIssuePanicParksIssue`, `TestStopFlagConsumedWhenPipelinePanics` |
 
-## Matrix — bug lane
+## Matrix — fix outcome (derived kind `bug`)
 
 | Phase | Interruption | Expected outcome | Verified by |
 |-------|--------------|------------------|-------------|
-| debug | M3 429 mid-session | park; re-entry resumes the limited session with `continue` | `TestFlowBugUsageLimitParksThenResumes` (flow) |
-| debug | M2/M1 error | park; error propagates with checkpointed session (if id streamed) | `TestBugPipelinePropagatesError`, `TestBugPipelineRecordsSessionOnError` |
-| debug | M5 low confidence | `ai-needs-info`; gate beats already-done claim | `TestBugPipelineLowConfidenceEscalates`, `TestBugPipelineLowConfidenceBeatsAlreadyDone` |
-| debug | M4 no sentinel, no commits | `ai-needs-info` with the session's questions (not a "no commits" park) | `TestBugPipelineEscalatesToNeedsInfoWhenNoCommitsProduced`, `TestResumeBugPipelineEscalatesToNeedsInfoWhenStalled` |
-| debug | M6 already done | issue closed | `TestBugPipelineReturnsAlreadyDone` |
-| UAT | session fails / off-contract | swallowed, pipeline unaffected | `TestBugPipelineReturnsNilWhenUATFails`, `TestUATSkips*` |
+| entry | M3 429 mid-session | park; re-entry resumes the limited session with the restated-contract wrapper around `continue` | `TestFlowEntryUsageLimitParksThenResumesAsFix` (flow) |
+| entry | M2/M1 error | park; error propagates with checkpointed session (if id streamed) | `TestRunPipelinePropagatesError`, `TestRunPipelineRecordsSessionOnError` |
+| entry | M5 low confidence | `ai-needs-info`; gate beats already-done claim | `TestRunPipelineLowConfidenceEscalates`, `TestRunPipelineLowConfidenceBeatsAlreadyDone` |
+| entry | M4 FIX_COMMITTED with no commits | `ai-needs-info` with the session's questions (not a "no commits" park) | `TestRunPipelineFixClaimWithNoCommitsEscalatesToNeedsInfo` |
+| entry | M6 already done | proxy confirms, issue closed | `TestRunPipelineAlreadyDoneConfirmed` |
+| UAT | session fails / off-contract | swallowed, pipeline unaffected | `TestBugPipelineReturnsNilWhenUATFails` scenario now in `TestRunPipelineRunsUATAfterFix` family, `TestUATSkips*` |
+| legacy chain | pre-merge `debug`/`brainstorm` head | resumes on the ORIGINAL route (bare `continue` for debug, spec contract for brainstorm) | `TestFlowLegacyBugChainResumesDebugSession` (flow); unit: `TestResumePipelineLegacyBugChainResumesDebugSession`, `TestResumePipelineLegacyBugChainEscalatesWhenStalled`, `TestResumeLegacyBugChainResumesChainNode` |
 
 ## Matrix — ship & code review (both lanes)
 
@@ -116,8 +119,8 @@ Recovery invariants every scenario must satisfy:
 
 | Concern | Expected | Verified by |
 |---------|----------|-------------|
-| Happy path, feature | one cycle to `ai-done`, 4-node lineage chain brainstorm→plan→execute→codereview | `TestFlowFeatureHappyPath` (flow) |
-| Happy path, bug | one cycle to `ai-done` | `TestProcessOnceHappyPathBug` |
+| Happy path, design outcome | one cycle to `ai-done`, 4-node lineage chain entry→plan→execute→codereview | `TestFlowFeatureHappyPath` (flow) |
+| Happy path, fix outcome | one cycle to `ai-done` | `TestProcessOnceHappyPathBug` |
 | Concurrency budget | slots respected across cycles, in-flight issues filtered from listing and sweep | `slots_flow_test.go`, `slots_sweep_test.go` |
 | No auto-retry | parked issues never rescanned; requeue reuses the preserved worktree | `no_auto_retry_test.go` |
 | Park handover | comment carries guidance + full error; cause cleared on ship | `TestParkComment*`, `TestParkWritesCauseAndShipClearsIt` |

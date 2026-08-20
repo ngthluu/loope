@@ -58,6 +58,16 @@ func testWT() shared.Workspace {
 	return infra.NewWorktreeAt(&testkit.FakeRunner{}, "", testkit.TestRetry)
 }
 
+// runPipelineMain/resumePipelineMain adapt this file's pre-merge call shape
+// (no base argument) to the unified pipeline, defaulting base to "main".
+func runPipelineMain(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona string, uat *UAT, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	return RunPipeline(ctx, c, cfg, wtPath, issueContent, persona, "main", uat, gh, wt, branch, title, n)
+}
+
+func resumePipelineMain(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona string, uat *UAT, node shared.SessionNode, prompt string, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	return ResumePipeline(ctx, c, cfg, wtPath, issueContent, persona, "main", uat, node, prompt, gh, wt, branch, title, n)
+}
+
 func TestParseSpecReady(t *testing.T) {
 	if p, ok := parseSpecReady("Spec done.\nSPEC_READY: docs/superpowers/specs/x-design.md\n"); !ok || p != "docs/superpowers/specs/x-design.md" {
 		t.Errorf("parseSpecReady = %q,%v", p, ok)
@@ -157,15 +167,15 @@ func TestFeaturePipelineQALoopThenExecute(t *testing.T) {
 		return "", "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
 		t.Fatalf("got %d calls, want 5", len(prompts))
 	}
-	if !strings.Contains(prompts[0], "/superpowers:brainstorming") || !strings.Contains(prompts[0], "ISSUE CONTENT") ||
-		!strings.Contains(prompts[0], specReadySentinel) {
-		t.Errorf("brainstorm prompt = %s", prompts[0])
+	if !strings.HasPrefix(prompts[0], "Handle this GitHub issue:") || !strings.Contains(prompts[0], "ISSUE CONTENT") ||
+		!strings.Contains(prompts[0], specReadySentinel) || !strings.Contains(prompts[0], fixCommittedSentinel) {
+		t.Errorf("entry prompt = %s", prompts[0])
 	}
 	if !testkit.HasArg(f.Calls[0].Args, "--disallowedTools") {
 		t.Error("architect must disable AskUserQuestion")
@@ -239,7 +249,7 @@ func TestBrainstormLoopPushesAndCreatesPRAfterSpec(t *testing.T) {
 	}
 	c := infra.NewClaude(cf, logDir, "")
 
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
 		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +317,7 @@ func TestBrainstormLoopContinuesWhenSpecPushFails(t *testing.T) {
 	}
 	c := infra.NewClaude(cf, "", "")
 
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE CONTENT", "PERSONA", nil,
 		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
 		t.Fatalf("a failed spec-stage push must not fail the pipeline, got %v", err)
 	}
@@ -323,7 +333,7 @@ func TestFeaturePipelineFailsAfterMaxRounds(t *testing.T) {
 		return testkit.ClaudeJSON("Still thinking...", "s1"), "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	err := runPipelineMain(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	if err == nil || !strings.Contains(err.Error(), "rounds") {
 		t.Errorf("want max-rounds error, got %v", err)
 	}
@@ -368,7 +378,7 @@ func TestFeaturePipelineSucceedsWhenSpecCompletesOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("pipeline should succeed when the spec completes on the last permitted round, got %v", err)
 	}
 	if len(prompts) != 5 {
@@ -413,7 +423,7 @@ func TestFeaturePipelineAlreadyDoneConfirmedOnFinalRound(t *testing.T) {
 		return "", "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	err := runPipelineMain(context.Background(), c, cfg, wt, "ISSUE CONTENT", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError when already-done claim arrives on the final permitted round, got %v", err)
@@ -435,7 +445,7 @@ func TestFeaturePipelineSpecSentinelWithoutFileKeepsGoing(t *testing.T) {
 		return testkit.ClaudeJSON("SPEC_READY: nope.md", "s1"), "", nil // lies: no spec file exists
 	}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
 		t.Error("want error when spec sentinel appears but no spec file ever exists")
 	}
 	if count < 3 {
@@ -459,7 +469,7 @@ func TestFeaturePipelineArchitectDoneConfirmed(t *testing.T) {
 		return "", "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError, got %v", err)
@@ -499,7 +509,7 @@ func TestFeaturePipelineArchitectDonePushbackContinues(t *testing.T) {
 		return "", "", nil
 	}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if len(prompts) != 5 {
@@ -529,7 +539,7 @@ func TestFeaturePipelineLowConfidenceEscalates(t *testing.T) {
 		return testkit.ClaudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-1"), "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
-	err := RunFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	err := runPipelineMain(context.Background(), c, cfg, wt, "vague issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -572,7 +582,7 @@ func TestFeaturePipelineHighConfidenceProceeds(t *testing.T) {
 		return "", "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "clear issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "clear issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("high confidence should proceed, got %v", err)
 	}
 	if len(prompts) != 3 {
@@ -601,7 +611,7 @@ func TestFeaturePipelineRecordsExecuteSession(t *testing.T) {
 	}}
 	c := infra.NewClaude(f, logDir, "")
 	cfg := &shared.Config{Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}, Answerer: shared.ModelConfig{Model: "sonnet"}}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := shared.ReadSession(logDir)
@@ -621,15 +631,17 @@ func TestFeaturePipelineRecordsSessionOnError(t *testing.T) {
 	wt := t.TempDir()
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeErrorJSON("You've hit your session limit", "arch-429")}}}
 	c := infra.NewClaude(f, logDir, "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err == nil {
 		t.Fatal("want the error propagated so the issue is parked")
 	}
 	si, err := shared.ReadSession(logDir)
 	if err != nil {
-		t.Fatalf("architect session must be recorded even when its call errors: %v", err)
+		t.Fatalf("entry session must be recorded even when its call errors: %v", err)
 	}
-	if si.SessionID != "arch-429" || si.Kind != "feature" || si.Stage != shared.StageBrainstorm {
-		t.Errorf("session = %+v, want arch-429/feature/brainstorm", si)
+	// The kind is empty on purpose: the session died before its outcome could
+	// resolve it, and resume dispatch keys on the stage alone.
+	if si.SessionID != "arch-429" || si.Kind != "" || si.Stage != shared.StageEntry {
+		t.Errorf("session = %+v, want arch-429/<no kind>/entry", si)
 	}
 }
 
@@ -660,7 +672,7 @@ func TestFeaturePipelineExecuteUsesExecuteConfig(t *testing.T) {
 		Answerer:  shared.ModelConfig{Model: "sonnet"},
 		Execute:   shared.ModelConfig{Model: "opus", Effort: "max"},
 	}}
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "the issue", "", nil, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	var execArgs, brainArgs []string
@@ -748,7 +760,7 @@ func TestFeaturePipelineRunsUATOnTheCommittedSpec(t *testing.T) {
 	cfg := featureConfig()
 	cfg.Models.UAT = shared.ModelConfig{Model: "sonnet"}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"architect", "uat", "plan", "execute"} {
@@ -805,7 +817,7 @@ func TestFeaturePipelineRunsUATConcurrentlyWithPlan(t *testing.T) {
 	cfg := featureConfig()
 	cfg.Models.UAT = shared.ModelConfig{Model: "sonnet"}
 	c := infra.NewClaude(g, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, cfg, wt, "ISSUE", "PERSONA", &UAT{Target: tgt, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	if !overlapped.Load() {
@@ -841,7 +853,7 @@ func TestFeaturePipelineContinuesWhenUATFails(t *testing.T) {
 		}
 	}
 	c := infra.NewClaude(f, "", "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA",
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA",
 		&UAT{Target: &fakeUATTarget{body: "body"}, Num: 7}, testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatalf("a failed UAT session must never block the pipeline: %v", err)
 	}
@@ -872,7 +884,7 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	cfg := featureConfig()
 	session := shared.SessionNode{ID: "arch-sess", Kind: "feature", Stage: shared.StageBrainstorm}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	// The resumed architect call must carry --resume arch-sess and lead with
@@ -913,7 +925,7 @@ func TestResumeFeaturePipelineBrainstormStageLowConfidenceEscalates(t *testing.T
 	}}
 	c := infra.NewClaude(f, "", "")
 	session := shared.SessionNode{ID: "arch-sess", Kind: "feature", Stage: shared.StageBrainstorm}
-	err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1)
+	err := resumePipelineMain(context.Background(), c, cfg, wt, "vague issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -942,7 +954,7 @@ func TestResumeFeaturePipelinePlanStage(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	cfg := featureConfig()
 	session := shared.SessionNode{ID: "plan-sess", Kind: "feature", Stage: shared.StagePlan}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := shared.ReadSession(logDir)
@@ -964,7 +976,7 @@ func TestResumeFeaturePipelineExecuteStage(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	cfg := featureConfig()
 	session := shared.SessionNode{ID: "exec-sess", Kind: "feature", Stage: shared.StageExecute}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	si, err := shared.ReadSession(logDir)
@@ -995,7 +1007,7 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	cfg := featureConfig()
 	session := shared.SessionNode{ID: "stale-sess", Kind: "feature", Stage: "bogus"}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
 	// Fresh brainstorm-0 call must have fired with no --resume.
@@ -1034,7 +1046,7 @@ func TestBrainstormLoopCheckpointsPlanStageBeforePlanCall(t *testing.T) {
 		return "", "", nil
 	}}
 	c := infra.NewClaude(f, logDir, "")
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
+	err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
 	if err == nil {
 		t.Fatal("want the plan failure propagated so the issue parks")
 	}
@@ -1078,7 +1090,7 @@ func TestResumeFeaturePipelinePlanStageFreshFromSpecCheckpoint(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	session := shared.SessionNode{Kind: "feature", Stage: shared.StagePlan,
 		Artifact: "docs/superpowers/specs/2026-07-13-thing-design.md"}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) == 0 {
@@ -1113,7 +1125,7 @@ func TestResumeFeaturePipelinePlanStageCheckpointMissingSpecFallsBackFresh(t *te
 	}}
 	c := infra.NewClaude(f, "", "")
 	session := shared.SessionNode{Kind: "feature", Stage: shared.StagePlan, Artifact: "docs/superpowers/specs/gone.md"}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
 		t.Fatalf("missing checkpoint spec must fall back to a fresh pipeline, got %v", err)
 	}
 	fresh := false
@@ -1152,7 +1164,7 @@ func TestResumeFeaturePipelineBrainstormPromptRestatesSentinels(t *testing.T) {
 	}}
 	c := infra.NewClaude(f, "", "")
 	session := shared.SessionNode{ID: "arch-sess", Kind: "feature", Stage: shared.StageBrainstorm}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(resumedPrompt, "continue") {
@@ -1188,7 +1200,7 @@ func TestBrainstormLoopNudgesArchitectWhenNothingToAnswer(t *testing.T) {
 		return "", "", nil
 	}}
 	c := infra.NewClaude(f, "", "")
-	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
+	err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
 	var done *alreadyDoneError
 	if !errors.As(err, &done) {
 		t.Fatalf("want *alreadyDoneError once the nudged architect prints the sentinel, got %v", err)
@@ -1274,7 +1286,7 @@ func TestResumeFeaturePipelineExecuteStageFreshFromPlanCheckpoint(t *testing.T) 
 	c := infra.NewClaude(f, logDir, "")
 	session := shared.SessionNode{Kind: "feature", Stage: shared.StageExecute,
 		Artifact: "docs/superpowers/plans/2026-07-06-thing.md"}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-4", "Feature title", 4); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-4", "Feature title", 4); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) == 0 {
@@ -1490,7 +1502,7 @@ func TestResumeFeaturePipelineExecuteStagePushesAfterSuccess(t *testing.T) {
 	c := infra.NewClaude(cf, logDir, "")
 	cfg := featureConfig()
 	session := shared.SessionNode{ID: "exec-sess", Kind: "feature", Stage: shared.StageExecute}
-	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue",
+	if err := resumePipelineMain(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue",
 		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
 		t.Fatal(err)
 	}

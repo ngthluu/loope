@@ -1,0 +1,319 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/ngthluu/loope/worker/shared"
+)
+
+// This file is the unified pipeline: one merged entry session investigates the
+// issue and decides its own route — fix a defect directly (bug outcome,
+// FIX_COMMITTED) or design first (feature outcome, SPEC_READY into plan and
+// execute). The kind is DERIVED from that outcome and stamped onto the session
+// chain (Agent.SetKind), not decided up front: the pre-pipeline triage
+// classifier this replaced kept routing design-shaped "fixes" into the one-shot
+// debug session.
+
+// RunPipeline drives the merged entry session for a fresh issue: score
+// confidence, then loop the entry session against the product-owner proxy
+// until it terminates with a fix (afterFix's gates), a committed spec (plan
+// and execute follow, unchanged), or an already-done claim.
+func RunPipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	start := time.Now()
+	// Snapshot before the call: the content is already fetched, and a session
+	// killed at any point still leaves the diff base the next resume needs.
+	c.RecordSnapshot(issueContent)
+	res, err := entryCall(ctx, c, cfg, wtPath, "entry-0", entryPrompt(issueContent, cfg.ConfidenceThreshold), "")
+	if err != nil {
+		return err
+	}
+	if err := confidenceGate(cfg, res.Result); err != nil {
+		return err
+	}
+	return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+}
+
+// ResumePipeline re-enters the pipeline at the chain node a re-entry resolved
+// (shared.ResumePoint): every trigger — rework label removed, needs-info
+// answered, dashboard Continue, orphan sweep — converges here. New chains head
+// at StageEntry/StagePlan/StageExecute; chains checkpointed before the merged
+// entry existed head at the legacy StageDebug/StageBrainstorm and resume on
+// their ORIGINAL route (per the project's continue-not-reset rule — the
+// resumed session was never taught the merged contract). A node that can't be
+// mapped falls back to a fully fresh RunPipeline as a safety net.
+func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, node shared.SessionNode, prompt string, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	start := time.Now()
+	fresh := func() error {
+		return RunPipeline(ctx, c, cfg, wtPath, issueContent, persona, base, uat, gh, wt, branch, title, n)
+	}
+	switch node.Stage {
+	case shared.StageEntry:
+		if node.ID == "" {
+			return fresh()
+		}
+		c.RecordSnapshot(issueContent)
+		// The trigger alone teaches a resumed session nothing about the sentinel
+		// contract; restate all three terminal sentinels so a session re-entered
+		// past its fix or spec can still terminate (issue-5 incident).
+		res, err := entryCall(ctx, c, cfg, wtPath, "entry-resume", entryResumePrompt(prompt), node.ID)
+		if err != nil {
+			return err
+		}
+		if err := confidenceGate(cfg, res.Result); err != nil {
+			return err
+		}
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+	case shared.StagePlan:
+		if node.ID == "" {
+			// Pending node: the plan session never started (or a legacy
+			// pre-call checkpoint). Re-run plan fresh from the committed spec.
+			if spec, ok := checkpointArtifact(wtPath, node.Artifact); ok {
+				return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, planPrompt(spec), "", start, gh, wt, branch, n)
+			}
+			return fresh()
+		}
+		return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, prompt, node.ID, start, gh, wt, branch, n)
+	case shared.StageExecute:
+		if node.ID == "" {
+			// Pending node: execute never started. Re-run it fresh on the
+			// committed plan — the executing-plans skill picks up from
+			// whatever steps are already done.
+			if plan, ok := checkpointArtifact(wtPath, node.Artifact); ok {
+				if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
+					return err
+				}
+				if perr := wt.Push(ctx, wtPath, branch); perr != nil {
+					log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
+				}
+				return nil
+			}
+			return fresh()
+		}
+		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, node.ID, node.Artifact); err != nil {
+			return err
+		}
+		// Execute complete (spec §1): push once, best-effort — ship's own push at
+		// the end of a successful run is the backstop, so a failure here is
+		// logged and swallowed rather than failing an otherwise-successful resume.
+		if perr := wt.Push(ctx, wtPath, branch); perr != nil {
+			log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
+		}
+		return nil
+	case shared.StageBrainstorm:
+		// LEGACY: a design session from before the merged entry. Resume it on
+		// the old feature contract (brainstormResumePrompt restates SPEC_READY /
+		// already-done only) and continue through the shared entry loop.
+		if node.ID == "" {
+			return fresh()
+		}
+		c.RecordSnapshot(issueContent)
+		res, err := c.Call(ctx, shared.ClaudeCall{
+			Dir: wtPath, Label: "brainstorm-resume", Prompt: brainstormResumePrompt(prompt), Resume: node.ID,
+			Model:           cfg.Models.Architect,
+			SkipPermissions: true,
+			DisallowedTools: []string{"AskUserQuestion"},
+			Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageBrainstorm},
+		})
+		if err != nil {
+			return err
+		}
+		if err := confidenceGate(cfg, res.Result); err != nil {
+			return err
+		}
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
+	default:
+		// LEGACY: chains whose kind was decided up front by triage. A "bug"
+		// chain resumes its debug session whatever stage string it carries
+		// (the old dispatch keyed on kind alone, and debug is the only stage a
+		// bug pipeline ever checkpointed); anything else falls back fresh.
+		if node.Kind == "bug" && node.ID != "" {
+			c.RecordSnapshot(issueContent)
+			res, err := c.Call(ctx, shared.ClaudeCall{
+				Dir: wtPath, Label: "debug-resume", Prompt: prompt, Resume: node.ID,
+				Model:           cfg.Models.Architect,
+				SkipPermissions: true,
+				DisallowedTools: []string{"AskUserQuestion"},
+				Checkpoint:      &shared.CallCheckpoint{Kind: "bug", Stage: shared.StageDebug},
+			})
+			if err != nil {
+				return err
+			}
+			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, res.Result)
+		}
+		return fresh()
+	}
+}
+
+// entryLoop is the entry session's Q&A round loop, shared by a fresh entry-0
+// call, a resumed entry session, and a resumed legacy brainstorm session:
+// sessionID/output are the id and result text of whichever call preceded it.
+// Each round it checks the three terminal sentinels, stamping the derived kind
+// the moment one resolves, and otherwise relays a product-owner-proxy reply.
+func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, sessionID, output string, start time.Time, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	for round := 1; ; round++ {
+		// The session signals a committed spec: the feature outcome. Hand off to
+		// the fresh plan session, then execute. If it claims a spec but none is
+		// on disk, fall through and keep prodding (mirrors the plan-file behavior).
+		if rel, ok := parseSpecReady(output); ok {
+			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
+				c.SetKind("feature")
+				// Spec committed: append a PENDING plan node BEFORE the plan
+				// call starts, so a crash anywhere in the handoff (push, PR,
+				// comment, plan spawn) resumes as a fresh plan run on this
+				// spec instead of re-entering this loop.
+				specRel := relToWorktree(wtPath, specPath)
+				c.CheckpointStage("feature", shared.StagePlan, specRel)
+				// The UAT session runs alongside plan/execute — it only reads
+				// the committed spec, so nothing downstream waits on it. The
+				// wait runs on every exit path (including a failed plan): the
+				// session must not outlive the pipeline, whose worktree and
+				// context the caller tears down on return.
+				wait := uat.StartFeature(ctx, c, cfg, wtPath, specPath)
+				defer wait()
+				// Spec complete (spec §1): push, open (or recover) the PR,
+				// comment the URL, and record it — before plan/execute run at
+				// all. Best-effort: pushSpecPR logs and swallows its own
+				// failures rather than turning a completed spec into an error.
+				pushSpecPR(ctx, gh, wt, wtPath, branch, title, n, c.LogDir())
+				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(specPath), "", start, gh, wt, branch, n)
+			}
+		}
+		// The session signals a committed fix: the bug outcome. afterFix's gates
+		// (confidence, already-done, zero-commit needs-info fallback, UAT) are
+		// the same ones the old debug pipeline ran.
+		if _, ok := parseFixCommitted(output); ok {
+			c.SetKind("bug")
+			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, output)
+		}
+
+		var reply string
+		donePushback := false
+		if reason, ok := parseAlreadyDone(output); ok {
+			// The session claims already implemented — the answerer (PO proxy)
+			// must confirm before we close. This confirmation is terminal, not a
+			// bounded round.
+			confirm, err := c.Call(ctx, shared.ClaudeCall{
+				Dir: wtPath, Label: fmt.Sprintf("done-confirm-%d", round),
+				Prompt:          doneConfirmPrompt(issueContent, persona, reason),
+				Model:           cfg.Models.Answerer,
+				SkipPermissions: true,
+			})
+			if err != nil {
+				return err
+			}
+			if strings.Contains(confirm.Result, doneConfirmSentinel) {
+				return &alreadyDoneError{reason: reason}
+			}
+			reply = confirm.Result // objection; hand it back to the session
+			donePushback = true
+		}
+
+		// Sending a reply to the session is a bounded Q&A round.
+		if round > cfg.MaxQARounds {
+			return fmt.Errorf("pipeline: exceeded %d Q&A rounds without a committed fix or spec", cfg.MaxQARounds)
+		}
+		if !donePushback {
+			ans, err := c.Call(ctx, shared.ClaudeCall{
+				Dir: wtPath, Label: fmt.Sprintf("answer-%d", round),
+				Prompt:          answererPrompt(issueContent, persona, output),
+				Model:           cfg.Models.Answerer,
+				SkipPermissions: true,
+			})
+			if err != nil {
+				return err
+			}
+			reply = ans.Result
+			if strings.Contains(reply, nothingToAnswerSentinel) {
+				// A status update, not a question: an "Approved" relay would
+				// only invite the next status update (issue-5 burned every
+				// round this way). Push the session toward a terminal
+				// sentinel instead.
+				reply = qaNudgePrompt()
+			}
+		}
+
+		res, err := entryCall(ctx, c, cfg, wtPath, fmt.Sprintf("entry-%d", round), reply, sessionID)
+		if err != nil {
+			return err
+		}
+		output = res.Result
+	}
+}
+
+// afterFix runs the bug outcome's gates — confidence, already-done, the
+// zero-commit needs-info fallback, and (if a fix was actually produced) the
+// non-blocking UAT step. Shared by the merged entry's fix-committed branch and
+// the legacy debug-session resume; the body is the old debug pipeline's
+// afterDebug, unchanged.
+func afterFix(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, base string, uat *UAT, wt shared.Workspace, output string) error {
+	// Confidence gate, shared with the feature route: same threshold, sentinel,
+	// parser and terminal outcome. It runs before the already-done check on
+	// purpose — a session too unsure to fix the bug must not get to close the
+	// issue as already implemented instead. An unparseable score fails open so
+	// a session that forgot the sentinel but fixed the bug still ships.
+	if err := confidenceGate(cfg, output); err != nil {
+		return err
+	}
+	if reason, ok := parseAlreadyDone(output); ok {
+		return &alreadyDoneError{reason: reason}
+	}
+	// A session can claim a fix (or a resumed legacy debug session can end)
+	// without one actually existing — e.g. it investigates and stops to ask a
+	// clarifying question instead of committing (observed on issues #70 and
+	// #83). Check the worktree directly: zero commits ahead of base means no
+	// fix exists — letting that fall through to ship() parks the ticket as
+	// "produced no commits" with the session's questions buried in the log.
+	// Escalate to needs-info instead, with the session's output as the public
+	// comment, so a human sees the questions and their answer resumes this
+	// session. Fail open on a CommitCount error, same as the confidence gate.
+	if wt != nil {
+		if n, err := wt.CommitCount(ctx, wtPath, base); err == nil && n == 0 {
+			return &lowConfidenceError{score: noConfidenceScore, feedback: sanitizeFeedback(output)}
+		}
+	}
+	if uat == nil || uat.Target == nil {
+		return nil
+	}
+	// Only this outcome produced a fix — neither the needs-info nor the
+	// already-done return above reaches here, so neither publishes a checklist.
+	uat.RunBug(ctx, c, cfg, wtPath, issueContent, base)
+	return nil
+}
+
+// entryCall runs one entry-stage turn: the entry-0/entry-N call when resume is
+// "", or a --resume turn (round call or resumed re-entry) when it isn't. The
+// kind is checkpointed EMPTY on purpose: at call time nothing has decided bug
+// vs feature yet, and no other value would be accurate. entryLoop stamps the
+// resolved kind onto the chain head (SetKind) the moment the outcome sentinel
+// is parsed; resume dispatch never reads an entry node's kind, only its stage.
+func entryCall(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, label, prompt, resume string) (*shared.ClaudeResult, error) {
+	return c.Call(ctx, shared.ClaudeCall{
+		Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
+		Model:           cfg.Models.Architect,
+		SkipPermissions: true,
+		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &shared.CallCheckpoint{Kind: "", Stage: shared.StageEntry},
+	})
+}
+
+func entryPrompt(issue string, threshold int) string {
+	d := promptData()
+	d["Issue"] = issue
+	d["Threshold"] = threshold
+	return mustRender("entry.md.tmpl", d)
+}
+
+// entryResumePrompt wraps a resumed entry session's trigger prompt with a
+// restatement of all three terminal sentinels. A bare trigger taught the
+// resumed session nothing about the contract, so a session re-entered past its
+// fix or spec reported completion in prose the loop could not parse and burned
+// every Q&A round (the issue-5 incident, on the old brainstorm resume).
+func entryResumePrompt(trigger string) string {
+	d := promptData()
+	d["Trigger"] = trigger
+	return mustRender("entry-resume.md.tmpl", d)
+}

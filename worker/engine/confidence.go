@@ -6,13 +6,13 @@ import (
 	"strings"
 )
 
-// confidenceSentinel prefixes the score the architect prints on the first line
-// of its opening brainstorm turn: "CONFIDENCE: <0-100>".
+// confidenceSentinel prefixes the score the session prints on the first line
+// of its opening entry turn: "CONFIDENCE: <0-100>".
 const confidenceSentinel = "CONFIDENCE:"
 
 // noConfidenceScore marks a lowConfidenceError raised without any parsed
-// score: a debug session that stopped to ask questions without printing a
-// sentinel or committing a fix (see afterDebug). The needs-info comment
+// score: a session that stopped to ask questions without printing a
+// sentinel or committing a fix (see afterFix). The needs-info comment
 // renders a different lead line for it instead of a bogus "confidence
 // -1/100".
 const noConfidenceScore = -1

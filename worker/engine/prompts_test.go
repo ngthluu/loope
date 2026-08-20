@@ -11,16 +11,15 @@ import (
 // prompt file or {{define}} block with no entry here fails TestEveryTemplateRenders —
 // which is the point: it catches a prompt that was added but never wired up.
 var promptTestData = map[string]map[string]any{
-	"brainstorm.md.tmpl":        {"Issue": "I", "Threshold": 70},
+	"entry.md.tmpl":             {"Issue": "I", "Threshold": 70},
+	"entry-resume.md.tmpl":      {"Trigger": "T"},
 	"brainstorm-resume.md.tmpl": {"Trigger": "T"},
 	"answerer.md.tmpl":          {"Issue": "I", "Persona": "P", "ArchitectMsg": "A"},
 	"qa-nudge.md.tmpl":          {},
 	"done-confirm.md.tmpl":      {"Issue": "I", "Persona": "P", "Reason": "R"},
 	"plan.md.tmpl":              {"SpecPath": "docs/spec.md"},
 	"execute.md.tmpl":           {"PlanPath": "docs/plan.md"},
-	"debug.md.tmpl":             {"Issue": "I", "Threshold": 70},
-	"triage.md.tmpl":            {"List": "[]"},
-	"pickup":                    {"Kind": "feature", "Branch": "b"},
+	"pickup":                    {"Branch": "b"},
 	"already-done":              {"Reason": "R"},
 	"needs-info":                {"Score": 1, "Label": "l", "Feedback": "F"},
 	"park":                      {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
@@ -102,23 +101,31 @@ func TestAskFormatBlockCarriesItsRules(t *testing.T) {
 	}
 }
 
-// Both routes must ask in the same shape, from the same source. This is what
-// catches an edit made to one prompt that should have been an edit to the
-// shared block — and, via the threshold=0 cases, that the instruction stays
-// inside the gate's guard.
-func TestBothRoutesShareTheAskFormatBlock(t *testing.T) {
+// The entry prompt asks in the shared shape, and — via the threshold=0 case —
+// the instruction stays inside the confidence gate's guard.
+func TestEntryPromptSharesTheAskFormatBlock(t *testing.T) {
 	block := mustRender("ask-format", promptData())
-	if !strings.Contains(brainstormPrompt("I", 70), block) {
-		t.Error("brainstormPrompt(threshold=70) does not contain the ask-format block")
+	if !strings.Contains(entryPrompt("I", 70), block) {
+		t.Error("entryPrompt(threshold=70) does not contain the ask-format block")
 	}
-	if !strings.Contains(bugPrompt("I", 70), block) {
-		t.Error("bugPrompt(threshold=70) does not contain the ask-format block")
+	if strings.Contains(entryPrompt("I", 0), block) {
+		t.Error("entryPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
 	}
-	if strings.Contains(brainstormPrompt("I", 0), block) {
-		t.Error("brainstormPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
-	}
-	if strings.Contains(bugPrompt("I", 0), block) {
-		t.Error("bugPrompt(threshold=0) contains the ask-format block; it must stay inside the threshold guard")
+}
+
+// The merged entry prompt (and its resume wrapper) must teach every terminal
+// sentinel the entry loop parses: a route the prompt forgets to name is a
+// route the session can never terminate on.
+func TestEntryPromptTeachesAllTerminalSentinels(t *testing.T) {
+	for _, tc := range []struct{ name, got string }{
+		{"entryPrompt", entryPrompt("I", 70)},
+		{"entryResumePrompt", entryResumePrompt("continue")},
+	} {
+		for _, sentinel := range []string{fixCommittedSentinel, specReadySentinel, alreadyDoneSentinel} {
+			if !strings.Contains(tc.got, sentinel) {
+				t.Errorf("%s is missing the %s contract", tc.name, sentinel)
+			}
+		}
 	}
 }
 
@@ -204,7 +211,7 @@ func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
+	sentinels := []string{confidenceSentinel, specReadySentinel, fixCommittedSentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
 		nothingToAnswerSentinel, uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel, mergeResolveSentinel}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())

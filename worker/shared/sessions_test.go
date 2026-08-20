@@ -130,3 +130,53 @@ func TestResumePointNothingRecorded(t *testing.T) {
 		t.Error("want ok=false when neither chain nor session file exists")
 	}
 }
+
+// SetHeadKind rewrites only the head node's kind, keeps the rest of the chain
+// byte-identical, and mirrors the stamp into the legacy session file.
+func TestSetHeadKindStampsHeadOnly(t *testing.T) {
+	dir := t.TempDir()
+	AppendSessionNode(dir, SessionNode{ID: "a", Kind: "feature", Stage: StagePlan})
+	AppendSessionNode(dir, SessionNode{ID: "b", Parent: "a", Kind: "", Stage: StageEntry, Artifact: "x.md"})
+
+	SetHeadKind(dir, "bug")
+
+	chain := ReadSessionChain(dir)
+	if len(chain) != 2 {
+		t.Fatalf("chain = %+v, want 2 nodes", chain)
+	}
+	if chain[0].Kind != "feature" || chain[0].ID != "a" {
+		t.Errorf("chain[0] = %+v, want the earlier node untouched", chain[0])
+	}
+	if chain[1].Kind != "bug" || chain[1].ID != "b" || chain[1].Artifact != "x.md" {
+		t.Errorf("chain[1] = %+v, want kind bug with every other field preserved", chain[1])
+	}
+	si, err := ReadSession(dir)
+	if err != nil || si.SessionID != "b" || si.Kind != "bug" || si.Stage != StageEntry {
+		t.Errorf("legacy session file = %+v err=%v, want it kept in step with the stamp", si, err)
+	}
+}
+
+// SetHeadKind on an empty or missing chain is a no-op, like every other
+// best-effort lineage writer.
+func TestSetHeadKindNoChainIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	SetHeadKind(dir, "bug")
+	if chain := ReadSessionChain(dir); chain != nil {
+		t.Errorf("chain = %+v, want none created", chain)
+	}
+}
+
+func TestResolvedKind(t *testing.T) {
+	dir := t.TempDir()
+	if got := ResolvedKind(dir); got != "bug" {
+		t.Errorf("ResolvedKind(empty) = %q, want the bug fallback", got)
+	}
+	AppendSessionNode(dir, SessionNode{ID: "e", Stage: StageEntry})
+	if got := ResolvedKind(dir); got != "bug" {
+		t.Errorf("ResolvedKind(unstamped entry) = %q, want the bug fallback", got)
+	}
+	SetHeadKind(dir, "feature")
+	if got := ResolvedKind(dir); got != "feature" {
+		t.Errorf("ResolvedKind = %q, want the stamped feature", got)
+	}
+}

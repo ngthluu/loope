@@ -823,7 +823,7 @@ func serverWithOrch(t *testing.T, state string, session bool) (*Server, *fakeEnv
 	cfg := &shared.Config{
 		RepoPath: "/clone", RepoSlug: "org/repo", EligibleLabel: "ai-agent",
 		WorkDir: env.wtDir, MaxQARounds: 3, StateLabels: shared.StateLabels{WIP: "ai-wip", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info", Stopped: "ai-stopped"},
-		Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}, Triage: shared.ModelConfig{Model: "sonnet"}},
+		Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}},
 	}
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {

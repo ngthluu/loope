@@ -282,6 +282,12 @@ func (c *Claude) CheckpointStage(kind, stage, artifact string) {
 	})
 }
 
+// SetKind stamps the resolved pipeline kind onto the chain head — see
+// shared.SetHeadKind.
+func (c *Claude) SetKind(kind string) {
+	shared.SetHeadKind(c.logDir, kind)
+}
+
 // RecordSnapshot writes the issue content this call site read to
 // <logDir>/issue-snapshot — see shared.RecordSnapshot.
 func (c *Claude) RecordSnapshot(content string) {

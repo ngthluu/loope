@@ -12,9 +12,11 @@ request using headless
 inside git worktrees. Issue state lives entirely in GitHub labels, so the daemon
 itself is stateless and safe to restart.
 
-Label an issue `ai-agent` and each poll cycle loope triages the best candidate,
-runs a bug- or feature-specific pipeline of Claude sessions in an isolated
-worktree, and — if the work produced commits — pushes the branch and opens a PR.
+Label an issue `ai-agent` and each poll cycle loope picks the oldest candidate
+and runs a pipeline of Claude sessions in an isolated worktree: the entry
+session investigates the repository and either fixes a well-scoped defect
+directly or designs first (spec → plan → execute). If the work produced
+commits, the branch is pushed and a PR opened.
 A live web dashboard shows every issue it has touched. See
 [How it works](docs/how-it-works.md) for the full lifecycle.
 
@@ -58,7 +60,7 @@ loope --config loope.json          # polls for labeled issues, serves the dashbo
 
 | Guide | What's inside |
 |-------|---------------|
-| [How it works](docs/how-it-works.md)     | Poll cycle, triage routes, label lifecycle, confidence gate |
+| [How it works](docs/how-it-works.md)     | Poll cycle, entry routes, label lifecycle, confidence gate |
 | [Installation](docs/installation.md)     | Prerequisites, `--doctor`, label setup, building from source |
 | [Configuration](docs/configuration.md)   | Every config field — models, retries, confidence gate, persona |
 | [Dashboard](docs/dashboard.md)           | The live web dashboard and its embedded assets |

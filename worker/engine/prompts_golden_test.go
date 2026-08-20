@@ -17,14 +17,44 @@ func check(t *testing.T, name, got, want string) {
 	}
 }
 
-func TestGoldenBrainstormPromptWithThreshold(t *testing.T) {
-	want := `/superpowers:brainstorming ISSUE BODY
+const goldenEntryRoutes = `HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
+Ask clarifying questions as plain text (AskUserQuestion is disabled).
 
-Before anything else, assess how confidently this issue can be implemented as
-written and print CONFIDENCE: <0-100> as the FIRST line of your reply. If that score is
-below 70, the issue is too under-specified or ambiguous to implement
-responsibly: do NOT design or write a spec. Instead, list what is missing and
-the specific questions the author must answer, then stop.
+Investigate the repository first, then commit to whichever route fits:
+
+- A small, well-scoped defect with a clear expected behavior: follow the
+  systematic-debugging flow — reproduce it with a failing test first, then fix
+  it, verify the full test suite passes, and commit. When the fix is committed,
+  print FIX_COMMITTED: <one-sentence summary> on its own line. Make reasonable
+  calls and note them in commit messages.
+- Anything that needs design work (new functionality, refactors, unclear
+  scope — including a "fix" whose right behavior first needs designing):
+  follow the brainstorming flow to a committed spec — clarifying questions,
+  design, then write and commit the spec document into this branch. Do NOT
+  invoke the writing-plans skill — a separate session writes the implementation
+  plan. When the spec file is written and committed, print SPEC_READY: <path> on
+  its own line, where <path> is the spec file path relative to the repository root.
+
+If you determine the issue's work is already fully implemented in this
+codebase, do not invent work: print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own
+line instead of continuing.`
+
+func TestGoldenEntryPromptWithThreshold(t *testing.T) {
+	want := `Handle this GitHub issue:
+ISSUE BODY
+
+You may read the codebase first to investigate — but do NOT write code, tests,
+or commits yet. Once you understand the issue, assess how confidently it can be
+handled as written and print CONFIDENCE: <0-100> as the FIRST line of your reply.
+Score the issue, not the work: an issue described precisely enough to act on
+scores high however large the change, and it still scores high when
+investigation shows the work is already done — that is a finding about the
+code, not a gap in the issue. Score low only when you cannot tell what behavior
+or outcome is wanted. If that score is below 70, the issue is too
+under-specified or ambiguous to act on responsibly: change no file. Instead,
+list what is missing and the specific questions the author must answer, then stop.
+The CONFIDENCE: line comes first even when an instruction below tells you to
+print another sentinel and stop.
 
 Write that reply as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
@@ -35,35 +65,35 @@ Write that reply as a short, skimmable list the author can answer in one comment
 - Under 200 words total.
 - Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
 
-HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions as plain text (AskUserQuestion is disabled).
-Follow the brainstorming flow to a committed spec: clarifying questions, design,
-then write and commit the spec document into this branch. Do NOT invoke the
-writing-plans skill — a separate session writes the implementation plan.
-When the spec file is written and committed, print SPEC_READY: <path> on its own line,
-where <path> is the spec file path relative to the repository root.
-
-If during brainstorming you determine the feature is already fully implemented
-in this codebase, do not invent work: print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own
-line instead of continuing.`
-	check(t, "brainstormPrompt(threshold=70)", brainstormPrompt("ISSUE BODY", 70), want)
+` + goldenEntryRoutes
+	check(t, "entryPrompt(threshold=70)", entryPrompt("ISSUE BODY", 70), want)
 }
 
-func TestGoldenBrainstormPromptWithoutThreshold(t *testing.T) {
-	want := `/superpowers:brainstorming ISSUE BODY
+func TestGoldenEntryPromptWithoutThreshold(t *testing.T) {
+	want := `Handle this GitHub issue:
+ISSUE BODY
 
-HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions as plain text (AskUserQuestion is disabled).
-Follow the brainstorming flow to a committed spec: clarifying questions, design,
-then write and commit the spec document into this branch. Do NOT invoke the
-writing-plans skill — a separate session writes the implementation plan.
-When the spec file is written and committed, print SPEC_READY: <path> on its own line,
-where <path> is the spec file path relative to the repository root.
+` + goldenEntryRoutes
+	check(t, "entryPrompt(threshold=0)", entryPrompt("ISSUE BODY", 0), want)
+}
 
-If during brainstorming you determine the feature is already fully implemented
-in this codebase, do not invent work: print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own
-line instead of continuing.`
-	check(t, "brainstormPrompt(threshold=0)", brainstormPrompt("ISSUE BODY", 0), want)
+func TestGoldenEntryResumePrompt(t *testing.T) {
+	want := `TRIGGER MSG
+
+HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
+This resumed session still has the same contract, scoped to THIS issue only:
+- Do NOT work on other issues in this session — planning and implementation of
+  a designed feature happen in separate pipeline sessions.
+- If this issue is a small, well-scoped defect you fix directly, print
+  FIX_COMMITTED: <one-sentence summary> on its own line once the fix is committed.
+  Print it even if the fix was already committed in an earlier turn.
+- If it needs design work instead, print SPEC_READY: <path> on its own line when
+  the spec file is written and committed, where <path> is the spec file path
+  relative to the repository root. Print it even if the spec was already
+  committed in an earlier turn.
+- If nothing remains to fix or build for this issue, print PIPELINE_ALREADY_DONE: <one-sentence reason>
+  on its own line.`
+	check(t, "entryResumePrompt", entryResumePrompt("TRIGGER MSG"), want)
 }
 
 func TestGoldenAnswererPrompt(t *testing.T) {
@@ -105,10 +135,11 @@ This resumed design session still has the same contract, scoped to THIS issue on
 
 func TestGoldenQANudgePrompt(t *testing.T) {
 	want := `No decision was requested, so there is nothing to answer. Continue toward this
-issue's terminal state: either finish and commit the spec and print
-SPEC_READY: <path> on its own line, or — if nothing remains to design or build for
-this issue — print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line. Do not start
-implementation, merges, or work on other issues in this session.`
+issue's terminal state: commit the fix and print FIX_COMMITTED: <one-sentence summary>
+on its own line, or finish and commit the spec and print SPEC_READY: <path> on its
+own line, or — if nothing remains to fix or build for this issue — print
+PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line. Do not start work on other
+issues in this session.`
 	check(t, "qaNudgePrompt", qaNudgePrompt(), want)
 }
 
@@ -150,73 +181,9 @@ HEADLESS: do not ask questions; make reasonable calls and note them in commit me
 	check(t, "executePrompt", executePrompt("docs/plan.md"), want)
 }
 
-func TestGoldenBugPromptWithThreshold(t *testing.T) {
-	want := `/superpowers:systematic-debugging ISSUE BODY
-
-You may read the codebase first to investigate — but do NOT write code, tests,
-or commits yet. Once you understand the failure, assess how confidently this bug
-can be fixed as reported and print CONFIDENCE: <0-100> as the FIRST line of your reply.
-Score the report, not the repair: a bug described precisely enough to act on
-scores high however large the fix, and it still scores high when investigation
-shows the behavior is already correct — that is a finding about the code, not a
-gap in the report. Score low only when you cannot tell what behavior is wrong.
-If that score is below 70, the report is too vague or ambiguous to fix
-responsibly: change no file. Instead, list what is missing and the specific
-questions the author must answer, then stop.
-The CONFIDENCE: line comes first even when an instruction below tells you to
-print another sentinel and stop.
-
-Write that reply as a short, skimmable list the author can answer in one comment:
-- Open with ONE sentence naming the single thing that blocks you most.
-- Then a numbered list of questions, most-blocking first, one sentence each, each ending in a question mark.
-- Write each question in short, plain sentences: common words, one idea per sentence, no jargon.
-- Where plausible answers are guessable, offer them inline as ` + "`a) … b) … c) …`" + ` so the author can reply "1a, 2c".
-- At most 5 questions. If more gaps exist, MERGE related gaps into one question — never drop one. Every ambiguity that lowered the score must stay answerable from the list.
-- Under 200 words total.
-- Nothing else: no preamble, no restatement of the issue, no account of what you read or explored, no code blocks, no closing pleasantries.
-
-Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
-
-If, while reproducing, you find the described bug is already fixed or the
-behavior is already correct, do NOT fabricate a change: print
-PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
-	check(t, "bugPrompt(threshold=70)", bugPrompt("ISSUE BODY", 70), want)
-}
-
-func TestGoldenBugPromptWithoutThreshold(t *testing.T) {
-	want := `/superpowers:systematic-debugging ISSUE BODY
-
-Reproduce the bug with a failing test first, then fix it, verify the full test
-suite passes, and commit. HEADLESS: do not ask questions; make reasonable calls
-and note them in commit messages.
-
-If, while reproducing, you find the described bug is already fixed or the
-behavior is already correct, do NOT fabricate a change: print
-PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line and stop.`
-	check(t, "bugPrompt(threshold=0)", bugPrompt("ISSUE BODY", 0), want)
-}
-
-func TestGoldenTriagePrompt(t *testing.T) {
-	want := `You are a triage agent for an automated development pipeline.
-
-Open eligible issues:
-[LIST]
-
-Decide from the issue text alone — do NOT read the repository. Pick the single
-best issue to work on next and classify it:
-- "bug": a small, well-scoped defect that can be fixed by reproducing and debugging
-- "feature": anything that needs design work (new functionality, refactors, unclear scope)
-
-Respond with ONLY a JSON object, no other text:
-{"issueNumber": <int>, "kind": "bug" or "feature", "reason": "<one sentence>"}`
-	check(t, "triagePrompt", triagePrompt("[LIST]"), want)
-}
-
 func TestGoldenPickupComment(t *testing.T) {
-	check(t, "pickupComment", pickupComment("feature", "ai/issue-12"),
-		"🤖 Picked up (feature flow). Branch: `ai/issue-12`\n\n"+shared.BotMarker)
+	check(t, "pickupComment", pickupComment("ai/issue-12"),
+		"🤖 Picked up. Branch: `ai/issue-12`\n\n"+shared.BotMarker)
 }
 
 func TestGoldenAlreadyDoneComment(t *testing.T) {

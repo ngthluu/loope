@@ -4,7 +4,6 @@
 
 ```bash
 go test ./...                                             # unit tests (no network, no CLIs)
-go test -tags integration -run TestIntegrationTriage -v   # real claude CLI smoke test
 ```
 
 All process execution goes through the `shared.Runner` port (`worker/shared/runner.go`,

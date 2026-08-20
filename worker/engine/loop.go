@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -21,8 +21,8 @@ type Deps struct {
 	Host      shared.CodeHost
 	Workspace shared.Workspace
 	// NewAgent builds the coding-agent adapter for one issue's log dir. A
-	// factory rather than a value because every issue (and the triage step)
-	// gets its own agent scoped to its own log dir.
+	// factory rather than a value because every issue gets its own agent
+	// scoped to its own log dir.
 	NewAgent func(logDir string) shared.Agent
 	// DownloadImages rewrites issue content so referenced images are readable
 	// from destDir (see infra.DownloadIssueImages). nil disables the step and
@@ -123,22 +123,16 @@ func (o *Orchestrator) Stop(n int) error {
 	return nil
 }
 
-type pick struct {
-	issue  shared.Issue
-	kind   string
-	reason string
-}
-
 func (o *Orchestrator) issueLogDir(n int) string {
 	return shared.IssueLogDir(o.cfg.WorkDir, n)
 }
 
 // ProcessOnce runs one poll cycle: top the in-flight pipeline set back up to the
 // TicketsPerCycle budget from whatever is eligible right now. It selects
-// sequentially (reusing single-pick Triage), launches each pick in its own
+// deterministically (oldest eligible issue first), launches each pick in its own
 // goroutine — its own worktree/branch to its own PR — and RETURNS without
 // waiting for them. Pipelines started in earlier cycles keep running alongside.
-// Only listing/selection errors are returned; a pipeline logs its own outcome,
+// Only listing errors are returned; a pipeline logs its own outcome,
 // because it now finishes long after the cycle that started it has returned.
 func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 	free := o.freeSlots()
@@ -155,29 +149,26 @@ func (o *Orchestrator) ProcessOnce(ctx context.Context) error {
 	if len(issues) == 0 {
 		return nil
 	}
-	picks, selectErr := o.selectIssues(ctx, issues, free)
-	if len(picks) == 0 {
-		return selectErr
-	}
+	picks := selectIssues(issues, free)
 
 	// Every pick runs a pipeline in its own worktree off the default branch.
 	base, err := o.wt.DefaultBranch(ctx)
 	if err != nil {
-		return errors.Join(selectErr, err)
+		return err
 	}
 
 	for i := range picks {
-		p := picks[i]
-		n := p.issue.Number
+		issue := picks[i]
+		n := issue.Number
 		if !o.tryAcquire(n) {
 			continue
 		}
-		log.Printf("issue #%d (%s): %s", n, p.kind, p.reason)
+		log.Printf("issue #%d: picked (oldest eligible)", n)
 		o.runGuarded(ctx, n,
-			func(cctx context.Context) error { return o.handleIssue(cctx, p.issue, p.kind, base) },
+			func(cctx context.Context) error { return o.handleIssue(cctx, issue, base) },
 			func(cause error) { _ = o.park(ctx, n, cause) })
 	}
-	return selectErr
+	return nil
 }
 
 // runGuarded launches fn for issue n — whose slot the caller has already
@@ -226,37 +217,21 @@ func (o *Orchestrator) runGuarded(ctx context.Context, n int, fn func(cctx conte
 	}()
 }
 
-// selectIssues picks up to limit distinct issues by calling the single-pick
-// Triage repeatedly, removing each chosen issue from the candidate set. The
-// limit is the caller's free-slot count, not the raw config value, so a cycle
-// only asks for what it can actually start. A triage error stops selection and
-// is returned alongside whatever was already picked, so the cycle can still act
-// on earlier picks.
-func (o *Orchestrator) selectIssues(ctx context.Context, issues []shared.Issue, limit int) ([]pick, error) {
-	triageAgent := o.newAgent(filepath.Join(o.cfg.WorkDir, "logs", "triage"))
-	remaining := issues
-	var picks []pick
-	for len(picks) < limit && len(remaining) > 0 {
-		dec, err := Triage(ctx, triageAgent, o.cfg.Models.Triage, o.cfg.RepoPath, remaining)
-		if err != nil {
-			return picks, err
-		}
-		var chosen shared.Issue
-		var rest []shared.Issue
-		for _, is := range remaining {
-			if is.Number == dec.IssueNumber {
-				chosen = is
-			} else {
-				rest = append(rest, is)
-			}
-		}
-		picks = append(picks, pick{issue: chosen, kind: dec.Kind, reason: dec.Reason})
-		remaining = rest
+// selectIssues picks up to limit distinct issues deterministically: oldest
+// first (lowest issue number). The limit is the caller's free-slot count, not
+// the raw config value, so a cycle only picks what it can actually start.
+// There is no model call here any more — the merged entry session classifies
+// the issue itself, so selection has nothing left to decide but order.
+func selectIssues(issues []shared.Issue, limit int) []shared.Issue {
+	sorted := append([]shared.Issue(nil), issues...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Number < sorted[j].Number })
+	if len(sorted) > limit {
+		sorted = sorted[:limit]
 	}
-	return picks, nil
+	return sorted
 }
 
-func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, kind, base string) error {
+func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, base string) error {
 	n := issue.Number
 	branch := shared.BranchName(n)
 	logDir := o.issueLogDir(n)
@@ -272,7 +247,9 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, kind
 	// Mirror the title next to the state marker: the dashboard otherwise knows
 	// it only for as long as the issue keeps matching its label-scoped query.
 	shared.RecordTitle(logDir, issue.Title)
-	_ = o.gh.Comment(ctx, n, pickupComment(kind, branch))
+	// The pickup comment is kind-agnostic: under derived kind, nothing knows
+	// bug vs feature until the entry session's outcome resolves.
+	_ = o.gh.Comment(ctx, n, pickupComment(branch))
 
 	wtPath, err := o.wt.Create(ctx, o.cfg.WorkDir, n, base)
 	if err != nil {
@@ -305,15 +282,9 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, kind
 			return o.ship(ctx, issue, c, wtPath, branch, base, node.Kind)
 		}
 		prompt := resumePrompt(logDir, priorState, o.cfg.StateLabels.NeedsInfo, content)
-		if node.Kind == "bug" {
-			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt, node, prompt)
-		} else {
-			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, node, prompt, o.gh, o.wt, branch, issue.Title, n)
-		}
-	} else if kind == "bug" {
-		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt)
+		perr = ResumePipeline(ctx, c, o.cfg, wtPath, content, persona, base, uat, node, prompt, o.gh, o.wt, branch, issue.Title, n)
 	} else {
-		perr = RunFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, o.gh, o.wt, branch, issue.Title, n)
+		perr = RunPipeline(ctx, c, o.cfg, wtPath, content, persona, base, uat, o.gh, o.wt, branch, issue.Title, n)
 	}
 	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
 	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
@@ -332,7 +303,10 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, kind
 	if perr != nil {
 		return o.park(ctx, n, perr)
 	}
-	return o.ship(ctx, issue, c, wtPath, branch, base, kind)
+	// The kind was derived from the entry session's outcome and stamped onto
+	// the chain head (SetKind) — read it back for the PR body and the
+	// code-review criteria.
+	return o.ship(ctx, issue, c, wtPath, branch, base, shared.ResolvedKind(logDir))
 }
 
 // finishDone closes an issue a pipeline judged already implemented. It runs on
@@ -583,9 +557,9 @@ func (o *Orchestrator) ship(ctx context.Context, issue shared.Issue, c shared.Ag
 // retried in-band (see githubRetry), so reaching here means the failure is
 // persistent, not a blip.
 //
-// It used to strip ai-wip and leave the issue eligible, which re-triaged and
-// re-attempted the issue every single cycle — the unattended retry loop this
-// flow exists to avoid, paid for in triage tokens. So it parks like any other
+// It used to strip ai-wip and leave the issue eligible, which re-attempted the
+// issue every single cycle — the unattended retry loop this
+// flow exists to avoid. So it parks like any other
 // failure: labelled ai-rework with the full error commented, waiting for a human
 // to remove the label. Whatever the failing step managed to create (worktree,
 // branch) is preserved, not deleted, so the next attempt builds on it.
@@ -594,9 +568,8 @@ func (o *Orchestrator) abort(ctx context.Context, n int, cause error) error {
 	return o.park(ctx, n, cause)
 }
 
-func pickupComment(kind, branch string) string {
+func pickupComment(branch string) string {
 	d := promptData()
-	d["Kind"] = kind
 	d["Branch"] = branch
 	return mustRender("pickup", d)
 }

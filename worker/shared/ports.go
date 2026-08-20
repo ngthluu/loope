@@ -50,6 +50,10 @@ type Agent interface {
 	Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, error)
 	RecordSnapshot(content string)
 	CheckpointStage(kind, stage, artifact string)
+	// SetKind stamps the resolved pipeline kind ("bug"/"feature") onto the
+	// session-chain head once the merged entry session's outcome is known —
+	// see shared.SetHeadKind.
+	SetKind(kind string)
 	// LogDir is the issue log directory this agent writes its artifacts to —
 	// also where the session chain and state markers live.
 	LogDir() string

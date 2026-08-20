@@ -14,7 +14,7 @@ import (
 )
 
 // TestFeaturePipelineRecordsLineageChain pins the happy-path lineage:
-// brainstorm -> plan -> execute, each session one chain node linked to the
+// entry -> plan -> execute, each session one chain node linked to the
 // session that spawned it, with pending nodes marking each stage handoff.
 func TestFeaturePipelineRecordsLineageChain(t *testing.T) {
 	logDir := t.TempDir()
@@ -33,7 +33,7 @@ func TestFeaturePipelineRecordsLineageChain(t *testing.T) {
 		}
 	}}
 	c := infra.NewClaude(f, logDir, "")
-	if err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "", nil, testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
+	if err := runPipelineMain(context.Background(), c, featureConfig(), wt, "ISSUE", "", nil, testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
 		t.Fatal(err)
 	}
 	var real []shared.SessionNode
@@ -43,10 +43,13 @@ func TestFeaturePipelineRecordsLineageChain(t *testing.T) {
 		}
 	}
 	if len(real) != 3 {
-		t.Fatalf("real chain nodes = %+v, want brainstorm/plan/execute", real)
+		t.Fatalf("real chain nodes = %+v, want entry/plan/execute", real)
 	}
-	if real[0].ID != "arch-sess" || real[0].Stage != shared.StageBrainstorm || real[0].Parent != "" {
-		t.Errorf("node[0] = %+v, want arch-sess/brainstorm with no parent", real[0])
+	if real[0].ID != "arch-sess" || real[0].Stage != shared.StageEntry || real[0].Parent != "" {
+		t.Errorf("node[0] = %+v, want arch-sess/entry with no parent", real[0])
+	}
+	if real[0].Kind != "feature" {
+		t.Errorf("node[0].Kind = %q, want feature stamped once the spec outcome resolved", real[0].Kind)
 	}
 	if real[1].ID != "plan-sess" || real[1].Stage != shared.StagePlan || real[1].Parent != "arch-sess" {
 		t.Errorf("node[1] = %+v, want plan-sess spawned by arch-sess", real[1])
@@ -83,7 +86,7 @@ func TestResumeFeaturePipelinePlanStageDeadResumeFallsBackToArtifact(t *testing.
 	c := infra.NewClaude(f, logDir, "")
 	node := shared.SessionNode{ID: "plan-sess", Kind: "feature", Stage: shared.StagePlan,
 		Artifact: "docs/superpowers/specs/2026-07-13-thing-design.md"}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
 		t.Fatalf("dead resume with a live artifact must fall back fresh, got %v", err)
 	}
 	fresh := false
@@ -116,7 +119,7 @@ func TestResumeFeaturePipelinePlanStageMidRunFailureParks(t *testing.T) {
 	c := infra.NewClaude(f, logDir, "")
 	node := shared.SessionNode{ID: "plan-sess", Kind: "feature", Stage: shared.StagePlan,
 		Artifact: "docs/superpowers/specs/2026-07-13-thing-design.md"}
-	err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1)
+	err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1)
 	if err == nil {
 		t.Fatal("mid-run failure must propagate so the issue parks")
 	}
@@ -142,7 +145,7 @@ func TestResumeFeaturePipelineExecuteStageDeadResumeFallsBackToArtifact(t *testi
 	}}
 	c := infra.NewClaude(f, logDir, "")
 	node := shared.SessionNode{ID: "exec-sess", Kind: "feature", Stage: shared.StageExecute, Artifact: rel}
-	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), wt, "the issue", "", nil, node, "continue", testGH(), testWT(), "ai/issue-1", "T", 1); err != nil {
 		t.Fatalf("dead execute resume with a live plan must fall back fresh, got %v", err)
 	}
 	fresh := false
@@ -156,9 +159,10 @@ func TestResumeFeaturePipelineExecuteStageDeadResumeFallsBackToArtifact(t *testi
 	}
 }
 
-// TestResumeBugPipelineResumesChainNode: the bug pipeline's single debug
-// session resumes from the chain node.
-func TestResumeBugPipelineResumesChainNode(t *testing.T) {
+// TestResumeLegacyBugChainResumesChainNode: a LEGACY bug chain's single debug
+// session resumes from the chain node, still checkpointed on the old
+// bug/debug identity.
+func TestResumeLegacyBugChainResumesChainNode(t *testing.T) {
 	logDir := t.TempDir()
 	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
 		if testkit.ArgAfter(c.Args, "--resume") == "debug-sess" {
@@ -169,7 +173,7 @@ func TestResumeBugPipelineResumesChainNode(t *testing.T) {
 	}}
 	c := infra.NewClaude(f, logDir, "")
 	node := shared.SessionNode{ID: "debug-sess", Kind: "bug", Stage: shared.StageDebug}
-	if err := ResumeBugPipeline(context.Background(), c, featureConfig(), "/wt", "the issue", "main", nil, nil, node, "continue"); err != nil {
+	if err := resumePipelineMain(context.Background(), c, featureConfig(), "/wt", "the issue", "", nil, node, "continue", testGH(), nil, "ai/issue-1", "T", 1); err != nil {
 		t.Fatal(err)
 	}
 	head, ok := shared.HeadSession(logDir)

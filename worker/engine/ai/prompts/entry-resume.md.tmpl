@@ -1,0 +1,15 @@
+{{.Trigger}}
+
+HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
+This resumed session still has the same contract, scoped to THIS issue only:
+- Do NOT work on other issues in this session — planning and implementation of
+  a designed feature happen in separate pipeline sessions.
+- If this issue is a small, well-scoped defect you fix directly, print
+  {{.FixCommittedSentinel}} <one-sentence summary> on its own line once the fix is committed.
+  Print it even if the fix was already committed in an earlier turn.
+- If it needs design work instead, print {{.SpecReadySentinel}} <path> on its own line when
+  the spec file is written and committed, where <path> is the spec file path
+  relative to the repository root. Print it even if the spec was already
+  committed in an earlier turn.
+- If nothing remains to fix or build for this issue, print {{.AlreadyDoneSentinel}} <one-sentence reason>
+  on its own line.

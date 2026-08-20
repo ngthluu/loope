@@ -23,105 +23,16 @@ const specReadySentinel = "SPEC_READY:"
 // instead of relaying an empty approval.
 const nothingToAnswerSentinel = "QA_NOTHING_TO_ANSWER"
 
-// RunFeaturePipeline drives three sessions: an architect brainstorm session
-// (session A) that scores its confidence up front and, above the threshold,
-// works with a sonnet product-owner proxy to a committed spec (SPEC_READY); a
-// fresh plan session (session B) that turns the spec into a committed plan
-// (PIPELINE_READY); and a fresh execute session (session C) that implements it.
-// Below the confidence threshold it returns *lowConfidenceError without
-// designing anything.
-// Immediately after the spec is committed — before plan and execute — the
-// non-blocking UAT step publishes a human-verifiable checklist onto the issue.
-func RunFeaturePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona string, uat *UAT, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
-	start := time.Now()
-	// Snapshot before the call: the content is already fetched, and a session
-	// killed at any point still leaves the diff base the next resume needs.
-	c.RecordSnapshot(issueContent)
-	res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
-	if err != nil {
-		return err
-	}
+// This file holds the feature outcome's plan/execute machinery, plus the
+// product-owner-proxy prompt builders (answerer, done-confirm, qa-nudge) and
+// the confidence gate that BOTH routes share via the entry loop. The pipeline
+// entry itself — the merged entry session and its Q&A round loop — lives in
+// pipeline_entry.go.
 
-	if err := confidenceGate(cfg, res.Result); err != nil {
-		return err
-	}
-	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
-}
-
-// ResumeFeaturePipeline re-enters the feature pipeline at the chain node a
-// re-entry resolved (resumePoint): resume the node's own session with the
-// trigger prompt, or — for a pending node (no session id) — re-run its stage
-// fresh from the recorded artifact. An unrecognized stage, or a pending node
-// whose artifact is gone, falls back to a fully fresh RunFeaturePipeline as a
-// safety net.
-func ResumeFeaturePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona string, uat *UAT, node shared.SessionNode, prompt string, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
-	start := time.Now()
-	fresh := func() error {
-		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat, gh, wt, branch, title, n)
-	}
-	switch node.Stage {
-	case shared.StagePlan:
-		if node.ID == "" {
-			// Pending node: the plan session never started (or a legacy
-			// pre-call checkpoint). Re-run plan fresh from the committed spec.
-			if spec, ok := checkpointArtifact(wtPath, node.Artifact); ok {
-				return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, planPrompt(spec), "", start, gh, wt, branch, n)
-			}
-			return fresh()
-		}
-		return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, prompt, node.ID, start, gh, wt, branch, n)
-	case shared.StageExecute:
-		if node.ID == "" {
-			// Pending node: execute never started. Re-run it fresh on the
-			// committed plan — the executing-plans skill picks up from
-			// whatever steps are already done.
-			if plan, ok := checkpointArtifact(wtPath, node.Artifact); ok {
-				if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
-					return err
-				}
-				if perr := wt.Push(ctx, wtPath, branch); perr != nil {
-					log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
-				}
-				return nil
-			}
-			return fresh()
-		}
-		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, node.ID, node.Artifact); err != nil {
-			return err
-		}
-		// Execute complete (spec §1): push once, best-effort — ship's own push at
-		// the end of a successful run is the backstop, so a failure here is
-		// logged and swallowed rather than failing an otherwise-successful resume.
-		if perr := wt.Push(ctx, wtPath, branch); perr != nil {
-			log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
-		}
-		return nil
-	case shared.StageBrainstorm:
-		if node.ID == "" {
-			return fresh()
-		}
-		c.RecordSnapshot(issueContent)
-		// The trigger alone teaches a resumed session nothing about the
-		// sentinel contract; restate it so a session re-entered past its spec
-		// can still terminate (SPEC_READY / PIPELINE_ALREADY_DONE) instead of
-		// narrating status until the round cap parks it.
-		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", brainstormResumePrompt(prompt), node.ID)
-		if err != nil {
-			return err
-		}
-		if err := confidenceGate(cfg, res.Result); err != nil {
-			return err
-		}
-		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
-	default:
-		return fresh()
-	}
-}
-
-// confidenceGate judges an architect turn's confidence score, shared by the
-// fresh brainstorm-0 call and a resumed brainstorm-resume turn so a resumed
-// session is held to the same threshold as a fresh one. A threshold <= 0
-// disables it, and an unparseable score fails open.
+// confidenceGate judges an entry turn's confidence score, shared by the fresh
+// entry-0 call and a resumed re-entry turn so a resumed session is held to the
+// same threshold as a fresh one. A threshold <= 0 disables it, and an
+// unparseable score fails open.
 func confidenceGate(cfg *shared.Config, output string) error {
 	if cfg.ConfidenceThreshold > 0 {
 		if score, ok := parseConfidence(output); ok && score < cfg.ConfidenceThreshold {
@@ -129,106 +40,6 @@ func confidenceGate(cfg *shared.Config, output string) error {
 		}
 	}
 	return nil
-}
-
-// architectCall runs one architect-model turn: the brainstorm-0/brainstorm-N
-// call when resume is "", or a --resume turn (round call or resumed re-entry)
-// when it isn't. Every architect turn is a primary brainstorm-stage session,
-// so the checkpoint is baked in here.
-func architectCall(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, label, prompt, resume string) (*shared.ClaudeResult, error) {
-	return c.Call(ctx, shared.ClaudeCall{
-		Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
-		Model:           cfg.Models.Architect,
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-		Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageBrainstorm},
-	})
-}
-
-// brainstormLoop is the architect Q&A round loop shared by a fresh brainstorm-0
-// call and a resumed brainstorm session: sessionID/output are the id and result
-// text of whichever call preceded it (brainstorm-0, or the resume turn).
-func brainstormLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona string, uat *UAT, sessionID, output string, start time.Time, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
-	for round := 1; ; round++ {
-		// The architect signals a committed spec: hand off to the fresh plan
-		// session, then execute. If it claims a spec but none is on disk, fall
-		// through and keep prodding (mirrors the plan-file behavior).
-		if rel, ok := parseSpecReady(output); ok {
-			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
-				// Spec committed: append a PENDING plan node BEFORE the plan
-				// call starts, so a crash anywhere in the handoff (push, PR,
-				// comment, plan spawn) resumes as a fresh plan run on this
-				// spec instead of re-entering this loop.
-				specRel := relToWorktree(wtPath, specPath)
-				c.CheckpointStage("feature", shared.StagePlan, specRel)
-				// The UAT session runs alongside plan/execute — it only reads
-				// the committed spec, so nothing downstream waits on it. The
-				// wait runs on every exit path (including a failed plan): the
-				// session must not outlive the pipeline, whose worktree and
-				// context the caller tears down on return.
-				wait := uat.StartFeature(ctx, c, cfg, wtPath, specPath)
-				defer wait()
-				// Spec complete (spec §1): push, open (or recover) the PR,
-				// comment the URL, and record it — before plan/execute run at
-				// all. Best-effort: pushSpecPR logs and swallows its own
-				// failures rather than turning a completed spec into an error.
-				pushSpecPR(ctx, gh, wt, wtPath, branch, title, n, c.LogDir())
-				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(specPath), "", start, gh, wt, branch, n)
-			}
-		}
-
-		var reply string
-		donePushback := false
-		if reason, ok := parseAlreadyDone(output); ok {
-			// Architect claims already implemented — the answerer (PO proxy)
-			// must confirm before we close. This confirmation is terminal, not a
-			// bounded round.
-			confirm, err := c.Call(ctx, shared.ClaudeCall{
-				Dir: wtPath, Label: fmt.Sprintf("done-confirm-%d", round),
-				Prompt:          doneConfirmPrompt(issueContent, persona, reason),
-				Model:           cfg.Models.Answerer,
-				SkipPermissions: true,
-			})
-			if err != nil {
-				return err
-			}
-			if strings.Contains(confirm.Result, doneConfirmSentinel) {
-				return &alreadyDoneError{reason: reason}
-			}
-			reply = confirm.Result // objection; hand it back to the architect
-			donePushback = true
-		}
-
-		// Sending a reply to the architect is a bounded Q&A round.
-		if round > cfg.MaxQARounds {
-			return fmt.Errorf("feature pipeline: exceeded %d Q&A rounds without a completed spec", cfg.MaxQARounds)
-		}
-		if !donePushback {
-			ans, err := c.Call(ctx, shared.ClaudeCall{
-				Dir: wtPath, Label: fmt.Sprintf("answer-%d", round),
-				Prompt:          answererPrompt(issueContent, persona, output),
-				Model:           cfg.Models.Answerer,
-				SkipPermissions: true,
-			})
-			if err != nil {
-				return err
-			}
-			reply = ans.Result
-			if strings.Contains(reply, nothingToAnswerSentinel) {
-				// A status update, not a question: an "Approved" relay would
-				// only invite the next status update (issue-5 burned every
-				// round this way). Push the architect toward a terminal
-				// sentinel instead.
-				reply = qaNudgePrompt()
-			}
-		}
-
-		res, err := architectCall(ctx, c, cfg, wtPath, fmt.Sprintf("brainstorm-%d", round), reply, sessionID)
-		if err != nil {
-			return err
-		}
-		output = res.Result
-	}
 }
 
 // runPlanThenExecute runs the plan session (session B) that turns the approved
@@ -484,18 +295,11 @@ func readPersona(path string) string {
 	return string(data)
 }
 
-func brainstormPrompt(issue string, threshold int) string {
-	d := promptData()
-	d["Issue"] = issue
-	d["Threshold"] = threshold
-	return mustRender("brainstorm.md.tmpl", d)
-}
-
-// brainstormResumePrompt wraps a resumed brainstorm session's trigger prompt
-// with a restatement of the sentinel contract. A bare trigger taught the
-// resumed architect nothing about SPEC_READY/PIPELINE_ALREADY_DONE, so a
-// session re-entered past its spec reported completion in prose the loop
-// could not parse and burned every Q&A round (issue-5 incident).
+// brainstormResumePrompt wraps a resumed LEGACY brainstorm session's trigger
+// prompt with a restatement of the old feature-route sentinel contract
+// (SPEC_READY/PIPELINE_ALREADY_DONE — such a session was never taught
+// FIX_COMMITTED). Kept only for chains checkpointed at StageBrainstorm before
+// the merged entry stage existed; fresh sessions use entryResumePrompt.
 func brainstormResumePrompt(trigger string) string {
 	d := promptData()
 	d["Trigger"] = trigger

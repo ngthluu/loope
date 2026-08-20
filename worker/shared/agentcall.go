@@ -81,7 +81,7 @@ type ClaudeCall struct {
 	// to the issue's chain (and keeps the legacy session file in step), so ANY
 	// death mode — usage limit, network drop, SIGKILL, daemon crash — leaves a
 	// resumable checkpoint pointing at THIS session and stage. Ephemeral calls
-	// (answerer, UAT, triage, merge-resolve) leave it nil and never checkpoint.
+	// (answerer, UAT, merge-resolve) leave it nil and never checkpoint.
 	Checkpoint *CallCheckpoint
 }
 
@@ -121,10 +121,20 @@ type SessionInfo struct {
 // session resumes into. Every recorded stage is a real Agent.Call site with a
 // natural resume point (see Resume*Pipeline); there is no stage with none.
 const (
+	// StageEntry marks the merged entry session (engine/pipeline_entry.go): the
+	// single fresh-run entry point that investigates the issue and either fixes
+	// it directly (bug outcome) or writes a spec (feature outcome). Its kind is
+	// unknown at checkpoint time — the engine stamps the resolved kind onto the
+	// chain head (SetHeadKind) once the session's outcome sentinel is parsed.
+	StageEntry = "entry"
+	// StageBrainstorm and StageDebug are LEGACY: no fresh pipeline writes them
+	// any more (the merged entry stage replaced both), but in-flight chains
+	// checkpointed before the merge still resume through them on their original
+	// routes (see engine.ResumePipeline).
 	StageBrainstorm = "brainstorm"
+	StageDebug      = "debug"
 	StagePlan       = "plan"
 	StageExecute    = "execute"
-	StageDebug      = "debug"
 	// StageCodeReview marks the post-ship review-and-fix loop's latest session
 	// (engine/codereview.go). Unlike the pipeline stages it does not resume into
 	// a pipeline: handleIssue routes it straight back to ship, whose review loop

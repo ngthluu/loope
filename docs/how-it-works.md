@@ -3,23 +3,28 @@
 Each poll cycle runs four steps:
 
 1. **List** open issues carrying the eligible label (default `ai-agent`) that
-   don't yet have a state label.
-2. **Triage** — a Claude agent picks the single best issue and classifies it:
-   - **`bug`** — small, well-scoped defect → one systematic-debugging session.
-     It investigates, scores how confidently the bug can be fixed as reported
-     and, below `confidenceThreshold`, escalates to `ai-needs-info` instead of
-     guessing (see [Confidence gate](configuration.md#confidence-gate));
-     otherwise it reproduces with a failing test, fixes, and commits. A short
+   don't yet have a state label, and pick the oldest ones (lowest issue number)
+   up to the free-slot budget. There is no up-front classifier: the entry
+   session below decides the route itself, with the repository in front of it.
+2. **Entry** — one merged session investigates the repository, scores how
+   confidently the issue can be handled as written and, below
+   `confidenceThreshold`, escalates to `ai-needs-info` instead of guessing
+   (see [Confidence gate](configuration.md#confidence-gate)). Otherwise it
+   commits to one of two outcomes, and the pipeline **derives the issue's kind
+   from which one it produced**:
+   - **Fix directly** (kind `bug`) — a small, well-scoped defect: reproduce
+     with a failing test, fix, commit, and print `FIX_COMMITTED:`. A short
      read-only session then reads the issue and the resulting diff and posts a
      UAT checklist as an issue comment.
-   - **`feature`** — anything needing design → three sessions. An architect
-     brainstorm session scores confidence and, below `confidenceThreshold`,
-     escalates to `ai-needs-info`; otherwise it brainstorms with a cheaper
-     "product owner proxy" agent in a Q&A loop, then writes and commits the
-     spec. A short read-only session then turns that spec into a UAT checklist
-     posted as an issue comment. A **fresh** session turns the spec into a
-     committed implementation plan, and a third session executes the plan.
-   - **`done`** — the work is already fully implemented in the codebase → the
+   - **Design first** (kind `feature`) — anything needing design work,
+     including a "fix" whose right behavior first needs designing: the session
+     brainstorms with a cheaper "product owner proxy" agent in a Q&A loop,
+     then writes and commits the spec (`SPEC_READY:`). A short read-only
+     session turns that spec into a UAT checklist posted as an issue comment.
+     A **fresh** session turns the spec into a committed implementation plan,
+     and a third session executes the plan.
+   - If the session finds the work already fully implemented
+     (`PIPELINE_ALREADY_DONE:`), the proxy confirms the claim; on agreement the
      loop comments, applies `ai-done`, and closes the issue without opening a PR.
 3. **Work** happens on branch `ai/issue-<N>` in a dedicated git worktree under
    `workDir`, created from the remote default branch.
@@ -71,7 +76,7 @@ rather than at the end of a batch.
 Every cycle draws from one queue — the eligible issues — so there is no priority
 ordering to reason about. A re-queued issue (you removed `ai-rework`, you pressed
 **Continue**, or the orphan sweep re-queued a crashed run) is just an eligible
-issue again, competing for slots on equal terms and triaged like any other.
+issue again, competing for slots on equal terms like any other.
 
 On shutdown (Ctrl-C / SIGTERM) the daemon stops polling and waits for in-flight
 pipelines to finish, so the `workDir` lock is never released while a pipeline is
@@ -101,7 +106,7 @@ stateDiagram-v2
 
     [*] --> eligible: you add ai-agent
 
-    eligible --> wip: triage picks it, slot free
+    eligible --> wip: oldest eligible picked, slot free
 
     wip --> done: PR opened, or already implemented
     wip --> needsinfo: confidence below threshold
@@ -137,7 +142,7 @@ than starting over.
 
 | From | To | Trigger | Who acts | Preserved |
 |------|----|---------|----------|-----------|
-| eligible | `ai-wip` | Triage picks the issue and a slot is free | daemon | — |
+| eligible | `ai-wip` | The issue is the oldest eligible and a slot is free | daemon | — |
 | `ai-wip` | `ai-done` | Pipeline produced commits; branch pushed and PR opened | daemon | no (worktree removed) |
 | `ai-wip` | `ai-done` | Pipeline judged the work already implemented — issue is also **closed**, no PR | daemon | no (worktree removed) |
 | `ai-wip` | `ai-needs-info` | Confidence score below `confidenceThreshold`; questions commented | daemon | no (worktree removed) |
@@ -172,8 +177,8 @@ Everything else waits for you:
 ### What a re-queued run reuses
 
 Removing `ai-rework` (or pressing **Continue**, or letting the sweep re-queue a
-crashed run) sends the issue back through the *normal* cycle: it is triaged and
-the pipeline runs again — but in the **worktree that is already on disk**.
+crashed run) sends the issue back through the *normal* cycle: the pipeline runs
+again — but in the **worktree that is already on disk**.
 `Worktree.Create` reuses whatever it finds at `<workDir>/issue-<N>` instead of
 recreating it, so the previous attempt's commits are the starting point, and the
 already-implemented check can close out work that turned out to be finished. What
@@ -190,7 +195,7 @@ daemon to bring its existing worktree up to date instead of running a pipeline:
 1. The scan runs at the start of every poll cycle, ahead of normal picks, and
    acts on any open issue carrying both the eligible label and the trigger —
    whatever state the issue is in (`ai-done`, `ai-rework`, …). There is no
-   triage; the label *is* the decision.
+   route decision to make; the label *is* the decision.
 2. The issue wears `ai-wip` while the run holds a normal concurrency slot, so it
    can never collide with a pipeline run on the same issue.
 3. The daemon fetches and runs `git merge origin/<default-branch>` in the

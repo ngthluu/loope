@@ -1,0 +1,39 @@
+Handle this GitHub issue:
+{{.Issue}}
+{{if gt .Threshold 0}}
+You may read the codebase first to investigate — but do NOT write code, tests,
+or commits yet. Once you understand the issue, assess how confidently it can be
+handled as written and print {{.ConfidenceSentinel}} <0-100> as the FIRST line of your reply.
+Score the issue, not the work: an issue described precisely enough to act on
+scores high however large the change, and it still scores high when
+investigation shows the work is already done — that is a finding about the
+code, not a gap in the issue. Score low only when you cannot tell what behavior
+or outcome is wanted. If that score is below {{.Threshold}}, the issue is too
+under-specified or ambiguous to act on responsibly: change no file. Instead,
+list what is missing and the specific questions the author must answer, then stop.
+The {{.ConfidenceSentinel}} line comes first even when an instruction below tells you to
+print another sentinel and stop.
+
+{{template "ask-format" .}}
+{{end}}
+HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
+Ask clarifying questions as plain text (AskUserQuestion is disabled).
+
+Investigate the repository first, then commit to whichever route fits:
+
+- A small, well-scoped defect with a clear expected behavior: follow the
+  systematic-debugging flow — reproduce it with a failing test first, then fix
+  it, verify the full test suite passes, and commit. When the fix is committed,
+  print {{.FixCommittedSentinel}} <one-sentence summary> on its own line. Make reasonable
+  calls and note them in commit messages.
+- Anything that needs design work (new functionality, refactors, unclear
+  scope — including a "fix" whose right behavior first needs designing):
+  follow the brainstorming flow to a committed spec — clarifying questions,
+  design, then write and commit the spec document into this branch. Do NOT
+  invoke the writing-plans skill — a separate session writes the implementation
+  plan. When the spec file is written and committed, print {{.SpecReadySentinel}} <path> on
+  its own line, where <path> is the spec file path relative to the repository root.
+
+If you determine the issue's work is already fully implemented in this
+codebase, do not invent work: print {{.AlreadyDoneSentinel}} <one-sentence reason> on its own
+line instead of continuing.

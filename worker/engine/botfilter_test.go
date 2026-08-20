@@ -31,7 +31,7 @@ func mustJSON(s string) string {
 // comments posted before the marker existed, by its leading text.
 func TestFetchIssueContentDropsLoopeStatusComments(t *testing.T) {
 	comments := []string{
-		pickupComment("bug", "ai/issue-7"),
+		pickupComment("ai/issue-7"),
 		parkComment("ai-rework", "", "dial tcp: i/o timeout"),
 		prComment("https://example.test/pr/1"),
 		alreadyDoneComment("already there."),

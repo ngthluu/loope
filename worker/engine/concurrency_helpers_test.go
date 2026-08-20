@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ngthluu/loope/worker/shared"
 	"github.com/ngthluu/loope/worker/testkit"
 )
 
@@ -45,36 +46,20 @@ func (g *gateRunner) RunStream(ctx context.Context, dir string, env []string, st
 	return g.inner.RunStream(ctx, dir, env, stdin, w, name, args...)
 }
 
-var issueNumRe = regexp.MustCompile(`"number":\s*(\d+)`)
-
-// firstIssueIn returns the lowest-numbered issue mentioned in a triage prompt,
-// or 0. Triage marshals the candidate list as JSON, so a prompt's "number"
-// fields are exactly the still-eligible candidates.
-func firstIssueIn(prompt string) int {
-	best := 0
-	for _, m := range issueNumRe.FindAllStringSubmatch(prompt, -1) {
-		n, _ := strconv.Atoi(m[1])
-		if best == 0 || n < best {
-			best = n
-		}
-	}
-	return best
-}
-
 // pipelineIssueRe pulls the issue number out of the worktree directory a
 // pipeline's Claude call runs in — worktreePath is <workDir>/issue-<N>.
 var pipelineIssueRe = regexp.MustCompile(`issue-(\d+)`)
 
-// gatePipelines makes every pipeline (non-triage) claude call block until
-// release is closed, announcing the issue number it belongs to on started.
-// Triage calls are never gated, so selection still completes.
+// gatePipelines makes every pipeline claude call block until release is
+// closed, announcing the issue number it belongs to on started. Selection is
+// deterministic and makes no claude call, so it always completes ungated.
 func gatePipelines(o *Orchestrator, f *testkit.FakeRunner) (started chan int, release chan struct{}) {
 	started = make(chan int, 64)
 	release = make(chan struct{})
 	seen := map[int]bool{}
 	var mu sync.Mutex
 	rewire(o, &gateRunner{inner: f, gate: func(dir, name, stdin string) chan struct{} {
-		if name != "claude" || strings.Contains(stdin, "triage agent") {
+		if name != "claude" {
 			return nil
 		}
 		n := 0
@@ -94,8 +79,7 @@ func gatePipelines(o *Orchestrator, f *testkit.FakeRunner) (started chan int, re
 }
 
 // slotEnv is a fakeEnv whose eligible list and ai-rework list are settable
-// between cycles, and whose triage picks the lowest-numbered candidate still in
-// the prompt.
+// between cycles; selection picks the lowest-numbered eligible issue.
 type slotEnv struct {
 	*fakeEnv
 	mu       sync.Mutex
@@ -154,10 +138,7 @@ func newSlotEnv(t *testing.T, eligible ...int) *slotEnv {
 			}
 			return "", "", nil
 		case "claude":
-			if strings.Contains(c.Stdin, "triage agent") {
-				return testkit.ClaudeJSON(fmt.Sprintf(`{"issueNumber": %d, "kind": "bug", "reason": "r"}`, firstIssueIn(c.Stdin)), "t"), "", nil
-			}
-			return testkit.ClaudeJSON("Fixed and committed.", "d"), "", nil
+			return testkit.ClaudeJSON("FIX_COMMITTED: fixed", "d"), "", nil
 		}
 		return "", "", nil
 	}
@@ -258,12 +239,17 @@ func TestGateRunnerBlocksWithoutHoldingRunnerLock(t *testing.T) {
 	close(release)
 }
 
-func TestFirstIssueInPicksLowestCandidate(t *testing.T) {
-	prompt := `{"number": 9, "title": "a"} {"number": 7, "title": "b"}`
-	if got := firstIssueIn(prompt); got != 7 {
-		t.Fatalf("firstIssueIn = %d, want 7", got)
+func TestSelectIssuesPicksOldestFirst(t *testing.T) {
+	issues := []shared.Issue{{Number: 9}, {Number: 7}, {Number: 8}}
+	got := selectIssues(issues, 2)
+	if len(got) != 2 || got[0].Number != 7 || got[1].Number != 8 {
+		t.Fatalf("selectIssues = %+v, want issues 7 then 8", got)
 	}
-	if got := firstIssueIn("no issues here"); got != 0 {
-		t.Fatalf("firstIssueIn on empty = %d, want 0", got)
+	if got := selectIssues(nil, 3); len(got) != 0 {
+		t.Fatalf("selectIssues(nil) = %+v, want empty", got)
+	}
+	// The input slice must not be reordered in place.
+	if issues[0].Number != 9 {
+		t.Fatalf("selectIssues reordered its input: %+v", issues)
 	}
 }
