@@ -39,9 +39,9 @@ A live web dashboard shows every issue it has touched. See
 [How it works](docs/how-it-works.md) for the full lifecycle and label state
 machine.
 
+https://github.com/ngthluu/loope/raw/main/docs/images/loope-intro.mp4
+
 <p align="center">
-  <video src="https://github.com/ngthluu/loope/raw/main/docs/images/loope-intro.mp4" controls muted width="100%"></video>
-  <br>
   <sub><em>Label an issue, get a pull request — what makes loope different, in 90 seconds. (<a href="docs/images/loope-intro.mp4">open the MP4</a>)</em></sub>
 </p>
 
