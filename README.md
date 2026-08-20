@@ -1,108 +1,51 @@
-# loope — event-driven loop
-
-[![CI](https://github.com/ngthluu/loope/actions/workflows/ci.yml/badge.svg)](https://github.com/ngthluu/loope/actions/workflows/ci.yml)
-[![Release](https://github.com/ngthluu/loope/actions/workflows/release.yml/badge.svg)](https://github.com/ngthluu/loope/actions/workflows/release.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8.svg)](go.work)
-
-`loope` is an event-driven loop that watches one GitHub repository for issues
-labeled `ai-agent` and drives each one all the way to a pull request using
-headless [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions
-running inside git worktrees. Issue state lives entirely in GitHub labels, so
-the daemon itself is stateless and safe to restart.
-
-Label an issue `ai-agent` and, on the next poll cycle, loope claims it into a
-free slot (up to `ticketsPerCycle` issues run concurrently) and runs a pipeline
-of Claude sessions in an isolated worktree on branch `ai/issue-<N>`:
-
-- **Entry** — one session investigates the repository and scores its
-  confidence; below `confidenceThreshold` it parks the issue as
-  `ai-needs-info` with a question instead of guessing. Otherwise it commits to
-  an outcome that loope reads as structured output (enforced with the Claude
-  CLI's `--json-schema`, not by grepping prose): `fix_committed` for a
-  well-scoped defect fixed directly, `spec_ready` for anything that needs
-  design first, or `already_done`.
-- **Design first** — for `spec_ready`, the entry session brainstorms with a
-  cheaper product-owner-proxy agent, then fresh sessions turn the committed
-  spec into a plan and execute it; an `incomplete` execute report parks the
-  issue rather than shipping a half-done branch.
-- **UAT checklist** — a short read-only session posts a checklist on the
-  issue from the diff or the spec.
-- **Ship** — if the work produced commits, the branch is pushed and a PR
-  opened (`Closes #N`). An optional post-ship **code review** loop runs
-  `/code-review --fix` rounds against the shipped diff before the issue is
-  closed `ai-done`.
-
-Add `ai-resolve-merge` to an in-flight issue and loope merges the default
-branch into its branch, resolves conflicts with one session, and pushes.
-A live web dashboard shows every issue it has touched. See
-[How it works](docs/how-it-works.md) for the full lifecycle and label state
-machine.
-
-https://github.com/ngthluu/loope/raw/main/docs/images/loope-intro.mp4
-
 <p align="center">
-  <sub><em>Label an issue, get a pull request — what makes loope different, in 90 seconds. (<a href="docs/images/loope-intro.mp4">open the MP4</a>)</em></sub>
+  <a href="docs/images/loope-intro.mp4">
+    <img src="docs/images/loope-intro-poster.png" alt="loope — Label an issue. Get a pull request. Click to watch the 90-second intro video." width="100%">
+  </a>
 </p>
 
-<p align="center">
-  <img src="docs/images/dashboard.png" alt="loope's live telemetry dashboard: the ticket queue with per-issue cost on the left, and a selected issue's pipeline of Claude steps showing tokens, cost, and session id on the right">
-  <br>
-  <sub><em>The live dashboard — every tracked issue, its pipeline steps, and per-step cost, tokens, and Claude session id.</em></sub>
-</p>
+<h1 align="center">loope</h1>
+
+<p align="center"><strong>Label a GitHub issue. Get a pull request.</strong><br>
+An always-on loop that turns your issues into reviewed PRs with Claude Code — with no infrastructure to run.</p>
 
 <p align="center">
-  <img src="docs/images/issues.png" alt="A GitHub issues list where each issue is labeled ai-agent and closed ai-done, each driven to a linked pull request by loope">
-  <br>
-  <sub><em>Label an issue <code>ai-agent</code> and loope drives it to a PR — closing it <code>ai-done</code>, or parking it <code>ai-needs-info</code> when it needs clarification.</em></sub>
+  <a href="https://github.com/ngthluu/loope/actions/workflows/ci.yml"><img src="https://github.com/ngthluu/loope/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ngthluu/loope/actions/workflows/release.yml"><img src="https://github.com/ngthluu/loope/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="go.work"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8.svg" alt="Go 1.25+"></a>
 </p>
+
+## Why loope
+
+- **You add one label.** `ai-agent` on the issue you already wrote. That's the whole workflow.
+- **It asks before it guesses.** A vague issue gets you questions, not a wrong PR.
+- **Design first — with your product owner in the room.** An architect agent debates a product-owner agent that decides the way you would, from a few rules you write once.
+- **Ships like a teammate.** A PR that closes the issue, a hand-verification checklist, and a review pass before anything is called done.
+- **Failures park. They never loop.** Rate limit, budget cap, crash — the issue is parked with the full error and nothing retries until you say so. It never burns tokens unattended.
+- **One board. Many machines. Every account.** Run workers on as many machines and Claude Code logins as you have; route issues by label. The issue board is the only thing they share — no queue, no database, no coordinator.
+- **See every step, and what it cost.** Tokens, cost and session per step; one fleet view of every worker and how much usage each account has left.
 
 ## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ngthluu/loope/main/install.sh | sh
+loope --config loope.json
 ```
 
-This downloads the prebuilt binary for your OS/arch from the
-[latest release](https://github.com/ngthluu/loope/releases/latest), verifies its
-checksum, and installs it to `/usr/local/bin`. Binaries are published for macOS
-and Linux on `amd64` and `arm64`.
+One Go binary for macOS and Linux. Bring your own `git`, `gh` and `claude` — nothing else to run.
+Start from [`worker/loope.json.example`](worker/loope.json.example); see [Installation](docs/installation.md).
 
-> loope is a wrapper around your local toolchain: it needs `git`, `gh`
-> (authenticated), and `claude` on your `PATH` at run time. See
-> [Installation](docs/installation.md) for prerequisites, the `--doctor`
-> preflight, and building from source.
+## Learn more
 
-Then point it at a repo and run:
-
-```bash
-loope --doctor                     # optional: check git / gh / claude / superpowers before writing a config
-# grab worker/loope.json.example from this repo (or the release archive), then:
-cp worker/loope.json.example loope.json   # edit repoPath / repoSlug / workDir
-loope --config loope.json          # polls for labeled issues, serves the dashboard on http://localhost:8080
-```
-
-Every run starts with the same preflight; a healthy run prints nothing, a
-failed check prints the report and exits.
-
-## Documentation
-
-| Guide | What's inside |
-|-------|---------------|
-| [How it works](docs/how-it-works.md)     | Poll cycle, entry routes, label lifecycle, confidence gate |
-| [Installation](docs/installation.md)     | Prerequisites, `--doctor`, label setup, building from source |
-| [Configuration](docs/configuration.md)   | Every config field — models, retries, confidence gate, persona |
-| [Dashboard](docs/dashboard.md)           | The live web dashboard and its embedded assets |
-| [Fleet telemetry](docs/telemetry.md)     | `loope-telemetry-server` (own binary + Dockerfile), worker opt-in, and Claude usage capture |
-| [Operations](docs/operations.md)         | Always-on behavior, failure handling, running as a launchd service |
-| [Development](docs/development.md)        | Testing, prompts, logs, releasing, contributing |
-| [Release notes](docs/release-notes/)     | What changed in each tagged release |
-
-## Contributing
-
-Issues and pull requests are welcome. CI (`go build`, `go vet`, `go test ./...`)
-must pass; please keep new behavior covered by tests that run without the network
-or external CLIs. See [Development](docs/development.md).
+| | |
+|---|---|
+| [How it works](docs/how-it-works.md) | The lifecycle, the label state machine, the confidence gate |
+| [Installation](docs/installation.md) | Prerequisites, `--doctor`, labels, building from source |
+| [Configuration](docs/configuration.md) | Models, retries, persona, per-worker labels, fleet telemetry |
+| [Dashboard](docs/dashboard.md) · [Fleet telemetry](docs/telemetry.md) | What you see while it runs |
+| [Operations](docs/operations.md) | Always-on behaviour, failure handling, running as a service |
+| [Development](docs/development.md) · [Release notes](docs/release-notes/) | Contributing and what changed |
 
 ## License
 
