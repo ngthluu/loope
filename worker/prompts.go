@@ -57,6 +57,7 @@ func promptData() map[string]any {
 		"SpecReadySentinel":       specReadySentinel,
 		"ReadySentinel":           readySentinel,
 		"AlreadyDoneSentinel":     alreadyDoneSentinel,
+		"NothingToAnswerSentinel": nothingToAnswerSentinel,
 		"DoneConfirmSentinel":     doneConfirmSentinel,
 		"UATBeginSentinel":        uatBeginSentinel,
 		"UATEndSentinel":          uatEndSentinel,

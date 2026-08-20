@@ -11,35 +11,37 @@ import (
 // prompt file or {{define}} block with no entry here fails TestEveryTemplateRenders —
 // which is the point: it catches a prompt that was added but never wired up.
 var promptTestData = map[string]map[string]any{
-	"brainstorm.md.tmpl":   {"Issue": "I", "Threshold": 70},
-	"answerer.md.tmpl":     {"Issue": "I", "Persona": "P", "ArchitectMsg": "A"},
-	"done-confirm.md.tmpl": {"Issue": "I", "Persona": "P", "Reason": "R"},
-	"plan.md.tmpl":         {"SpecPath": "docs/spec.md"},
-	"execute.md.tmpl":      {"PlanPath": "docs/plan.md"},
-	"debug.md.tmpl":        {"Issue": "I", "Threshold": 70},
-	"triage.md.tmpl":       {"List": "[]"},
-	"pickup":               {"Kind": "feature", "Branch": "b"},
-	"already-done":         {"Reason": "R"},
-	"needs-info":           {"Score": 1, "Label": "l", "Feedback": "F"},
-	"park":                 {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
-	"pr-comment":           {"URL": "u"},
-	"plan-comment":         {"Path": "docs/superpowers/plans/2026-plan.md"},
-	"pr-title":             {"Title": "T", "Number": 1},
-	"pr-body":              {"Number": 1, "Kind": "bug"},
-	"guidance-usage-limit": {},
-	"guidance-budget":      {},
-	"guidance-network":     {},
-	"ask-format":           {},
-	"uat-format":           {"UATCoverage": "C"},
-	"uat-section":          {"Checklist": "- [ ] C"},
-	"uat-feature.md.tmpl":  {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
-	"uat-bug.md.tmpl":      {"Issue": "I", "Base": "main", "UATCoverage": "C"},
-	"codereview.md.tmpl":   {"Round": 1, "Rounds": 2, "Base": "main"},
-	"codereview-comment":   {"Round": 1, "Rounds": 2, "Status": "fixed", "Summary": "S"},
-	"mergeresolve.md.tmpl": {"Base": "main"},
-	"mergeresolve-pickup":  {"Base": "main", "Branch": "b"},
-	"mergeresolve-done":    {"Base": "main", "Branch": "b", "Summary": "S"},
-	"mergeresolve-park":    {"Label": "ai-rework", "TriggerLabel": "ai-resolve-merge", "Guidance": "G", "Error": "E"},
+	"brainstorm.md.tmpl":        {"Issue": "I", "Threshold": 70},
+	"brainstorm-resume.md.tmpl": {"Trigger": "T"},
+	"answerer.md.tmpl":          {"Issue": "I", "Persona": "P", "ArchitectMsg": "A"},
+	"qa-nudge.md.tmpl":          {},
+	"done-confirm.md.tmpl":      {"Issue": "I", "Persona": "P", "Reason": "R"},
+	"plan.md.tmpl":              {"SpecPath": "docs/spec.md"},
+	"execute.md.tmpl":           {"PlanPath": "docs/plan.md"},
+	"debug.md.tmpl":             {"Issue": "I", "Threshold": 70},
+	"triage.md.tmpl":            {"List": "[]"},
+	"pickup":                    {"Kind": "feature", "Branch": "b"},
+	"already-done":              {"Reason": "R"},
+	"needs-info":                {"Score": 1, "Label": "l", "Feedback": "F"},
+	"park":                      {"Label": "ai-rework", "Guidance": "G", "Error": "E"},
+	"pr-comment":                {"URL": "u"},
+	"plan-comment":              {"Path": "docs/superpowers/plans/2026-plan.md"},
+	"pr-title":                  {"Title": "T", "Number": 1},
+	"pr-body":                   {"Number": 1, "Kind": "bug"},
+	"guidance-usage-limit":      {},
+	"guidance-budget":           {},
+	"guidance-network":          {},
+	"ask-format":                {},
+	"uat-format":                {"UATCoverage": "C"},
+	"uat-section":               {"Checklist": "- [ ] C"},
+	"uat-feature.md.tmpl":       {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
+	"uat-bug.md.tmpl":           {"Issue": "I", "Base": "main", "UATCoverage": "C"},
+	"codereview.md.tmpl":        {"Round": 1, "Rounds": 2, "Base": "main"},
+	"codereview-comment":        {"Round": 1, "Rounds": 2, "Status": "fixed", "Summary": "S"},
+	"mergeresolve.md.tmpl":      {"Base": "main"},
+	"mergeresolve-pickup":       {"Base": "main", "Branch": "b"},
+	"mergeresolve-done":         {"Base": "main", "Branch": "b", "Summary": "S"},
+	"mergeresolve-park":         {"Label": "ai-rework", "TriggerLabel": "ai-resolve-merge", "Guidance": "G", "Error": "E"},
 }
 
 // skipTemplates are the names in the set that are not prompts: the root
@@ -203,7 +205,7 @@ func TestNoSentinelIsHardcodedInATemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinels := []string{confidenceSentinel, specReadySentinel, readySentinel, alreadyDoneSentinel, doneConfirmSentinel,
-		uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel, mergeResolveSentinel}
+		nothingToAnswerSentinel, uatBeginSentinel, uatEndSentinel, uatMarker, codeReviewBeginSentinel, codeReviewEndSentinel, mergeResolveSentinel}
 	for _, e := range entries {
 		b, err := promptFS.ReadFile("ai/prompts/" + e.Name())
 		if err != nil {

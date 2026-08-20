@@ -83,14 +83,18 @@ func (r *CodeReview) Run(ctx context.Context, c *Claude, cfg *Config, wtPath, br
 		return fmt.Errorf("issue #%d: code review PR lookup failed: %w", r.Num, err)
 	}
 	resume := ""
-	if si, ok := loadResumableSession(logDir); ok && si.Stage == stageCodeReview {
-		resume = si.SessionID
+	if node, ok := resumePoint(logDir); ok && node.Stage == stageCodeReview {
+		resume = node.ID
 	}
 	for i := lastCompletedRound(logDir) + 1; i <= rounds; i++ {
 		call := ClaudeCall{
 			Dir: wtPath, Label: fmt.Sprintf("codereview-%d", i), Prompt: codeReviewPrompt(i, rounds, base),
 			Model:           cfg.Models.CodeReview.ModelConfig,
 			SkipPermissions: true,
+			// Each round is a primary session: checkpointed in-flight, so even
+			// a round killed mid-run (429, crash) is the chain head the
+			// post-park re-entry resumes.
+			Checkpoint: &CallCheckpoint{Kind: r.Kind, Stage: stageCodeReview},
 		}
 		if resume != "" {
 			// Re-entry into a cut-short round: continue its session in place.
@@ -100,12 +104,6 @@ func (r *CodeReview) Run(ctx context.Context, c *Claude, cfg *Config, wtPath, br
 			resume = ""
 		}
 		res, err := c.Call(ctx, call)
-		// Record before the error check, like every pipeline stage: an errored
-		// call (e.g. a 429) still returns a session id, and that id is exactly
-		// what the post-park re-entry resumes.
-		if res != nil {
-			c.RecordSession(res.SessionID, r.Kind, stageCodeReview)
-		}
 		if err != nil {
 			return fmt.Errorf("issue #%d: code review round %d session failed: %w", r.Num, i, err)
 		}

@@ -76,8 +76,36 @@ ARCHITECT MSG
 
 Instructions: if the architect asked questions, answer them decisively.
 If it presented a design or spec for approval, approve it or give concise feedback.
+Stay on this issue: never direct the architect to implement, merge, or pick up other
+issues — planning and implementation are handled by separate pipeline sessions.
+If the message asks for no answer and no approval (e.g. a status or progress update),
+reply with only QA_NOTHING_TO_ANSWER on its own line.
 Reply with your answer only.`
 	check(t, "answererPrompt", answererPrompt("ISSUE BODY", "PERSONA TEXT", "ARCHITECT MSG"), want)
+}
+
+func TestGoldenBrainstormResumePrompt(t *testing.T) {
+	want := `TRIGGER MSG
+
+HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
+This resumed design session still has the same contract, scoped to THIS issue only:
+- Do NOT implement, merge, or work on other issues in this session — planning and
+  implementation happen in separate pipeline sessions.
+- When the spec file is written and committed, print SPEC_READY: <path> on its own line,
+  where <path> is the spec file path relative to the repository root. Print it even if
+  the spec was already committed in an earlier turn.
+- If nothing remains to design or build for this issue, print PIPELINE_ALREADY_DONE: <one-sentence reason>
+  on its own line.`
+	check(t, "brainstormResumePrompt", brainstormResumePrompt("TRIGGER MSG"), want)
+}
+
+func TestGoldenQANudgePrompt(t *testing.T) {
+	want := `No decision was requested, so there is nothing to answer. Continue toward this
+issue's terminal state: either finish and commit the spec and print
+SPEC_READY: <path> on its own line, or — if nothing remains to design or build for
+this issue — print PIPELINE_ALREADY_DONE: <one-sentence reason> on its own line. Do not start
+implementation, merges, or work on other issues in this session.`
+	check(t, "qaNudgePrompt", qaNudgePrompt(), want)
 }
 
 func TestGoldenDoneConfirmPrompt(t *testing.T) {

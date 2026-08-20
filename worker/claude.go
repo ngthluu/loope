@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Usage is the token accounting claude emits in its result JSON. The counts are
@@ -97,6 +98,76 @@ type ClaudeCall struct {
 	Resume          string
 	DisallowedTools []string
 	SkipPermissions bool
+	// Checkpoint, when set, marks this call as a primary pipeline session: the
+	// moment its session id appears in the stream, Call appends a SessionNode
+	// to the issue's chain (and keeps the legacy session file in step), so ANY
+	// death mode — usage limit, network drop, SIGKILL, daemon crash — leaves a
+	// resumable checkpoint pointing at THIS session and stage. Ephemeral calls
+	// (answerer, UAT, triage, merge-resolve) leave it nil and never checkpoint.
+	Checkpoint *CallCheckpoint
+}
+
+// CallCheckpoint is the lineage metadata a primary call records: the pipeline
+// kind, the stage this session IS, and the worktree-relative artifact the
+// stage builds from (spec for plan, plan for execute) — the fallback a resume
+// re-runs the stage from when the session itself can't be resumed.
+type CallCheckpoint struct {
+	Kind     string
+	Stage    string
+	Artifact string
+}
+
+// checkpointWriter tees the stream and, on the first event carrying a
+// session_id, hands the id to onID exactly once. Lines may arrive split
+// across Write calls, so incomplete tails are buffered; flush treats
+// whatever remains as a final line (a single-object payload has no newline).
+type checkpointWriter struct {
+	w    io.Writer
+	buf  []byte
+	done bool
+	id   string
+	onID func(id string)
+}
+
+func (cw *checkpointWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	if cw.done {
+		return n, err
+	}
+	cw.buf = append(cw.buf, p[:n]...)
+	for {
+		i := bytes.IndexByte(cw.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := cw.buf[:i]
+		cw.buf = cw.buf[i+1:]
+		if cw.scanLine(line) {
+			return n, err
+		}
+	}
+	return n, err
+}
+
+// flush scans the buffered final line (no trailing newline) after the stream
+// ends. Safe to call once RunStream has returned on every exit path.
+func (cw *checkpointWriter) flush() {
+	if cw.done || len(cw.buf) == 0 {
+		return
+	}
+	cw.scanLine(cw.buf)
+}
+
+func (cw *checkpointWriter) scanLine(line []byte) bool {
+	var ev struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(line), &ev) != nil || ev.SessionID == "" {
+		return false
+	}
+	cw.done, cw.buf, cw.id = true, nil, ev.SessionID
+	cw.onID(ev.SessionID)
+	return true
 }
 
 func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, error) {
@@ -131,13 +202,36 @@ func (c *Claude) Call(ctx context.Context, call ClaudeCall) (*ClaudeResult, erro
 		defer f.Close()
 		sink = io.MultiWriter(f, &buf)
 	}
+	var ckpt *checkpointWriter
+	if call.Checkpoint != nil {
+		// Checkpoint in-flight: the session becomes resumable the moment its
+		// id streams past, not only if the CLI survives to its result event.
+		ckpt = &checkpointWriter{w: sink, onID: func(id string) { c.recordChainNode(*call.Checkpoint, id) }}
+		sink = ckpt
+	}
+	// salvage returns the partial result a failed call can still hand back:
+	// the session id seen in the stream, so callers (and the park comment)
+	// keep hold of the very session the checkpoint just recorded.
+	salvage := func() *ClaudeResult {
+		if ckpt == nil {
+			return nil
+		}
+		ckpt.flush()
+		if ckpt.id == "" {
+			return nil
+		}
+		return &ClaudeResult{SessionID: ckpt.id}
+	}
 	stderr, err := c.runner.RunStream(ctx, call.Dir, env, call.Prompt, sink, "claude", args...)
 	if err != nil {
-		return nil, fmt.Errorf("claude %s: %w\n%s", call.Label, err, streamDetail(stderr, buf.String()))
+		return salvage(), fmt.Errorf("claude %s: %w\n%s", call.Label, err, streamDetail(stderr, buf.String()))
+	}
+	if ckpt != nil {
+		ckpt.flush() // single-object payloads carry no newline for Write to scan
 	}
 	res, terminal, perr := parseStreamResult(buf.String())
 	if perr != nil {
-		return nil, fmt.Errorf("claude %s: parse output: %w\n%s", call.Label, perr, streamDetail(stderr, buf.String()))
+		return salvage(), fmt.Errorf("claude %s: parse output: %w\n%s", call.Label, perr, streamDetail(stderr, buf.String()))
 	}
 	c.saveLog(seq, call.Label, terminal)
 	c.saveOutput(seq, call.Label, res.Result)
@@ -236,6 +330,13 @@ type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	Kind      string `json:"kind"`
 	Stage     string `json:"stage"`
+	// SpecPath/PlanPath (worktree-relative) are set only by the pre-call stage
+	// checkpoints: a stagePlan record carrying SpecPath, or a stageExecute
+	// record carrying PlanPath, means that stage's session was started but
+	// never returned — resume must re-run it fresh from the recorded artifact
+	// instead of resuming SessionID (which belongs to the PREVIOUS stage).
+	SpecPath string `json:"specPath,omitempty"`
+	PlanPath string `json:"planPath,omitempty"`
 }
 
 // Recognized SessionInfo.Stage values — the pipeline entry point a persisted
@@ -253,27 +354,72 @@ const (
 	stageCodeReview = "codereview"
 )
 
-// RecordSession writes the latest primary working session id, pipeline kind,
-// and pipeline stage for this issue to <logDir>/session. Best-effort, like the
-// other log-writers: a no-op when logDir or id is empty, so an ephemeral
-// answerer call (empty here because callers only invoke it for
-// architect/debug/execute sessions) or a logless Claude never clobbers a
-// recorded session.
-func (c *Claude) RecordSession(id, kind, stage string) {
-	if c.logDir == "" || id == "" {
+// RecordCheckpoint writes the legacy single-record session file. The session
+// CHAIN (sessions.jsonl, see sessions.go) is the primary resume source now:
+// this file is kept in step by recordChainNode purely for the dashboard, and
+// read back only as resumePoint's fallback for workdirs that predate the
+// chain. Best-effort, like the other log-writers; skips empty session ids so
+// a stray write never clobbers a recorded session.
+func (c *Claude) RecordCheckpoint(si SessionInfo) {
+	if c.logDir == "" || si.SessionID == "" {
 		return
 	}
 	if err := os.MkdirAll(c.logDir, 0o755); err != nil {
 		return
 	}
-	b, err := json.Marshal(SessionInfo{SessionID: id, Kind: kind, Stage: stage})
+	b, err := json.Marshal(si)
 	if err != nil {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(c.logDir, sessionFile), b, 0o644)
 }
 
-// readSession reads the SessionInfo written by RecordSession from logDir.
+// recordChainNode appends this session to the issue's lineage chain and keeps
+// the legacy session file in step (the dashboard reads it). Called by Call the
+// moment a checkpointed session's id streams past. A resumed round of the same
+// session at the same stage is deduplicated — one session id, one checkpoint.
+func (c *Claude) recordChainNode(cp CallCheckpoint, id string) {
+	if c.logDir == "" || id == "" {
+		return
+	}
+	if head, ok := headSession(c.logDir); !ok || head.ID != id || head.Stage != cp.Stage {
+		appendSessionNode(c.logDir, SessionNode{
+			ID: id, Parent: lastRealSessionID(c.logDir), Kind: cp.Kind,
+			Stage: cp.Stage, Artifact: cp.Artifact, At: time.Now(),
+		})
+	}
+	c.RecordCheckpoint(SessionInfo{SessionID: id, Kind: cp.Kind, Stage: cp.Stage})
+}
+
+// CheckpointStage appends a PENDING node: a stage about to start whose session
+// doesn't exist yet. It covers the gap between one stage returning and the
+// next session's id streaming past (a window that includes pushes and GitHub
+// comments) — a crash there resumes as a fresh run of the pending stage on its
+// artifact, never by re-entering the completed previous session.
+func (c *Claude) CheckpointStage(kind, stage, artifact string) {
+	if c.logDir == "" {
+		return
+	}
+	appendSessionNode(c.logDir, SessionNode{
+		Parent: lastRealSessionID(c.logDir), Kind: kind,
+		Stage: stage, Artifact: artifact, At: time.Now(),
+	})
+}
+
+// lastRealSessionID walks the chain backwards for the newest node with a real
+// session id — the parent a freshly spawned session links to. Pending nodes
+// (no id) are skipped: they mark intent, not a session.
+func lastRealSessionID(logDir string) string {
+	chain := readSessionChain(logDir)
+	for i := len(chain) - 1; i >= 0; i-- {
+		if chain[i].ID != "" {
+			return chain[i].ID
+		}
+	}
+	return ""
+}
+
+// readSession reads the legacy SessionInfo written by RecordCheckpoint.
 func readSession(logDir string) (SessionInfo, error) {
 	data, err := os.ReadFile(filepath.Join(logDir, sessionFile))
 	if err != nil {
@@ -294,7 +440,7 @@ const snapshotFile = "issue-snapshot"
 
 // RecordSnapshot writes the issue content this call site read to
 // <logDir>/issue-snapshot, overwriting whatever was there. Best-effort, like
-// RecordSession: a no-op on an empty logDir or content.
+// the other log-writers: a no-op on an empty logDir or content.
 func (c *Claude) RecordSnapshot(content string) {
 	if c.logDir == "" || content == "" {
 		return

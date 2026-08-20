@@ -11,4 +11,8 @@ The architect agent said:
 
 Instructions: if the architect asked questions, answer them decisively.
 If it presented a design or spec for approval, approve it or give concise feedback.
+Stay on this issue: never direct the architect to implement, merge, or pick up other
+issues — planning and implementation are handled by separate pipeline sessions.
+If the message asks for no answer and no approval (e.g. a status or progress update),
+reply with only {{.NothingToAnswerSentinel}} on its own line.
 Reply with your answer only.

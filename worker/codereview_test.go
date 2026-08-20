@@ -316,7 +316,7 @@ func TestCodeReviewResumesRecordedReviewSession(t *testing.T) {
 	logDir := t.TempDir()
 	recordCodeReviewRound(logDir, 1) // round 1 completed; round 2 was cut short
 	c := &Claude{runner: nil, logDir: logDir}
-	c.RecordSession("cr-parked", "feature", stageCodeReview)
+	c.RecordCheckpoint(SessionInfo{SessionID: "cr-parked", Kind: "feature", Stage: stageCodeReview})
 	f := &fakeRunner{queue: []rresp{
 		{stdout: codeReviewResult("fixed", "- finished the cut-short fix")},
 		{stdout: codeReviewResult("clean", "Nothing left.")},

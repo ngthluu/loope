@@ -268,7 +268,7 @@ func TestResumeBugPipelineEscalatesToNeedsInfoWhenStalled(t *testing.T) {
 	c := &Claude{runner: f, logDir: t.TempDir()}
 	cfg := &Config{ConfidenceThreshold: 70, Models: Models{Architect: ModelConfig{Model: "opus"}}}
 	err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil, wt,
-		SessionInfo{SessionID: "s1", Kind: "bug", Stage: stageDebug}, "continue")
+		SessionNode{ID: "s1", Kind: "bug", Stage: stageDebug}, "continue")
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
 		t.Fatalf("want *lowConfidenceError, got %v", err)
@@ -347,7 +347,7 @@ func TestResumeBugPipelineReentersWithResumeAndPrompt(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}}
-	session := SessionInfo{SessionID: "debug-sess", Kind: "bug", Stage: stageDebug}
+	session := SessionNode{ID: "debug-sess", Kind: "bug", Stage: stageDebug}
 	if err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "the issue", "main", nil, nil, session, "continue"); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestResumeBugPipelineLowConfidenceEscalates(t *testing.T) {
 	f := &fakeRunner{queue: []rresp{{stdout: claudeJSON("CONFIDENCE: 20\nstill unclear", "debug-sess-2")}}}
 	c := &Claude{runner: f}
 	cfg := &Config{Models: Models{Architect: ModelConfig{Model: "opus"}}, ConfidenceThreshold: 70}
-	session := SessionInfo{SessionID: "debug-sess", Kind: "bug", Stage: stageDebug}
+	session := SessionNode{ID: "debug-sess", Kind: "bug", Stage: stageDebug}
 	err := ResumeBugPipeline(context.Background(), c, cfg, "/wt", "ISSUE", "main", nil, nil, session, "continue")
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {

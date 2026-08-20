@@ -15,6 +15,12 @@ const readySentinel = "PIPELINE_READY"
 
 const specReadySentinel = "SPEC_READY:"
 
+// nothingToAnswerSentinel is printed by the answerer (PO proxy) when the
+// architect's message asked no question and requested no approval — a status
+// update. The loop then nudges the architect toward a terminal sentinel
+// instead of relaying an empty approval.
+const nothingToAnswerSentinel = "QA_NOTHING_TO_ANSWER"
+
 // RunFeaturePipeline drives three sessions: an architect brainstorm session
 // (session A) that scores its confidence up front and, above the threshold,
 // works with a sonnet product-owner proxy to a committed spec (SPEC_READY); a
@@ -26,13 +32,10 @@ const specReadySentinel = "SPEC_READY:"
 // non-blocking UAT step publishes a human-verifiable checklist onto the issue.
 func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, gh *GitHub, wt *Worktree, branch, title string, n int) error {
 	start := time.Now()
+	// Snapshot before the call: the content is already fetched, and a session
+	// killed at any point still leaves the diff base the next resume needs.
+	c.RecordSnapshot(issueContent)
 	res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-0", brainstormPrompt(issueContent, cfg.ConfidenceThreshold), "")
-	// Record before the error check: an errored call (e.g. a 429 session limit)
-	// still returns a session id, and the dashboard shows it on the parked ticket.
-	if res != nil {
-		c.RecordSession(res.SessionID, "feature", stageBrainstorm)
-		c.RecordSnapshot(issueContent)
-	}
 	if err != nil {
 		return err
 	}
@@ -43,18 +46,45 @@ func RunFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, iss
 	return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 }
 
-// ResumeFeaturePipeline re-enters a persisted feature-pipeline session at its
-// recorded stage, with --resume and the trigger prompt (spec §2), instead of
-// starting a fresh brainstorm-0. An unrecognized stage — the only case with no
-// natural resume point, expected to never happen in practice — falls back to a
-// fully fresh RunFeaturePipeline as a safety net.
-func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, session SessionInfo, prompt string, gh *GitHub, wt *Worktree, branch, title string, n int) error {
+// ResumeFeaturePipeline re-enters the feature pipeline at the chain node a
+// re-entry resolved (resumePoint): resume the node's own session with the
+// trigger prompt, or — for a pending node (no session id) — re-run its stage
+// fresh from the recorded artifact. An unrecognized stage, or a pending node
+// whose artifact is gone, falls back to a fully fresh RunFeaturePipeline as a
+// safety net.
+func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, persona string, uat *UAT, node SessionNode, prompt string, gh *GitHub, wt *Worktree, branch, title string, n int) error {
 	start := time.Now()
-	switch session.Stage {
+	fresh := func() error {
+		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat, gh, wt, branch, title, n)
+	}
+	switch node.Stage {
 	case stagePlan:
-		return runPlanThenExecute(ctx, c, cfg, wtPath, prompt, session.SessionID, start, gh, wt, branch, n)
+		if node.ID == "" {
+			// Pending node: the plan session never started (or a legacy
+			// pre-call checkpoint). Re-run plan fresh from the committed spec.
+			if spec, ok := checkpointArtifact(wtPath, node.Artifact); ok {
+				return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, planPrompt(spec), "", start, gh, wt, branch, n)
+			}
+			return fresh()
+		}
+		return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, prompt, node.ID, start, gh, wt, branch, n)
 	case stageExecute:
-		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, session.SessionID); err != nil {
+		if node.ID == "" {
+			// Pending node: execute never started. Re-run it fresh on the
+			// committed plan — the executing-plans skill picks up from
+			// whatever steps are already done.
+			if plan, ok := checkpointArtifact(wtPath, node.Artifact); ok {
+				if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
+					return err
+				}
+				if perr := wt.Push(ctx, wtPath, branch); perr != nil {
+					log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
+				}
+				return nil
+			}
+			return fresh()
+		}
+		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, node.ID, node.Artifact); err != nil {
 			return err
 		}
 		// Execute complete (spec §1): push once, best-effort — ship's own push at
@@ -65,11 +95,15 @@ func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, 
 		}
 		return nil
 	case stageBrainstorm:
-		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", prompt, session.SessionID)
-		if res != nil {
-			c.RecordSession(res.SessionID, "feature", stageBrainstorm)
-			c.RecordSnapshot(issueContent)
+		if node.ID == "" {
+			return fresh()
 		}
+		c.RecordSnapshot(issueContent)
+		// The trigger alone teaches a resumed session nothing about the
+		// sentinel contract; restate it so a session re-entered past its spec
+		// can still terminate (SPEC_READY / PIPELINE_ALREADY_DONE) instead of
+		// narrating status until the round cap parks it.
+		res, err := architectCall(ctx, c, cfg, wtPath, "brainstorm-resume", brainstormResumePrompt(prompt), node.ID)
 		if err != nil {
 			return err
 		}
@@ -78,7 +112,7 @@ func ResumeFeaturePipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, 
 		}
 		return brainstormLoop(ctx, c, cfg, wtPath, issueContent, persona, uat, res.SessionID, res.Result, start, gh, wt, branch, title, n)
 	default:
-		return RunFeaturePipeline(ctx, c, cfg, wtPath, issueContent, persona, uat, gh, wt, branch, title, n)
+		return fresh()
 	}
 }
 
@@ -97,13 +131,15 @@ func confidenceGate(cfg *Config, output string) error {
 
 // architectCall runs one architect-model turn: the brainstorm-0/brainstorm-N
 // call when resume is "", or a --resume turn (round call or resumed re-entry)
-// when it isn't.
+// when it isn't. Every architect turn is a primary brainstorm-stage session,
+// so the checkpoint is baked in here.
 func architectCall(ctx context.Context, c *Claude, cfg *Config, wtPath, label, prompt, resume string) (*ClaudeResult, error) {
 	return c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "feature", Stage: stageBrainstorm},
 	})
 }
 
@@ -117,6 +153,12 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 		// through and keep prodding (mirrors the plan-file behavior).
 		if rel, ok := parseSpecReady(output); ok {
 			if specPath, ok := resolveSpec(wtPath, rel, start); ok {
+				// Spec committed: append a PENDING plan node BEFORE the plan
+				// call starts, so a crash anywhere in the handoff (push, PR,
+				// comment, plan spawn) resumes as a fresh plan run on this
+				// spec instead of re-entering this loop.
+				specRel := relToWorktree(wtPath, specPath)
+				c.CheckpointStage("feature", stagePlan, specRel)
 				// The UAT session runs alongside plan/execute — it only reads
 				// the committed spec, so nothing downstream waits on it. The
 				// wait runs on every exit path (including a failed plan): the
@@ -129,7 +171,7 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 				// all. Best-effort: pushSpecPR logs and swallows its own
 				// failures rather than turning a completed spec into an error.
 				pushSpecPR(ctx, gh, wt, wtPath, branch, title, n, c.logDir)
-				return runPlanThenExecute(ctx, c, cfg, wtPath, planPrompt(specPath), "", start, gh, wt, branch, n)
+				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(specPath), "", start, gh, wt, branch, n)
 			}
 		}
 
@@ -170,12 +212,16 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 				return err
 			}
 			reply = ans.Result
+			if strings.Contains(reply, nothingToAnswerSentinel) {
+				// A status update, not a question: an "Approved" relay would
+				// only invite the next status update (issue-5 burned every
+				// round this way). Push the architect toward a terminal
+				// sentinel instead.
+				reply = qaNudgePrompt()
+			}
 		}
 
 		res, err := architectCall(ctx, c, cfg, wtPath, fmt.Sprintf("brainstorm-%d", round), reply, sessionID)
-		if res != nil {
-			c.RecordSession(res.SessionID, "feature", stageBrainstorm)
-		}
 		if err != nil {
 			return err
 		}
@@ -187,19 +233,30 @@ func brainstormLoop(ctx context.Context, c *Claude, cfg *Config, wtPath, issueCo
 // spec into a committed plan, then executes it (session C). Both are fresh
 // sessions on a first pass — the plan session must not carry brainstorm
 // context — but the SAME entry point serves a resumed plan session too: resume
-// is "" on a fresh call (prompt is planPrompt(specPath)) and the persisted plan
-// session's id when re-entering (prompt is the trigger prompt instead).
-func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string, start time.Time, gh *GitHub, wt *Worktree, branch string, n int) error {
+// is "" on a fresh call (prompt is planPrompt(specPath)) and the chain node's
+// own plan-session id when re-entering (prompt is the trigger prompt instead).
+// specRel is the worktree-relative spec the stage builds from; it rides on the
+// chain node so a dead resume can fall back to a fresh run on the spec.
+func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, specRel, prompt, resume string, start time.Time, gh *GitHub, wt *Worktree, branch string, n int) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "plan", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "feature", Stage: stagePlan, Artifact: specRel},
 	})
-	if res != nil {
-		c.RecordSession(res.SessionID, "feature", stagePlan)
-	}
 	if err != nil {
+		// A resume that died before its session ever started (no salvaged id)
+		// means the session is gone from this machine — with the spec still on
+		// disk, re-run the stage fresh on it instead of failing. A mid-run
+		// failure (res carries the salvaged id) propagates: that session is
+		// checkpointed and the next human-triggered re-entry resumes it.
+		if resume != "" && res == nil {
+			if spec, ok := checkpointArtifact(wtPath, specRel); ok {
+				log.Printf("issue #%d: plan session %s not resumable, re-running fresh from %s", n, resume, specRel)
+				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(spec), "", start, gh, wt, branch, n)
+			}
+		}
 		return err
 	}
 	if !strings.Contains(res.Result, readySentinel) {
@@ -209,6 +266,11 @@ func runPlanThenExecute(ctx context.Context, c *Claude, cfg *Config, wtPath, pro
 	if !ok {
 		return fmt.Errorf("feature pipeline: plan session signaled %s but wrote no plan file", readySentinel)
 	}
+	// Plan committed: append a PENDING execute node BEFORE the execute call
+	// starts, so a crash in the handoff (push, comment, execute spawn) resumes
+	// as a fresh execute run on this plan instead of re-entering the completed
+	// plan session.
+	c.CheckpointStage("feature", stageExecute, relToWorktree(wtPath, plan))
 	// Plan complete (spec §1): push, then post the fixed "Updated plan: ..."
 	// comment naming the plan file — before execute runs at all.
 	pushPlanUpdate(ctx, gh, wt, wtPath, branch, n, plan)
@@ -269,32 +331,60 @@ func pushPlanUpdate(ctx context.Context, gh *GitHub, wt *Worktree, wtPath, branc
 // executePlan runs the execute session (session C) fresh, immediately after
 // the plan file is written.
 func executePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, planPath string) error {
-	res, err := c.Call(ctx, ClaudeCall{
+	_, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "execute", Prompt: executePrompt(planPath),
 		Model:           cfg.Models.executeConfig(),
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "feature", Stage: stageExecute, Artifact: relToWorktree(wtPath, planPath)},
 	})
-	if res != nil {
-		c.RecordSession(res.SessionID, "feature", stageExecute)
-	}
 	return err
 }
 
 // resumeExecutePlan re-enters a persisted execute session (session C) at
-// exactly the recorded session, with --resume and the trigger prompt — used
-// by ResumeFeaturePipeline.
-func resumeExecutePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume string) error {
+// exactly the chain node's session, with --resume and the trigger prompt —
+// used by ResumeFeaturePipeline. planRel is the node's artifact: a resume
+// that died before its session started falls back to a fresh execute run on
+// the plan, mirroring runPlanThenExecute's dead-resume fallback.
+func resumeExecutePlan(ctx context.Context, c *Claude, cfg *Config, wtPath, prompt, resume, planRel string) error {
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "execute", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.executeConfig(),
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "feature", Stage: stageExecute, Artifact: planRel},
 	})
-	if res != nil {
-		c.RecordSession(res.SessionID, "feature", stageExecute)
+	if err != nil && res == nil {
+		if plan, ok := checkpointArtifact(wtPath, planRel); ok {
+			return executePlan(ctx, c, cfg, wtPath, plan)
+		}
 	}
 	return err
+}
+
+// relToWorktree returns p relative to wtPath, or p unchanged when Rel fails —
+// the checkpoint format (SessionInfo.SpecPath/PlanPath) stores paths relative
+// to the worktree so a moved workspace doesn't invalidate them.
+func relToWorktree(wtPath, p string) string {
+	if rel, err := filepath.Rel(wtPath, p); err == nil {
+		return rel
+	}
+	return p
+}
+
+// checkpointArtifact resolves a checkpointed worktree-relative artifact path
+// (SessionInfo.SpecPath/PlanPath) to an existing file. Deliberately no
+// newest-file fallback: a checkpoint names ONE artifact, and guessing another
+// spec/plan in the tree could resume the wrong issue's work.
+func checkpointArtifact(wtPath, rel string) (string, bool) {
+	p := rel
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(wtPath, rel)
+	}
+	if info, err := os.Stat(p); err == nil && !info.IsDir() {
+		return p, true
+	}
+	return "", false
 }
 
 // parseSpecReady extracts the spec path following specReadySentinel. ok is
@@ -397,6 +487,24 @@ func brainstormPrompt(issue string, threshold int) string {
 	d["Issue"] = issue
 	d["Threshold"] = threshold
 	return mustRender("brainstorm.md.tmpl", d)
+}
+
+// brainstormResumePrompt wraps a resumed brainstorm session's trigger prompt
+// with a restatement of the sentinel contract. A bare trigger taught the
+// resumed architect nothing about SPEC_READY/PIPELINE_ALREADY_DONE, so a
+// session re-entered past its spec reported completion in prose the loop
+// could not parse and burned every Q&A round (issue-5 incident).
+func brainstormResumePrompt(trigger string) string {
+	d := promptData()
+	d["Trigger"] = trigger
+	return mustRender("brainstorm-resume.md.tmpl", d)
+}
+
+// qaNudgePrompt is the reply sent to the architect when the answerer signaled
+// there was nothing to answer: it pushes toward a terminal sentinel instead of
+// relaying an empty approval that would only invite another status update.
+func qaNudgePrompt() string {
+	return mustRender("qa-nudge.md.tmpl", promptData())
 }
 
 func answererPrompt(issue, persona, architectMsg string) string {

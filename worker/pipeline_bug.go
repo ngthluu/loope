@@ -9,41 +9,36 @@ import (
 // fix was actually produced, the non-blocking UAT step diffs against
 // origin/<base> to build a human-verifiable checklist for the issue body.
 func RunBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree) error {
+	// Snapshot before the call: a session killed at any point still leaves the
+	// diff base the next resume needs.
+	c.RecordSnapshot(issueContent)
 	res, err := c.Call(ctx, ClaudeCall{
 		Dir: wtPath, Label: "debug", Prompt: bugPrompt(issueContent, cfg.ConfidenceThreshold),
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "bug", Stage: stageDebug},
 	})
-	// Record before the error check: an errored call (e.g. a 429 session limit)
-	// still returns a session id, and the dashboard shows it on the parked ticket.
-	if res != nil {
-		c.RecordSession(res.SessionID, "bug", stageDebug)
-		c.RecordSnapshot(issueContent)
-	}
 	if err != nil {
 		return err
 	}
 	return afterDebug(ctx, c, cfg, wtPath, issueContent, base, uat, wt, res.Result)
 }
 
-// ResumeBugPipeline re-enters a persisted debug session with --resume and the
-// trigger prompt instead of the fresh bugPrompt (spec §2). "debug" is the only
-// stage a bug pipeline ever records, so there's no stage switch here — an
-// unrecognized SessionInfo.Stage can't reach this function (handleIssue only
-// calls it for session.Kind == "bug", and every bug-pipeline RecordSession call
-// uses stageDebug).
-func ResumeBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree, session SessionInfo, prompt string) error {
+// ResumeBugPipeline re-enters the chain node's debug session with --resume and
+// the trigger prompt instead of the fresh bugPrompt (spec §2). "debug" is the
+// only stage a bug pipeline ever checkpoints, so there's no stage switch here —
+// an unrecognized node stage can't reach this function (handleIssue only calls
+// it for node.Kind == "bug", and every bug-pipeline checkpoint uses stageDebug).
+func ResumeBugPipeline(ctx context.Context, c *Claude, cfg *Config, wtPath, issueContent, base string, uat *UAT, wt *Worktree, node SessionNode, prompt string) error {
+	c.RecordSnapshot(issueContent)
 	res, err := c.Call(ctx, ClaudeCall{
-		Dir: wtPath, Label: "debug-resume", Prompt: prompt, Resume: session.SessionID,
+		Dir: wtPath, Label: "debug-resume", Prompt: prompt, Resume: node.ID,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
+		Checkpoint:      &CallCheckpoint{Kind: "bug", Stage: stageDebug},
 	})
-	if res != nil {
-		c.RecordSession(res.SessionID, "bug", stageDebug)
-		c.RecordSnapshot(issueContent)
-	}
 	if err != nil {
 		return err
 	}

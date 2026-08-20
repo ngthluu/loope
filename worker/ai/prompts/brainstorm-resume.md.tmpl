@@ -1,0 +1,11 @@
+{{.Trigger}}
+
+HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
+This resumed design session still has the same contract, scoped to THIS issue only:
+- Do NOT implement, merge, or work on other issues in this session — planning and
+  implementation happen in separate pipeline sessions.
+- When the spec file is written and committed, print {{.SpecReadySentinel}} <path> on its own line,
+  where <path> is the spec file path relative to the repository root. Print it even if
+  the spec was already committed in an earlier turn.
+- If nothing remains to design or build for this issue, print {{.AlreadyDoneSentinel}} <one-sentence reason>
+  on its own line.

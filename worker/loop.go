@@ -265,24 +265,25 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue Issue, kind, base 
 	uat := &UAT{Target: o.gh, Num: n}
 	persona := readPersona(o.cfg.PersonaPath)
 	var perr error
-	if session, ok := loadResumableSession(logDir); ok {
-		// A session already exists for this ticket's worktree — every re-entry
-		// trigger (rework removed, needs-info answered, dashboard Continue, a
-		// daemon-restart requeue via SweepOrphans) converges on this same check,
-		// so there is no separate code path per trigger (spec §1).
-		if session.Stage == stageCodeReview {
+	if node, ok := resumePoint(logDir); ok {
+		// A session chain already exists for this ticket's worktree — every
+		// re-entry trigger (rework removed, needs-info answered, dashboard
+		// Continue, a daemon-restart requeue via SweepOrphans) converges on
+		// this same check, so there is no separate code path per trigger
+		// (spec §1): resume the chain head.
+		if node.Stage == stageCodeReview {
 			// The run already shipped; only the post-ship review loop was cut
 			// short (parked on a review failure, or orphaned by a restart).
 			// Skip the pipelines entirely and re-enter ship: its push/CreatePR
 			// are idempotent, hasPR suppresses a duplicate PR comment, and the
 			// review loop resumes the recorded session at the cut-short round.
-			return o.ship(ctx, issue, c, wtPath, branch, base, session.Kind)
+			return o.ship(ctx, issue, c, wtPath, branch, base, node.Kind)
 		}
 		prompt := resumePrompt(logDir, priorState, o.cfg.StateLabels.NeedsInfo, content)
-		if session.Kind == "bug" {
-			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt, session, prompt)
+		if node.Kind == "bug" {
+			perr = ResumeBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt, node, prompt)
 		} else {
-			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, session, prompt, o.gh, o.wt, branch, issue.Title, n)
+			perr = ResumeFeaturePipeline(ctx, c, o.cfg, wtPath, content, persona, uat, node, prompt, o.gh, o.wt, branch, issue.Title, n)
 		}
 	} else if kind == "bug" {
 		perr = RunBugPipeline(ctx, c, o.cfg, wtPath, content, base, uat, o.wt)

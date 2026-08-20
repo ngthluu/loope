@@ -855,10 +855,7 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 	wt := t.TempDir()
 	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
 		switch {
-		case c.stdin == "continue":
-			if c.args[len(c.args)-1] != "arch-sess" {
-				// --resume <id> is always the last two args; spot-check via ClaudeCall instead below.
-			}
+		case strings.HasPrefix(c.stdin, "continue"):
 			writeSpecFile(t, wt)
 			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
 		case strings.Contains(c.stdin, "writing-plans"):
@@ -871,19 +868,20 @@ func TestResumeFeaturePipelineBrainstormStage(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
-	session := SessionInfo{SessionID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
+	session := SessionNode{ID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
 	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
-	// The resumed architect call must carry --resume arch-sess and prompt "continue".
+	// The resumed architect call must carry --resume arch-sess and lead with
+	// the trigger (the sentinel-contract wrapper follows it).
 	found := false
 	for _, call := range f.calls {
-		if call.name == "claude" && call.stdin == "continue" && argAfter(call.args, "--resume") == "arch-sess" {
+		if call.name == "claude" && strings.HasPrefix(call.stdin, "continue") && argAfter(call.args, "--resume") == "arch-sess" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("want a claude call with --resume arch-sess and prompt \"continue\"")
+		t.Error("want a claude call with --resume arch-sess and a prompt leading with \"continue\"")
 	}
 	si, err := readSession(logDir)
 	if err != nil || si.SessionID != "execute-sess" || si.Stage != stageExecute {
@@ -911,7 +909,7 @@ func TestResumeFeaturePipelineBrainstormStageLowConfidenceEscalates(t *testing.T
 		return claudeJSON("CONFIDENCE: 40\nThe issue has no acceptance criteria.\nWhat output format is expected?", "arch-sess"), "", nil
 	}}
 	c := &Claude{runner: f}
-	session := SessionInfo{SessionID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
+	session := SessionNode{ID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
 	err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "vague issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
@@ -940,7 +938,7 @@ func TestResumeFeaturePipelinePlanStage(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
-	session := SessionInfo{SessionID: "plan-sess", Kind: "feature", Stage: stagePlan}
+	session := SessionNode{ID: "plan-sess", Kind: "feature", Stage: stagePlan}
 	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -962,7 +960,7 @@ func TestResumeFeaturePipelineExecuteStage(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
-	session := SessionInfo{SessionID: "exec-sess", Kind: "feature", Stage: stageExecute}
+	session := SessionNode{ID: "exec-sess", Kind: "feature", Stage: stageExecute}
 	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +991,7 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 	}}
 	c := &Claude{runner: f, logDir: logDir}
 	cfg := featureConfig()
-	session := SessionInfo{SessionID: "stale-sess", Kind: "feature", Stage: "bogus"}
+	session := SessionNode{ID: "stale-sess", Kind: "feature", Stage: "bogus"}
 	if err := ResumeFeaturePipeline(context.Background(), c, cfg, wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-1", "Feature title", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -1002,6 +1000,289 @@ func TestResumeFeaturePipelineUnknownStageFallsBackToFresh(t *testing.T) {
 		if call.name == "claude" && strings.Contains(call.stdin, "brainstorming") && argAfter(call.args, "--resume") != "" {
 			t.Error("unknown stage must fall back to a FRESH brainstorm-0 call, not resume the stale session")
 		}
+	}
+}
+
+// TestBrainstormLoopCheckpointsPlanStageBeforePlanCall guards against the
+// issue-5 incident: the plan session died mid-flight (usage limit) and, with
+// the stage only recorded AFTER a call returns, the persisted stage stayed
+// "brainstorm" — so the resume re-entered the Q&A loop against a session whose
+// spec was long committed and burned all 20 rounds. The spec-complete
+// checkpoint must land BEFORE the plan call starts: stage plan, with the spec
+// path, so a mid-plan crash resumes at a fresh plan session instead.
+func TestBrainstormLoopCheckpointsPlanStageBeforePlanCall(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	var atPlanCall SessionNode
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "brainstorming"):
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-1"), "", nil
+		case strings.Contains(c.stdin, "writing-plans"):
+			node, ok := resumePoint(logDir)
+			if !ok {
+				t.Error("no resume point recorded when the plan call starts")
+			}
+			atPlanCall = node
+			return "", "killed", errors.New("usage limit hit mid-plan")
+		}
+		t.Fatalf("unexpected call: %q", c.stdin)
+		return "", "", nil
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
+	if err == nil {
+		t.Fatal("want the plan failure propagated so the issue parks")
+	}
+	if atPlanCall.Stage != stagePlan {
+		t.Errorf("stage at plan-call time = %q, want %q (checkpoint must precede the plan call)", atPlanCall.Stage, stagePlan)
+	}
+	if atPlanCall.Artifact != "docs/superpowers/specs/2026-07-13-thing-design.md" {
+		t.Errorf("checkpoint artifact = %q, want the committed spec relative to the worktree", atPlanCall.Artifact)
+	}
+	if atPlanCall.ID != "" {
+		t.Errorf("pending checkpoint id = %q, want empty — the plan session hasn't spawned, and offering the architect's id would resume the WRONG session", atPlanCall.ID)
+	}
+	// The checkpoint must survive the crash: this is what the next cycle resumes from.
+	node, ok := resumePoint(logDir)
+	if !ok || node.Stage != stagePlan || node.Artifact == "" {
+		t.Errorf("post-crash resume point = %+v ok=%v; a resume would re-enter the brainstorm Q&A loop", node, ok)
+	}
+}
+
+// TestResumeFeaturePipelinePlanStageFreshFromSpecCheckpoint: a stagePlan
+// record carrying a SpecPath means the plan session never completed (a
+// completed plan call re-records itself without one). Resume must start a
+// FRESH plan session from the committed spec — not resume the recorded
+// (architect) session, and not re-enter the brainstorm loop.
+func TestResumeFeaturePipelinePlanStageFreshFromSpecCheckpoint(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	writeSpecFile(t, wt)
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "writing-plans"):
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		case strings.Contains(c.stdin, "executing-plans"):
+			return claudeJSON("executed", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected prompt %q — a spec checkpoint must resume at a fresh plan session", c.stdin)
+		return "", "", nil
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	session := SessionNode{Kind: "feature", Stage: stagePlan,
+		Artifact: "docs/superpowers/specs/2026-07-13-thing-design.md"}
+	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) == 0 {
+		t.Fatal("no claude calls")
+	}
+	first := f.calls[0]
+	if got := argAfter(first.args, "--resume"); got != "" {
+		t.Errorf("plan session must be fresh, got --resume %q", got)
+	}
+	if !strings.Contains(first.stdin, "2026-07-13-thing-design.md") {
+		t.Errorf("fresh plan prompt must carry the checkpointed spec path, got %q", first.stdin)
+	}
+}
+
+// TestResumeFeaturePipelinePlanStageCheckpointMissingSpecFallsBackFresh is the
+// safety net: a checkpoint whose spec file no longer exists restarts the full
+// pipeline fresh rather than erroring or looping.
+func TestResumeFeaturePipelinePlanStageCheckpointMissingSpecFallsBackFresh(t *testing.T) {
+	wt := t.TempDir()
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "brainstorming"):
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "fresh-arch"), "", nil
+		case strings.Contains(c.stdin, "writing-plans"):
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		default:
+			return claudeJSON("executed", "exec-1"), "", nil
+		}
+	}}
+	c := &Claude{runner: f}
+	session := SessionNode{Kind: "feature", Stage: stagePlan, Artifact: "docs/superpowers/specs/gone.md"}
+	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+		t.Fatalf("missing checkpoint spec must fall back to a fresh pipeline, got %v", err)
+	}
+	fresh := false
+	for _, call := range f.calls {
+		if strings.Contains(call.stdin, "brainstorming") && argAfter(call.args, "--resume") == "" {
+			fresh = true
+		}
+	}
+	if !fresh {
+		t.Error("want a fresh brainstorm-0 call when the checkpointed spec file is gone")
+	}
+}
+
+// TestResumeFeaturePipelineBrainstormPromptRestatesSentinels guards the second
+// leg of the issue-5 incident: the resumed architect was re-entered with a bare
+// "continue" that never restated the sentinel contract, so it reported "already
+// shipped" in prose the loop could not parse and burned every Q&A round. The
+// resumed brainstorm prompt must carry the trigger AND re-teach both terminal
+// sentinels.
+func TestResumeFeaturePipelineBrainstormPromptRestatesSentinels(t *testing.T) {
+	wt := t.TempDir()
+	var resumedPrompt string
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case argAfter(c.args, "--resume") == "arch-sess":
+			resumedPrompt = c.stdin
+			writeSpecFile(t, wt)
+			return claudeJSON("SPEC_READY: docs/superpowers/specs/2026-07-13-thing-design.md", "arch-sess"), "", nil
+		case strings.Contains(c.stdin, "writing-plans"):
+			_ = os.MkdirAll(filepath.Join(wt, "plans"), 0o755)
+			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
+			return claudeJSON("PIPELINE_READY", "plan-1"), "", nil
+		default:
+			return claudeJSON("executed", "exec-1"), "", nil
+		}
+	}}
+	c := &Claude{runner: f}
+	session := SessionNode{ID: "arch-sess", Kind: "feature", Stage: stageBrainstorm}
+	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-5", "Feature title", 5); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resumedPrompt, "continue") {
+		t.Errorf("resumed prompt must carry the trigger, got %q", resumedPrompt)
+	}
+	if !strings.Contains(resumedPrompt, specReadySentinel) || !strings.Contains(resumedPrompt, alreadyDoneSentinel) {
+		t.Errorf("resumed prompt must restate the %s and %s contract, got %q", specReadySentinel, alreadyDoneSentinel, resumedPrompt)
+	}
+}
+
+// TestBrainstormLoopNudgesArchitectWhenNothingToAnswer guards the third leg of
+// the issue-5 incident: the architect sent pure status updates ("watching CI"),
+// the answerer replied "Approved", and the pair ping-ponged a round away every
+// few seconds. When the answerer signals there was nothing to answer, the loop
+// must send the architect a nudge that restates the terminal sentinels instead
+// of relaying the sentinel reply verbatim.
+func TestBrainstormLoopNudgesArchitectWhenNothingToAnswer(t *testing.T) {
+	wt := t.TempDir()
+	var prompts []string
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		prompts = append(prompts, c.stdin)
+		switch len(prompts) {
+		case 1: // architect: a status update, no question
+			return claudeJSON("Watcher armed; waiting on CI. Will merge on green.", "arch-1"), "", nil
+		case 2: // answerer: nothing to answer
+			return claudeJSON(nothingToAnswerSentinel, "ans-1"), "", nil
+		case 3: // architect resumed: must receive the sentinel-restating nudge
+			return claudeJSON("PIPELINE_ALREADY_DONE: shipped and merged already", "arch-1"), "", nil
+		case 4: // answerer done-confirmation
+			return claudeJSON("Agreed. DONE_CONFIRMED", "ans-1"), "", nil
+		}
+		t.Fatalf("unexpected call %d: %q", len(prompts), c.stdin)
+		return "", "", nil
+	}}
+	c := &Claude{runner: f}
+	err := RunFeaturePipeline(context.Background(), c, featureConfig(), wt, "ISSUE", "PERSONA", nil, testGH(), testWT(), "ai/issue-5", "Feature title", 5)
+	var done *alreadyDoneError
+	if !errors.As(err, &done) {
+		t.Fatalf("want *alreadyDoneError once the nudged architect prints the sentinel, got %v", err)
+	}
+	if len(prompts) != 4 {
+		t.Fatalf("got %d calls, want 4", len(prompts))
+	}
+	if strings.Contains(prompts[2], nothingToAnswerSentinel) {
+		t.Errorf("the architect must never see the raw answerer sentinel, got %q", prompts[2])
+	}
+	if !strings.Contains(prompts[2], specReadySentinel) || !strings.Contains(prompts[2], alreadyDoneSentinel) {
+		t.Errorf("nudge must restate the terminal sentinels, got %q", prompts[2])
+	}
+}
+
+// TestRunPlanThenExecuteCheckpointsExecuteStageBeforeExecuteCall is the
+// issue-4 incident, one stage later than issue-5's: the execute session died
+// mid-flight and the stage stayed "plan", so the resume re-entered the
+// COMPLETED plan session with a bare "continue" — which explained itself in
+// prose, never re-printed PIPELINE_READY, and parked the issue. The moment the
+// plan file is committed, the checkpoint must advance to stage execute with
+// the plan path, before the execute call starts.
+func TestRunPlanThenExecuteCheckpointsExecuteStageBeforeExecuteCall(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	var atExecCall SessionNode
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		switch {
+		case strings.Contains(c.stdin, "writing-plans"):
+			writePlanFile(t, wt)
+			return claudeJSON("Plan written.\nPIPELINE_READY", "plan-1"), "", nil
+		case strings.Contains(c.stdin, "executing-plans"):
+			node, ok := resumePoint(logDir)
+			if !ok {
+				t.Error("no resume point recorded when the execute call starts")
+			}
+			atExecCall = node
+			return "", "killed", errors.New("usage limit hit mid-execute")
+		}
+		t.Fatalf("unexpected call: %q", c.stdin)
+		return "", "", nil
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md",
+		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
+		time.Now().Add(-time.Second), testGH(), testWT(), "ai/issue-4", 4)
+	if err == nil {
+		t.Fatal("want the execute failure propagated so the issue parks")
+	}
+	if atExecCall.Stage != stageExecute {
+		t.Errorf("stage at execute-call time = %q, want %q (checkpoint must precede the execute call)", atExecCall.Stage, stageExecute)
+	}
+	if atExecCall.Artifact != "docs/superpowers/plans/2026-07-06-thing.md" {
+		t.Errorf("checkpoint artifact = %q, want the committed plan relative to the worktree", atExecCall.Artifact)
+	}
+	if atExecCall.ID != "" {
+		t.Errorf("pending checkpoint id = %q, want empty — offering the plan session's id would resume the WRONG (completed) session", atExecCall.ID)
+	}
+	node, ok := resumePoint(logDir)
+	if !ok || node.Stage != stageExecute || node.Artifact == "" {
+		t.Errorf("post-crash resume point = %+v ok=%v; a resume would re-enter the completed plan session", node, ok)
+	}
+}
+
+// TestResumeFeaturePipelineExecuteStageFreshFromPlanCheckpoint: a stageExecute
+// record carrying a PlanPath means the execute session never completed (a
+// completed execute call re-records itself without one). Resume must run a
+// FRESH execute session on the committed plan — the executing-plans skill
+// picks up from whatever steps are already done — instead of resuming the
+// recorded (plan) session.
+func TestResumeFeaturePipelineExecuteStageFreshFromPlanCheckpoint(t *testing.T) {
+	logDir := t.TempDir()
+	wt := t.TempDir()
+	writePlanFile(t, wt)
+	f := &fakeRunner{handler: func(c rcall) (string, string, error) {
+		if strings.Contains(c.stdin, "executing-plans") {
+			return claudeJSON("executed", "exec-1"), "", nil
+		}
+		t.Fatalf("unexpected prompt %q — a plan checkpoint must resume at a fresh execute session", c.stdin)
+		return "", "", nil
+	}}
+	c := &Claude{runner: f, logDir: logDir}
+	session := SessionNode{Kind: "feature", Stage: stageExecute,
+		Artifact: "docs/superpowers/plans/2026-07-06-thing.md"}
+	if err := ResumeFeaturePipeline(context.Background(), c, featureConfig(), wt, "the issue", "", nil, session, "continue", testGH(), testWT(), "ai/issue-4", "Feature title", 4); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) == 0 {
+		t.Fatal("no claude calls")
+	}
+	first := f.calls[0]
+	if got := argAfter(first.args, "--resume"); got != "" {
+		t.Errorf("execute session must be fresh, got --resume %q", got)
+	}
+	if !strings.Contains(first.stdin, "2026-07-06-thing.md") {
+		t.Errorf("fresh execute prompt must carry the checkpointed plan path, got %q", first.stdin)
 	}
 }
 
@@ -1040,6 +1321,7 @@ func TestRunPlanThenExecutePushesAndCommentsPlanUpdate(t *testing.T) {
 	c := &Claude{runner: cf}
 
 	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md",
 		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
 		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
 	if err != nil {
@@ -1098,6 +1380,7 @@ func TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline(t *testing.T) {
 	}}
 	c := &Claude{runner: cf}
 	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md",
 		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
 		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
 	if err != nil {
@@ -1133,6 +1416,7 @@ func TestRunPlanThenExecutePushesAfterExecuteCompletes(t *testing.T) {
 	c := &Claude{runner: cf}
 
 	err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md",
 		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
 		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9)
 	if err != nil {
@@ -1181,6 +1465,7 @@ func TestExecuteStagePushFailureDoesNotFailPipeline(t *testing.T) {
 	}}
 	c := &Claude{runner: cf}
 	if err := runPlanThenExecute(context.Background(), c, featureConfig(), wt,
+		"docs/superpowers/specs/2026-07-13-thing-design.md",
 		planPrompt("docs/superpowers/specs/2026-07-13-thing-design.md"), "",
 		time.Now().Add(-time.Second), gh, wtree, "ai/issue-9", 9); err != nil {
 		t.Fatalf("a failed execute-stage push must not fail the pipeline, got %v", err)
@@ -1203,7 +1488,7 @@ func TestResumeFeaturePipelineExecuteStagePushesAfterSuccess(t *testing.T) {
 	}}
 	c := &Claude{runner: cf, logDir: logDir}
 	cfg := featureConfig()
-	session := SessionInfo{SessionID: "exec-sess", Kind: "feature", Stage: stageExecute}
+	session := SessionNode{ID: "exec-sess", Kind: "feature", Stage: stageExecute}
 	if err := ResumeFeaturePipeline(context.Background(), c, cfg, "/wt", "the issue", "", nil, session, "continue",
 		gh, wtree, "ai/issue-9", "Add export", 9); err != nil {
 		t.Fatal(err)
