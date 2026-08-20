@@ -102,7 +102,18 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  disable: true
+  # NOTE: disable: true also blocks the --release-notes flag (GoReleaser
+  # renders an empty body regardless), so this must not be re-enabled.
+  # These filters are the fallback for rc tags, which have no
+  # docs/release-notes/<tag>.md and so release without --release-notes.
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
 
 release:
   draft: false
