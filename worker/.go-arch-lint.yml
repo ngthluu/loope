@@ -1,0 +1,55 @@
+# Architecture rules for the worker module, enforced by go-arch-lint
+# (https://github.com/fe3dback/go-arch-lint). Run via `make lint-arch`.
+#
+# The intent: worker/shared is the domain core + ports and depends on nothing
+# internal; infra implements the ports; engine (orchestration) sees ONLY the
+# ports — it must never import infra; main is the composition root where
+# adapters meet ports.
+version: 3
+workdir: .
+allow:
+  depOnAnyVendor: false
+  # deepScan traces injected values across calls and would flag main handing
+  # infra adapters into web.NewServer — which is exactly the composition-root
+  # pattern this architecture wants. Import-level checking is the contract.
+  deepScan: false
+
+exclude:
+  - engine/ai
+  - web/templates
+  - web/static
+
+# Tests are exempt: they may wire real adapters (like main does) and use
+# testkit fakes without weakening the production-code rules above.
+excludeFiles:
+  - ".*_test\\.go$"
+
+vendors:
+  wire:
+    in: github.com/ngthluu/loope/shared
+
+components:
+  main: { in: . }
+  shared: { in: shared }
+  infra: { in: infra }
+  engine: { in: engine }
+  web: { in: web }
+  telemetry: { in: telemetry }
+  testkit: { in: testkit }
+
+deps:
+  shared:
+    canUse: [wire]
+  infra:
+    mayDependOn: [shared]
+  engine:
+    mayDependOn: [shared]
+  web:
+    mayDependOn: [shared, engine]
+  telemetry:
+    mayDependOn: [shared]
+    canUse: [wire]
+  testkit:
+    mayDependOn: [shared]
+  main:
+    mayDependOn: [shared, infra, engine, web, telemetry]

@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/ngthluu/loope/worker/shared"
 )
 
 type checkStatus int
@@ -40,7 +42,7 @@ var (
 // probe runs one command under its own timeout derived from ctx and returns
 // trimmed stdout. On failure the error names the timeout or carries the first
 // line of stderr, which is what the report shows the user.
-func probe(ctx context.Context, r Runner, dir string, env []string, name string, args ...string) (string, error) {
+func probe(ctx context.Context, r shared.Runner, dir string, env []string, name string, args ...string) (string, error) {
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	stdout, stderr, err := r.Run(pctx, dir, env, "", name, args...)
@@ -65,7 +67,7 @@ func firstLine(s string) string {
 }
 
 // binaryCheck probes for an installed binary by running its version command.
-func binaryCheck(ctx context.Context, r Runner, name string, fix []string, args ...string) CheckResult {
+func binaryCheck(ctx context.Context, r shared.Runner, name string, fix []string, args ...string) CheckResult {
 	out, err := probe(ctx, r, "", nil, name, args...)
 	if err != nil {
 		return CheckResult{Name: name, Status: statusFail, Detail: "not found: " + err.Error(), Fix: fix}
@@ -79,7 +81,7 @@ var fixSuperpowers = []string{"claude plugin install superpowers@claude-plugins-
 // which is the `loope -doctor` case run without --config. The repo-specific
 // checks depend on config values (repoPath, repoSlug), so they are skipped
 // rather than run against zero values.
-func skipIfNoConfig(name string, cfg *Config) (CheckResult, bool) {
+func skipIfNoConfig(name string, cfg *shared.Config) (CheckResult, bool) {
 	if cfg == nil {
 		return CheckResult{Name: name, Status: statusSkip, Detail: "skipped (no --config)"}, true
 	}
@@ -97,7 +99,7 @@ func skipIfBlocked(name string, blockers ...CheckResult) (CheckResult, bool) {
 	return CheckResult{}, false
 }
 
-func checkGHAuth(ctx context.Context, r Runner, gh CheckResult) CheckResult {
+func checkGHAuth(ctx context.Context, r shared.Runner, gh CheckResult) CheckResult {
 	if res, skipped := skipIfBlocked("gh auth", gh); skipped {
 		return res
 	}
@@ -115,7 +117,7 @@ func checkGHAuth(ctx context.Context, r Runner, gh CheckResult) CheckResult {
 // checkSuperpowers verifies the superpowers plugin is installed in the *same*
 // Claude profile the pipeline runs under: without CLAUDE_CONFIG_DIR a user on a
 // dedicated profile would get a false pass from their default ~/.claude.
-func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckResult) CheckResult {
+func checkSuperpowers(ctx context.Context, r shared.Runner, cfg *shared.Config, claude CheckResult) CheckResult {
 	if res, skipped := skipIfBlocked("superpowers", claude); skipped {
 		return res
 	}
@@ -137,7 +139,7 @@ func checkSuperpowers(ctx context.Context, r Runner, cfg *Config, claude CheckRe
 	return CheckResult{Name: "superpowers", Status: statusOK, Detail: "installed"}
 }
 
-func checkRepoPath(ctx context.Context, r Runner, cfg *Config, git CheckResult) CheckResult {
+func checkRepoPath(ctx context.Context, r shared.Runner, cfg *shared.Config, git CheckResult) CheckResult {
 	if res, skipped := skipIfNoConfig("repoPath", cfg); skipped {
 		return res
 	}
@@ -156,7 +158,7 @@ func checkRepoPath(ctx context.Context, r Runner, cfg *Config, git CheckResult) 
 	return CheckResult{Name: "repoPath", Status: statusOK, Detail: cfg.RepoPath}
 }
 
-func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth CheckResult) CheckResult {
+func checkRepoAccess(ctx context.Context, r shared.Runner, cfg *shared.Config, gh, ghAuth CheckResult) CheckResult {
 	if res, skipped := skipIfNoConfig("repo access", cfg); skipped {
 		return res
 	}
@@ -186,7 +188,7 @@ func checkRepoAccess(ctx context.Context, r Runner, cfg *Config, gh, ghAuth Chec
 // MergeResolveLabel belongs here for the mirror reason: only a HUMAN applies
 // it, but a label that doesn't exist on the repo can't be applied at all, so
 // without this warning the merge-resolve flow is silently unreachable.
-func wantedLabels(cfg *Config) []string {
+func wantedLabels(cfg *shared.Config) []string {
 	names := []string{
 		cfg.EligibleLabel,
 		cfg.StateLabels.WIP,
@@ -207,7 +209,7 @@ func wantedLabels(cfg *Config) []string {
 
 // checkLabels warns (never fails) about labels the loop needs but the repo does
 // not have, handing the user the exact `gh label create` commands.
-func checkLabels(ctx context.Context, r Runner, cfg *Config, access CheckResult) CheckResult {
+func checkLabels(ctx context.Context, r shared.Runner, cfg *shared.Config, access CheckResult) CheckResult {
 	if res, skipped := skipIfNoConfig("labels", cfg); skipped {
 		return res
 	}
@@ -248,7 +250,7 @@ func checkLabels(ctx context.Context, r Runner, cfg *Config, access CheckResult)
 
 // checkCurl is a warning: images.go already degrades gracefully, so a missing
 // curl costs issue image attachments and nothing else.
-func checkCurl(ctx context.Context, r Runner) CheckResult {
+func checkCurl(ctx context.Context, r shared.Runner) CheckResult {
 	out, err := probe(ctx, r, "", nil, "curl", "--version")
 	if err != nil {
 		return CheckResult{
@@ -312,7 +314,7 @@ func ReportPreflight(w io.Writer, results []CheckResult) (failed bool) {
 }
 
 // Preflight runs every check in order and returns the results.
-func Preflight(ctx context.Context, r Runner, cfg *Config) []CheckResult {
+func Preflight(ctx context.Context, r shared.Runner, cfg *shared.Config) []CheckResult {
 	git := binaryCheck(ctx, r, "git", fixGit, "--version")
 	gh := binaryCheck(ctx, r, "gh", fixGH, "--version")
 	ghAuth := checkGHAuth(ctx, r, gh)

@@ -6,11 +6,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ngthluu/loope/worker/shared"
+	"github.com/ngthluu/loope/worker/testkit"
 )
 
 // okHandler answers every preflight probe with a healthy default. Overrides are
 // keyed by the full command line ("gh auth status") and replace the default.
-func okHandler(overrides map[string]rresp) func(rcall) (string, string, error) {
+func okHandler(overrides map[string]testkit.RResp) func(testkit.RCall) (string, string, error) {
 	defaults := map[string]string{
 		"git --version":                                       "git version 2.39.5",
 		"gh --version":                                        "gh version 2.63.2",
@@ -22,21 +25,21 @@ func okHandler(overrides map[string]rresp) func(rcall) (string, string, error) {
 		"gh label list --repo your-org/your-repo --json name": `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"}]`,
 		"curl --version":                                      "curl 8.7.1 (x86_64-apple-darwin23.0)",
 	}
-	return func(c rcall) (string, string, error) {
-		key := strings.TrimSpace(c.name + " " + strings.Join(c.args, " "))
+	return func(c testkit.RCall) (string, string, error) {
+		key := strings.TrimSpace(c.Name + " " + strings.Join(c.Args, " "))
 		if r, ok := overrides[key]; ok {
-			return r.stdout, r.stderr, r.err
+			return r.Stdout, r.Stderr, r.Err
 		}
 		return defaults[key], "", nil
 	}
 }
 
-func preflightConfig() *Config {
-	return &Config{
+func preflightConfig() *shared.Config {
+	return &shared.Config{
 		RepoPath:      "/tmp/repo",
 		RepoSlug:      "your-org/your-repo",
 		EligibleLabel: "ai-agent",
-		StateLabels:   defaultStateLabels(),
+		StateLabels:   shared.StateLabels{WIP: "ai-wip", Done: "ai-done", Rework: "ai-rework", NeedsInfo: "ai-needs-info", Stopped: "ai-stopped"},
 	}
 }
 
@@ -52,7 +55,7 @@ func resultByName(t *testing.T, results []CheckResult, name string) CheckResult 
 }
 
 func TestPreflightBinariesPass(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &testkit.FakeRunner{Handler: okHandler(nil)}
 	results := Preflight(context.Background(), f, preflightConfig())
 	for _, name := range []string{"git", "gh", "claude"} {
 		c := resultByName(t, results, name)
@@ -67,8 +70,8 @@ func TestPreflightBinariesPass(t *testing.T) {
 
 func TestPreflightMissingBinaryFails(t *testing.T) {
 	for _, name := range []string{"git", "gh", "claude"} {
-		f := &fakeRunner{handler: okHandler(map[string]rresp{
-			name + " --version": {err: errors.New("executable file not found in $PATH")},
+		f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+			name + " --version": {Err: errors.New("executable file not found in $PATH")},
 		})}
 		results := Preflight(context.Background(), f, preflightConfig())
 		c := resultByName(t, results, name)
@@ -82,8 +85,8 @@ func TestPreflightMissingBinaryFails(t *testing.T) {
 }
 
 func TestPreflightGHAuthFailsAndBlocksNothingElseYet(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh auth status": {stderr: "You are not logged into any GitHub hosts.", err: errors.New("exit status 1")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh auth status": {Stderr: "You are not logged into any GitHub hosts.", Err: errors.New("exit status 1")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "gh auth")
@@ -96,9 +99,9 @@ func TestPreflightGHAuthFailsAndBlocksNothingElseYet(t *testing.T) {
 }
 
 func TestPreflightSkipsDependentChecks(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh --version":     {err: errors.New("not found")},
-		"claude --version": {err: errors.New("not found")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh --version":     {Err: errors.New("not found")},
+		"claude --version": {Err: errors.New("not found")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	for name, blocker := range map[string]string{"gh auth": "gh", "superpowers": "claude"} {
@@ -116,7 +119,7 @@ func TestPreflightSkipsDependentChecks(t *testing.T) {
 // --config: environment checks (binaries, auth, superpowers) still run, but the
 // repo-specific checks that need config values are skipped rather than crashing.
 func TestPreflightNoConfigSkipsRepoChecks(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &testkit.FakeRunner{Handler: okHandler(nil)}
 	results := Preflight(context.Background(), f, nil)
 
 	for _, name := range []string{"git", "gh", "gh auth", "claude", "superpowers", "curl"} {
@@ -137,8 +140,8 @@ func TestPreflightNoConfigSkipsRepoChecks(t *testing.T) {
 }
 
 func TestPreflightSuperpowersMissingPlugin(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"claude plugin list": {stdout: "some-other-plugin@vendor  enabled"},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"claude plugin list": {Stdout: "some-other-plugin@vendor  enabled"},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "superpowers")
@@ -153,12 +156,12 @@ func TestPreflightSuperpowersMissingPlugin(t *testing.T) {
 func TestPreflightSuperpowersUsesClaudeConfigDir(t *testing.T) {
 	cfg := preflightConfig()
 	cfg.ClaudeConfigDir = "/home/you/.claude-personal"
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &testkit.FakeRunner{Handler: okHandler(nil)}
 	Preflight(context.Background(), f, cfg)
 	var got []string
-	for _, c := range f.calls {
-		if c.name == "claude" && hasArg(c.args, "plugin") {
-			got = c.env
+	for _, c := range f.Calls {
+		if c.Name == "claude" && testkit.HasArg(c.Args, "plugin") {
+			got = c.Env
 		}
 	}
 	if len(got) != 1 || got[0] != "CLAUDE_CONFIG_DIR=/home/you/.claude-personal" {
@@ -166,18 +169,18 @@ func TestPreflightSuperpowersUsesClaudeConfigDir(t *testing.T) {
 	}
 
 	cfg.ClaudeConfigDir = ""
-	f2 := &fakeRunner{handler: okHandler(nil)}
+	f2 := &testkit.FakeRunner{Handler: okHandler(nil)}
 	Preflight(context.Background(), f2, cfg)
-	for _, c := range f2.calls {
-		if c.name == "claude" && hasArg(c.args, "plugin") && len(c.env) != 0 {
-			t.Fatalf("plugin list env = %v, want none when claudeConfigDir is unset", c.env)
+	for _, c := range f2.Calls {
+		if c.Name == "claude" && testkit.HasArg(c.Args, "plugin") && len(c.Env) != 0 {
+			t.Fatalf("plugin list env = %v, want none when claudeConfigDir is unset", c.Env)
 		}
 	}
 }
 
 func TestPreflightRepoPathNotAWorktree(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"git rev-parse --is-inside-work-tree": {stderr: "fatal: not a git repository", err: errors.New("exit status 128")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"git rev-parse --is-inside-work-tree": {Stderr: "fatal: not a git repository", Err: errors.New("exit status 128")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "repoPath")
@@ -190,14 +193,14 @@ func TestPreflightRepoPathNotAWorktree(t *testing.T) {
 }
 
 func TestPreflightRepoPathRunsInRepoDir(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &testkit.FakeRunner{Handler: okHandler(nil)}
 	Preflight(context.Background(), f, preflightConfig())
 	found := false
-	for _, c := range f.calls {
-		if c.name == "git" && hasArg(c.args, "rev-parse") {
+	for _, c := range f.Calls {
+		if c.Name == "git" && testkit.HasArg(c.Args, "rev-parse") {
 			found = true
-			if c.dir != "/tmp/repo" {
-				t.Fatalf("rev-parse dir = %q, want /tmp/repo", c.dir)
+			if c.Dir != "/tmp/repo" {
+				t.Fatalf("rev-parse dir = %q, want /tmp/repo", c.Dir)
 			}
 		}
 	}
@@ -207,8 +210,8 @@ func TestPreflightRepoPathRunsInRepoDir(t *testing.T) {
 }
 
 func TestPreflightRepoAccessSkippedWhenAuthFails(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh auth status": {err: errors.New("exit status 1")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh auth status": {Err: errors.New("exit status 1")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "repo access")
@@ -221,8 +224,8 @@ func TestPreflightRepoAccessSkippedWhenAuthFails(t *testing.T) {
 }
 
 func TestPreflightRepoAccessFails(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh repo view your-org/your-repo --json name": {stderr: "GraphQL: Could not resolve to a Repository", err: errors.New("exit status 1")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh repo view your-org/your-repo --json name": {Stderr: "GraphQL: Could not resolve to a Repository", Err: errors.New("exit status 1")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "repo access")
@@ -235,8 +238,8 @@ func TestPreflightRepoAccessFails(t *testing.T) {
 }
 
 func TestPreflightMissingLabelsWarn(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh label list --repo your-org/your-repo --json name": {stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"}]`},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh label list --repo your-org/your-repo --json name": {Stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"}]`},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "labels")
@@ -266,8 +269,8 @@ func TestPreflightMissingLabelsWarn(t *testing.T) {
 // Extra labels the loop does not want are simply ignored, never flagged as
 // unexpected — only missing ones are reported.
 func TestPreflightAllLabelsPresent(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh label list --repo your-org/your-repo --json name": {stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"},{"name":"bug"}]`},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh label list --repo your-org/your-repo --json name": {Stdout: `[{"name":"ai-agent"},{"name":"ai-wip"},{"name":"ai-done"},{"name":"ai-rework"},{"name":"ai-needs-info"},{"name":"ai-stopped"},{"name":"bug"}]`},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	if c := resultByName(t, results, "labels"); c.Status != statusOK {
@@ -276,8 +279,8 @@ func TestPreflightAllLabelsPresent(t *testing.T) {
 }
 
 func TestPreflightMissingCurlWarns(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"curl --version": {err: errors.New("not found")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"curl --version": {Err: errors.New("not found")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	c := resultByName(t, results, "curl")
@@ -293,7 +296,7 @@ func TestPreflightMissingCurlWarns(t *testing.T) {
 }
 
 func TestPreflightHealthyMachineHasNoFailures(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)}
+	f := &testkit.FakeRunner{Handler: okHandler(nil)}
 	results := Preflight(context.Background(), f, preflightConfig())
 	if len(results) != 9 {
 		t.Fatalf("got %d checks, want 9", len(results))
@@ -306,8 +309,8 @@ func TestPreflightHealthyMachineHasNoFailures(t *testing.T) {
 }
 
 func TestPreflightSkippedChecksAreNotFailures(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(map[string]rresp{
-		"gh --version": {err: errors.New("not found")},
+	f := &testkit.FakeRunner{Handler: okHandler(map[string]testkit.RResp{
+		"gh --version": {Err: errors.New("not found")},
 	})}
 	results := Preflight(context.Background(), f, preflightConfig())
 	// Only `gh` itself is a failure; gh auth / repo access / labels all skip.
@@ -369,7 +372,7 @@ func TestReportPreflightPluralSummary(t *testing.T) {
 // unusable — a human can't apply it — so doctor must warn and hand over the
 // exact create command, like any other wanted label.
 func TestPreflightLabelsWarnOnMissingMergeResolveLabel(t *testing.T) {
-	f := &fakeRunner{handler: okHandler(nil)} // fixture lists every label EXCEPT the trigger
+	f := &testkit.FakeRunner{Handler: okHandler(nil)} // fixture lists every label EXCEPT the trigger
 	cfg := preflightConfig()
 	cfg.MergeResolveLabel = "ai-resolve-merge"
 	results := Preflight(context.Background(), f, cfg)

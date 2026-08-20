@@ -1,7 +1,7 @@
 # Worker package split: ports-and-adapters layout
 
 **Date:** 2026-08-20
-**Status:** Approved
+**Status:** Implemented (2026-08-20)
 
 ## Goal
 
@@ -149,6 +149,29 @@ old location keep intermediate phases small, and are removed by the end.
   exported methods/constructor, not by exporting fields wholesale.
 - No `init()` functions or global mutable state beyond embed/template vars;
   the process-global `log` logger keeps working across packages unchanged.
+
+## Implementation deviations
+
+Discovered while executing; none change the architecture:
+
+- `runLoop`/`guard` moved from `main.go` into `engine/runloop.go`
+  (`engine.RunLoop`): they are orchestration, and their tests need the engine's
+  fakes. `main.go` stays the composition root and calls `engine.RunLoop`.
+- The dashboard `.go` files live directly in `worker/web/` next to the
+  `templates/` and `static/` asset dirs (one dir, not `web/web/`); embed paths
+  shortened accordingly.
+- The `Agent` port needs only `Call`, `RecordSnapshot`, `CheckpointStage`, and
+  `LogDir` — session-chain reads/writes and all per-issue markers became plain
+  functions in `worker/shared` (`ResumePoint`, `RecordState`, ...), shared by
+  the adapter, the engine, and the dashboard.
+- Session-lineage and marker persistence (`sessions.go`, `markers.go`,
+  `agentcall.go`) live in `worker/shared`: they are domain state, file-backed
+  but stdlib-only.
+- Tests are exempt from the arch rules (excludeFiles in `.go-arch-lint.yml`):
+  package tests wire real adapters exactly the way main does, which is the
+  point of the seams. go-arch-lint's deepScan is off because it flags main's
+  injection of adapters into `web.NewServer` — the composition-root pattern
+  itself.
 
 ## Testing
 

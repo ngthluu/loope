@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ngthluu/loope/worker/shared"
 )
 
 func TestWrappedAndBareCommand(t *testing.T) {
@@ -206,7 +208,7 @@ func TestResolveLoopePathIsAbsoluteAndExists(t *testing.T) {
 }
 
 func TestResolveClaudeConfigDirOverride(t *testing.T) {
-	cfg := &Config{ClaudeConfigDir: "/custom/claude"}
+	cfg := &shared.Config{ClaudeConfigDir: "/custom/claude"}
 	dir, err := resolveClaudeConfigDir(cfg)
 	if err != nil {
 		t.Fatalf("resolveClaudeConfigDir: %v", err)
@@ -219,7 +221,7 @@ func TestResolveClaudeConfigDirOverride(t *testing.T) {
 func TestResolveClaudeConfigDirDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cfg := &Config{}
+	cfg := &shared.Config{}
 	dir, err := resolveClaudeConfigDir(cfg)
 	if err != nil {
 		t.Fatalf("resolveClaudeConfigDir: %v", err)

@@ -7,13 +7,14 @@ go test ./...                                             # unit tests (no netwo
 go test -tags integration -run TestIntegrationTriage -v   # real claude CLI smoke test
 ```
 
-All process execution goes through the `Runner` interface (`runner.go`); tests
+All process execution goes through the `shared.Runner` port (`worker/shared/runner.go`,
+implemented by `worker/infra`); tests
 inject a fake, so the suite runs without git/gh/claude installed.
 
 ## Prompts
 
 Every prompt loope sends to Claude, and every comment it posts to GitHub, lives
-in [`worker/ai/prompts/`](../worker/ai/prompts) as a `text/template` file — no prompt text is
+in [`worker/engine/ai/prompts/`](../worker/engine/ai/prompts) as a `text/template` file — no prompt text is
 in the Go source. The directory is embedded into the binary with `go:embed`, so a
 release is still a single self-contained file that reads nothing from disk at
 runtime; editing a prompt means rebuilding.
