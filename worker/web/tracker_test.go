@@ -710,3 +710,31 @@ func TestReadState(t *testing.T) {
 		t.Errorf("readState after clearState = %q, want empty", got)
 	}
 }
+
+func TestLoadArtifactMemoizesUnchangedFileAndRefreshesChangedOne(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "001-architect.stream.jsonl")
+	mustWrite(t, path, `{"type":"assistant","session_id":"s1","message":{"content":[{"type":"text","text":"hi"}]}}`+"\n")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1 := loadArtifact(path, info, "stream")
+	if len(m1.events) != 1 || m1.sessionID != "s1" {
+		t.Fatalf("first load events=%d sid=%q", len(m1.events), m1.sessionID)
+	}
+	// Same size+mtime: the exact cached entry is handed back (no re-parse).
+	if m2 := loadArtifact(path, info, "stream"); m2 != m1 {
+		t.Fatal("unchanged file must return the memoized entry")
+	}
+	// File grows (size changes): re-read and re-parsed.
+	mustWrite(t, path, m1.body+`{"type":"assistant","session_id":"s1","message":{"content":[{"type":"text","text":"more"}]}}`+"\n")
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3 := loadArtifact(path, info2, "stream")
+	if m3 == m1 || len(m3.events) != 2 {
+		t.Fatalf("changed file must be re-parsed, got same=%v events=%d", m3 == m1, len(m3.events))
+	}
+}

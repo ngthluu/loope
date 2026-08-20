@@ -286,10 +286,9 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, base
 	} else {
 		perr = RunPipeline(ctx, c, o.cfg, wtPath, content, persona, base, uat, o.gh, o.wt, branch, issue.Title, n)
 	}
-	// A Stop landed during the pipeline: skip the normal park/ship/finish outcome
-	// and leave the ticket ai-wip. The launching goroutine's consumeStopping+pause
-	// transitions it to ai-stopped on the live parent ctx.
-	if o.isStopping(n) {
+	// A Stop or a daemon shutdown landed during the pipeline: skip the normal
+	// park/ship/finish outcome and leave the ticket ai-wip (see bailOnCancel).
+	if o.bailOnCancel(ctx, n) {
 		return nil
 	}
 	var done *alreadyDoneError
@@ -309,11 +308,26 @@ func (o *Orchestrator) handleIssue(ctx context.Context, issue shared.Issue, base
 	return o.ship(ctx, issue, c, wtPath, branch, base, shared.ResolvedKind(logDir))
 }
 
+// bailOnCancel reports whether issue n's run must abandon its normal outcome
+// (park/ship/finish) and return nil, leaving the ticket ai-wip, because its
+// context was cancelled. Two callers cancel a run's ctx, and neither wants a
+// park: a user Stop (isStopping) — runGuarded's deferred pause then swaps
+// ai-wip->ai-stopped on the live parent ctx — and a daemon shutdown (ctx.Err
+// with no Stop flagged), where ai-wip is deliberately left in place so
+// SweepOrphans requeues the ticket on the next boot and it continues in the
+// same worktree. Parking either as ai-rework with a "context canceled" cause
+// would turn a routine interruption into a terminal state a human must undo.
+func (o *Orchestrator) bailOnCancel(ctx context.Context, n int) bool {
+	return o.isStopping(n) || ctx.Err() != nil
+}
+
 // finishDone closes an issue a pipeline judged already implemented. It runs on
 // the handleIssue path, so ai-wip is already applied: comment the reason, swap
 // WIP->Done, and close the issue. The worktree and branch are left in place
 // (never deleted — spec Decision 3), same as every other terminal outcome. Uses
-// a cancellation-proof context so a Ctrl-C still finishes cleanup and labeling.
+// a cancellation-proof context so its own GitHub calls complete even if the
+// run's ctx is cancelled between the pipeline's verdict and the label swap
+// (a cancellation BEFORE the verdict never reaches here — see bailOnCancel).
 // The Done label is swapped in before the close, so even if the close fails the
 // issue is de-queued (hasStateLabel) and won't be re-picked.
 func (o *Orchestrator) finishDone(ctx context.Context, n int, reason string) error {
@@ -384,7 +398,9 @@ func classifyCause(msg string) (guidance string) {
 // park moves an issue into the rework state and PRESERVES all progress: comment
 // the guidance plus the full error, then swap WIP->Rework. The worktree, branch,
 // logs, and session file are left untouched. Uses a cancellation-proof context
-// so a Ctrl-C mid-pipeline still records the state.
+// so the comment and swap complete even if the run's ctx is cancelled while
+// they are in flight. A cancellation is never itself a park cause: a stopped
+// or shut-down run bails out before reaching here (see bailOnCancel).
 //
 // Parking is TERMINAL: only a human removing the rework label moves the issue
 // on, and the next run then reuses the preserved worktree. So every park
@@ -410,8 +426,10 @@ func (o *Orchestrator) park(ctx context.Context, n int, cause error) error {
 func (o *Orchestrator) pause(ctx context.Context, n int) {
 	logDir := o.issueLogDir(n)
 	// The swap is the source of truth. It can fail because GitHub is unreachable,
-	// or because the ticket already left ai-wip (a ship/park won the stop's narrow
-	// race window). Either way, bail before recording state or commenting: writing
+	// or because the ticket already left ai-wip (a ship or park that had already
+	// begun its final label swap when the Stop landed — every earlier step bails
+	// out via bailOnCancel and leaves ai-wip for this swap). Either way, bail
+	// before recording state or commenting: writing
 	// ai-stopped locally would diverge from the real label — the dashboard would
 	// show stopped while GitHub still reads ai-wip, and SweepOrphans could act on
 	// the "stopped" ticket — and the notice would falsely annotate a ticket that
@@ -503,11 +521,20 @@ func (o *Orchestrator) SweepOrphans(ctx context.Context) error {
 // stopped one already does — an accepted, explicit trade-off with no cleanup
 // mechanism in scope. A code-review loop failure parks like any other error:
 // the PR stays up, the issue waits in ai-rework, and the recorded codereview
-// session resumes when a human removes the label. Returns nil only when fully
-// shipped AND reviewed.
+// session resumes when a human removes the label. A Stop or daemon shutdown
+// mid-ship is NOT a failure: every error branch bails out without parking
+// (bailOnCancel), leaving ai-wip for the deferred pause or the next boot's
+// orphan sweep — never ai-rework with a "context canceled" cause. Returns nil
+// only when fully shipped AND reviewed, or when bailing out on cancellation.
 func (o *Orchestrator) ship(ctx context.Context, issue shared.Issue, c shared.Agent, wtPath, branch, base, kind string) error {
 	n := issue.Number
+	if o.bailOnCancel(ctx, n) {
+		return nil // stopped/shut down before ship began (e.g. a codereview re-entry)
+	}
 	onInfra := func(err error) error {
+		if o.bailOnCancel(ctx, n) {
+			return nil // the error IS the cancellation (or raced with it): no park
+		}
 		return o.park(ctx, n, err)
 	}
 	count, err := o.wt.CommitCount(ctx, wtPath, base)
@@ -515,7 +542,7 @@ func (o *Orchestrator) ship(ctx context.Context, issue shared.Issue, c shared.Ag
 		return onInfra(err)
 	}
 	if count == 0 {
-		return o.park(ctx, n, errors.New("pipeline finished but produced no commits"))
+		return onInfra(errors.New("pipeline finished but produced no commits"))
 	}
 	if err := o.wt.Push(ctx, wtPath, branch); err != nil {
 		return onInfra(err)
@@ -538,8 +565,9 @@ func (o *Orchestrator) ship(ctx context.Context, issue shared.Issue, c shared.Ag
 		// A review failure parks for a human like any other error: the PR
 		// stays up, but the issue is not marked done. Removing the rework
 		// label re-enters ship, whose review loop resumes the recorded
-		// codereview session at the same round — never automatically.
-		return o.park(ctx, n, err)
+		// codereview session at the same round — never automatically. A
+		// cancelled review (Stop/shutdown) is not a failure: onInfra bails.
+		return onInfra(err)
 	}
 	if err := o.gh.SwapLabels(ctx, n, o.cfg.StateLabels.WIP, o.cfg.StateLabels.Done); err != nil {
 		// PR is up but the Done swap failed. Surface it; leave ai-wip in place so

@@ -290,6 +290,23 @@ func TestCallLogsDoNotOverwriteAcrossInstances(t *testing.T) {
 	}
 }
 
+// A call that fails before the JSON postmortem is written leaves only
+// NNN-label.prompt.md / .stream.jsonl behind. A fresh instance (process
+// restart) must continue numbering past that, not reuse NNN and overwrite the
+// failed call's transcript.
+func TestNextSeqSkipsPastFailedCallsWithoutJSON(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"001-triage.json", "001-triage.prompt.md", "002-plan.prompt.md", "002-plan.stream.jsonl", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Claude{logDir: dir}
+	if got := c.nextSeq(); got != 3 {
+		t.Fatalf("nextSeq = %d, want 3 (past the failed call's 002-* files)", got)
+	}
+}
+
 func TestTail(t *testing.T) {
 	if got := shared.Tail("abcdef", 3); got != "def" {
 		t.Errorf("tail = %q", got)

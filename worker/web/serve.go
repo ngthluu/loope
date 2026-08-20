@@ -339,6 +339,10 @@ func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
 // finished between render and click, or is already running) is a non-fatal inline
 // notice, not an HTTP error; only a malformed issue number is a 400.
 func (s *Server) mutate(w http.ResponseWriter, r *http.Request, action func(int) error) {
+	if !sameOriginRequest(r) {
+		http.Error(w, "forbidden: cross-site request", http.StatusForbidden)
+		return
+	}
 	n, err := strconv.Atoi(r.FormValue("issue"))
 	if err != nil {
 		http.Error(w, "invalid issue number", http.StatusBadRequest)
@@ -350,6 +354,24 @@ func (s *Server) mutate(w http.ResponseWriter, r *http.Request, action func(int)
 		v.Notice = actionNotice(actErr)
 	}
 	renderHTML(w, s.tmpl, "detail", v)
+}
+
+// sameOriginRequest is the CSRF guard for the mutation routes. The dashboard's
+// buttons use hx-post, and htmx sets the custom `HX-Request: true` header on
+// every request it makes — a cross-origin page cannot add a custom header
+// without a CORS preflight, which this server never answers. As a fallback
+// for non-htmx same-origin callers, a browser-stamped `Sec-Fetch-Site` of
+// same-origin/none (typed URL, bookmark) is also accepted. A plain
+// cross-site form POST carries neither and is refused.
+func sameOriginRequest(r *http.Request) bool {
+	if r.Header.Get("HX-Request") == "true" {
+		return true
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	}
+	return false
 }
 
 // actionNotice maps a mutation error to a friendly inline message.

@@ -25,6 +25,7 @@ type mergeEnv struct {
 	labels         []string // issue 7's GitHub labels
 	conflict       bool     // git merge stops on conflicts
 	claudeResolves bool     // the resolve session commits the merge
+	claudeAborts   bool     // the resolve session gives up with `git merge --abort` (reports blocked, git looks clean)
 	inProgress     bool     // MERGE_HEAD exists (seed true for a parked prior attempt)
 }
 
@@ -69,6 +70,10 @@ func newMergeEnv(t *testing.T, labels ...string) *mergeEnv {
 			}
 			return "", "", nil
 		case "claude":
+			if env.claudeAborts {
+				env.inProgress = false // `git merge --abort`: no MERGE_HEAD, no conflict entries
+				return testkit.ClaudeStructured("mr1", map[string]any{"status": "blocked", "detail": "aborted the merge: needs a human call"}), "", nil
+			}
 			if env.claudeResolves {
 				env.inProgress = false
 				return testkit.ClaudeStructured("mr1", map[string]any{"status": "resolved", "detail": ""}), "", nil
@@ -218,6 +223,29 @@ func TestMergeResolveUnresolvedConflictParksWithoutPush(t *testing.T) {
 	// The half-resolved merge is preserved for the next attempt: no abort.
 	if len(env.callsMatching("git", "merge --abort")) != 0 {
 		t.Error("a failed resolve must never abort the in-progress merge")
+	}
+}
+
+// A session that gives up with `git merge --abort` leaves git looking exactly
+// like a clean merge (no MERGE_HEAD, no unmerged paths); its own "blocked"
+// verdict must still park the run rather than push an unmerged branch as a
+// success.
+func TestMergeResolveBlockedAfterAbortParksWithoutPush(t *testing.T) {
+	env := newMergeEnv(t, "ai-agent", "ai-done", "ai-resolve-merge")
+	env.conflict = true
+	env.claudeAborts = true
+	if err := runMergeCycle(env.orchestrator()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.callsMatching("git", "push")) != 0 {
+		t.Error("a blocked (aborted) merge must not be pushed")
+	}
+	if got := env.callsMatching("gh", "--remove-label ai-wip --add-label ai-rework"); len(got) != 1 {
+		t.Errorf("want wip->rework park swap, got %v", got)
+	}
+	cause := shared.ReadParkCause(env.logDir())
+	if !strings.Contains(cause, "reported blocked") || !strings.Contains(cause, "needs a human call") {
+		t.Errorf("park cause = %q, want the session's blocked reason", cause)
 	}
 }
 

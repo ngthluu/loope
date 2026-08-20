@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,12 @@ import (
 // existing log) does not send one enormous request; the remainder catches
 // up over the next few push cycles.
 const maxLogLinesPerPush = 500
+
+// maxPendingLogLines caps the unsent daemon-log lines the exporter retains
+// across failed pushes, so a long server outage does not grow memory without
+// bound; past the cap the oldest lines are dropped (the newest are what an
+// operator wants when the server comes back).
+const maxPendingLogLines = maxLogLinesPerPush * 4
 
 // maxIssueLogFileBytes caps one persisted log file's pushed content. Most of
 // these files are small (prompts, outputs, single-line state files), but
@@ -57,6 +64,12 @@ type TelemetryExporter struct {
 	client    *http.Client
 	tailer    *LogTailer
 	usagePath string // "" if the user's home directory could not be resolved
+
+	// pending holds log lines read from the tailer but not yet acknowledged
+	// by the server. The tailer advances its offset as it reads, so a failed
+	// push must keep its batch here and resend it next tick, else those
+	// lines are lost forever. Capped at maxPendingLogLines (newest kept).
+	pending []string
 }
 
 // NewTelemetryExporter builds an exporter for cfg.Telemetry, tailing the
@@ -68,8 +81,9 @@ func NewTelemetryExporter(cfg *shared.Config, logPath, version string) *Telemetr
 }
 
 // Run pushes on cfg.Telemetry.PushIntervalSec until ctx is cancelled. A push
-// failure is logged and retried next tick — a slow or unreachable server
-// never blocks the daemon's own work, since this runs in its own goroutine.
+// failure is logged and retried next tick — the unsent log lines are kept in
+// e.pending and lead the next push — and a slow or unreachable server never
+// blocks the daemon's own work, since this runs in its own goroutine.
 func (e *TelemetryExporter) Run(ctx context.Context) {
 	interval := time.Duration(e.cfg.Telemetry.PushIntervalSec) * time.Second
 	ticker := time.NewTicker(interval)
@@ -86,12 +100,27 @@ func (e *TelemetryExporter) Run(ctx context.Context) {
 	}
 }
 
-// pushOnce assembles and sends one PushRequest.
+// pushOnce assembles and sends one PushRequest. Log lines are only dropped
+// from e.pending once the server acknowledges them, so a failed push resends
+// them next tick instead of losing them.
 func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 	lines, err := e.tailer.Next(maxLogLinesPerPush)
 	if err != nil {
 		log.Printf("telemetry: read log tail: %v", err)
 	}
+	e.pending = append(e.pending, lines...)
+	if n := len(e.pending); n > maxPendingLogLines {
+		e.pending = append([]string(nil), e.pending[n-maxPendingLogLines:]...)
+	}
+	if err := e.send(ctx, e.pending); err != nil {
+		return err
+	}
+	e.pending = nil
+	return nil
+}
+
+// send builds and POSTs one PushRequest carrying lines as the log tail.
+func (e *TelemetryExporter) send(ctx context.Context, lines []string) error {
 	now := time.Now()
 	logs := make([]wire.LogRecord, len(lines))
 	for i, l := range lines {
@@ -148,7 +177,7 @@ func (e *TelemetryExporter) pushOnce(ctx context.Context) error {
 }
 
 // scanIssueLogs reads workDir/logs and returns one IssueLogDir per
-// subdirectory (each issue's pipeline run, plus the shared "triage" dir),
+// subdirectory (one per issue's pipeline run),
 // carrying the contents of every regular file directly inside — capped per
 // file (maxIssueLogFileBytes) and per push (maxIssueLogContentBytes), since
 // session transcripts grow to many megabytes. This is a full re-read and
@@ -236,17 +265,37 @@ func scanIssueLogFiles(dir string) ([]wire.IssueLogFile, error) {
 		if err != nil {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		body, err := readFileTail(filepath.Join(dir, e.Name()), info.Size(), maxIssueLogFileBytes)
 		if err != nil {
 			continue
-		}
-		body := string(content)
-		if len(body) > maxIssueLogFileBytes {
-			body = issueLogTruncatedBanner + body[len(body)-maxIssueLogFileBytes:]
 		}
 		files = append(files, wire.IssueLogFile{Name: e.Name(), Content: body, ModTime: info.ModTime()})
 	}
 	return files, nil
+}
+
+// readFileTail returns the whole file when size <= max, else only its last
+// max bytes (seeking past the head rather than reading a multi-megabyte
+// transcript just to discard most of it), led by issueLogTruncatedBanner.
+func readFileTail(path string, size int64, max int) (string, error) {
+	if size <= int64(max) {
+		content, err := os.ReadFile(path)
+		return string(content), err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Seek(size-int64(max), io.SeekStart); err != nil {
+		return "", err
+	}
+	buf := make([]byte, max)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return "", err
+	}
+	return issueLogTruncatedBanner + string(buf[:n]), nil
 }
 
 // readUsageSnapshot reads the usage-hook file at path, returning nil when

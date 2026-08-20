@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,8 @@ func newFakeEnv(t *testing.T) *fakeEnv {
 				return "origin/main\n", "", nil
 			case strings.Contains(joined, "rev-list --count"):
 				return "2\n", "", nil
+			case strings.Contains(joined, "is-inside-work-tree"):
+				return "true\n", "", nil
 			}
 			return "", "", nil
 		case "claude":
@@ -1219,7 +1222,7 @@ func TestProcessOnceFeatureOpensPRAfterSpecStage(t *testing.T) {
 			return testkit.ClaudePlanReady("plan-1"), "", nil
 		}
 		if c.Name == "claude" && strings.Contains(c.Stdin, "executing-plans") {
-			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-1"), "", nil
 		}
 		return base(c)
 	}
@@ -1294,5 +1297,101 @@ func TestHandleIssueRoutesCodeReviewStageToShip(t *testing.T) {
 	}
 	if env.readLocalState(7) != "ai-done" {
 		t.Errorf("state = %q, want ai-done after the resumed review finishes", env.readLocalState(7))
+	}
+}
+
+// ctxRunner makes a Runner honour context cancellation the way a real
+// exec.CommandContext does: once ctx is cancelled, every call fails with
+// ctx.Err() (after the inner runner has been given its chance to block, so a
+// gate can hold the call open until the test cancels it).
+type ctxRunner struct{ inner shared.Runner }
+
+func (r ctxRunner) Run(ctx context.Context, dir string, env []string, stdin, name string, args ...string) (string, string, error) {
+	out, errOut, err := r.inner.Run(ctx, dir, env, stdin, name, args...)
+	if ctx.Err() != nil {
+		return "", "", ctx.Err()
+	}
+	return out, errOut, err
+}
+
+func (r ctxRunner) RunStream(ctx context.Context, dir string, env []string, stdin string, w io.Writer, name string, args ...string) (string, error) {
+	errOut, err := r.inner.RunStream(ctx, dir, env, stdin, w, name, args...)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return errOut, err
+}
+
+// gateShip holds issue 7's run open inside ship — at the code-review claude
+// call — announcing on started, until release is closed. Calls are ctx-aware.
+func gateShip(env *fakeEnv, o *Orchestrator) (started, release chan struct{}) {
+	started, release = make(chan struct{}, 1), make(chan struct{})
+	o.cfg.Models.CodeReview = &shared.CodeReviewConfig{ModelConfig: shared.ModelConfig{Model: "sonnet"}, Rounds: 1}
+	rewire(o, ctxRunner{inner: &gateRunner{inner: env.f, gate: func(dir, name, stdin string) chan struct{} {
+		if name == "claude" && strings.Contains(stdin, "/code-review") {
+			started <- struct{}{}
+			return release
+		}
+		return nil
+	}}})
+	return started, release
+}
+
+// TestStopDuringShipLeavesWIPForPauseNotPark: a Stop that lands while ship is
+// mid-flight (here: in the code-review loop) must not park the issue as
+// ai-rework with a "context canceled" cause. ship bails out leaving ai-wip,
+// and the deferred pause swaps it to ai-stopped exactly once.
+func TestStopDuringShipLeavesWIPForPauseNotPark(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	started, release := gateShip(env, o)
+
+	go func() { _ = o.ProcessOnce(context.Background()) }()
+	<-started
+	if err := o.Stop(7); err != nil {
+		t.Fatalf("Stop(7): %v", err)
+	}
+	close(release)
+	o.Wait()
+
+	if rw := env.callsMatching("gh", "--add-label ai-rework"); len(rw) != 0 {
+		t.Fatalf("a stopped ship must not park, got %v", rw)
+	}
+	if c := shared.ReadParkCause(o.issueLogDir(7)); c != "" {
+		t.Fatalf("park cause = %q, want none", c)
+	}
+	swap := env.callsMatching("gh", "--remove-label ai-wip")
+	if len(swap) != 1 || !strings.Contains(swap[0], "--add-label ai-stopped") {
+		t.Fatalf("want a single ai-wip->ai-stopped swap, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-stopped" {
+		t.Fatalf("local state = %q, want ai-stopped", got)
+	}
+}
+
+// TestShutdownDuringShipLeavesWIPForSweep: a daemon shutdown (parent ctx
+// cancelled, no Stop) mid-ship leaves the issue ai-wip — not ai-rework, not
+// ai-stopped — so SweepOrphans requeues it on the next boot and the run
+// continues in the same worktree.
+func TestShutdownDuringShipLeavesWIPForSweep(t *testing.T) {
+	env := newFakeEnv(t)
+	o := env.orchestrator()
+	started, release := gateShip(env, o)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = o.ProcessOnce(ctx) }()
+	<-started
+	cancel()
+	close(release)
+	o.Wait()
+
+	if swap := env.callsMatching("gh", "--remove-label ai-wip"); len(swap) != 0 {
+		t.Fatalf("a shut-down ship must leave ai-wip in place, got %v", swap)
+	}
+	if got := env.readLocalState(7); got != "ai-wip" {
+		t.Fatalf("local state = %q, want ai-wip", got)
+	}
+	if c := shared.ReadParkCause(o.issueLogDir(7)); c != "" {
+		t.Fatalf("park cause = %q, want none", c)
 	}
 }

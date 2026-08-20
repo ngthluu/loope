@@ -810,9 +810,35 @@ func TestPageLinksVendoredCSSNotCDN(t *testing.T) {
 func post(t *testing.T, h http.Handler, target string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, target, nil).WithContext(context.Background())
+	req.Header.Set("HX-Request", "true") // what the dashboard's hx-post buttons send
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec.Code, rec.Body.String()
+}
+
+func TestMutateRouteRejectsCrossSitePOST(t *testing.T) {
+	s, env := serverWithOrch(t, "ai-stopped", true)
+	h := s.Handler()
+	// A plain cross-site form POST: no HX-Request header, Sec-Fetch-Site says
+	// cross-site. Must be refused before the orchestrator is touched.
+	req := httptest.NewRequest(http.MethodPost, "/continue?issue=7", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site POST = %d, want 403", rec.Code)
+	}
+	if got := env.callsMatching("gh", "--remove-label"); len(got) != 0 {
+		t.Fatalf("cross-site POST must not mutate, but ran %v", got)
+	}
+	// No htmx header, but the browser stamps it same-origin: allowed.
+	req = httptest.NewRequest(http.MethodPost, "/continue?issue=7", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-origin POST = %d, want 200", rec.Code)
+	}
 }
 
 // serverWithOrch builds a Server and a real Orchestrator sharing one fake runner

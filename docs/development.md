@@ -35,14 +35,21 @@ template or a schema stops being valid JSON.
 
 ## Logs
 
-Every Claude call is saved for postmortems. Each call writes three files to the
-issue's log dir: the prompt (`NNN-<label>.prompt.md`), the model's result text
+Every Claude call is saved for postmortems. Each call writes four files to the
+issue's log dir: the prompt (`NNN-<label>.prompt.md`), the live stream-json
+transcript (`NNN-<label>.stream.jsonl`), the model's result text
 (`NNN-<label>.output.md`), and the raw CLI JSON (`NNN-<label>.json`):
 
 ```
-<workDir>/logs/triage/NNN-triage.{prompt.md,output.md,json}          # one per poll cycle
-<workDir>/logs/issue-<N>/NNN-<label>.{prompt.md,output.md,json}      # brainstorm-*, answer-*, plan, execute, debug
+<workDir>/logs/issue-<N>/NNN-<label>.{prompt.md,stream.jsonl,output.md,json}
 ```
+
+`<label>` names the step: `entry-0` / `entry-N` / `entry-resume` (the entry
+session and its Q&A rounds), `answer-N` (the product-owner proxy),
+`done-confirm-N`, `plan`, `execute`, `uat`, `codereview-N` /
+`codereview-N-resume`, and `mergeresolve`. `brainstorm-resume` and
+`debug-resume` only appear when re-entering a legacy (pre-entry-session)
+session chain.
 
 Numbering continues across restarts; nothing is overwritten.
 

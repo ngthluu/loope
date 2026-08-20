@@ -91,3 +91,37 @@ func TestRotatingFileReopensExistingFileWithoutLosingContent(t *testing.T) {
 		t.Fatalf("content = %q, want appended content preserved across a reopen", data)
 	}
 }
+
+// A failed rotation (here: the backup path is a non-empty directory, so the
+// rename fails) must not kill the log: the current handle stays live, the
+// line that triggered the rotation is still written, and later writes keep
+// landing in the same file.
+func TestRotatingFileKeepsWritingWhenRotationFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.log")
+	if err := os.MkdirAll(filepath.Join(path+".1", "occupied"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rf, err := NewRotatingFile(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rf.Close()
+
+	if _, err := rf.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rf.Write([]byte("next")); err != nil { // rotation attempted and fails
+		t.Fatalf("write after a failed rotation must still succeed: %v", err)
+	}
+	if _, err := rf.Write([]byte("more")); err != nil {
+		t.Fatalf("later writes must still succeed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "0123456789nextmore" {
+		t.Fatalf("content = %q, want every line kept in the live file", data)
+	}
+}

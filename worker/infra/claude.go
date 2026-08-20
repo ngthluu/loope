@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -181,24 +182,42 @@ func effortArgs(effort string) []string {
 }
 
 // nextSeq allocates the shared sequence number for a call's log files, seeding
-// it from the count of existing .json postmortems so numbering continues across
-// process restarts. Held under mu: concurrent sessions on one *Claude must not
-// race on the counter, nor be handed the same number and overwrite each other's
-// logs.
+// it from the highest NNN- prefix already present in logDir so numbering
+// continues across process restarts. It scans every entry, not just .json
+// postmortems: a call that failed before parseStreamResult leaves only
+// NNN-label.prompt.md / .stream.jsonl behind, and seeding from the .json count
+// would hand the same number out again after a restart and overwrite that
+// failed call's transcript. Held under mu: concurrent sessions on one *Claude
+// must not race on the counter, nor be handed the same number and overwrite
+// each other's logs.
 func (c *Claude) nextSeq() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.seq == 0 && c.logDir != "" {
 		if entries, err := os.ReadDir(c.logDir); err == nil {
 			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".json") {
-					c.seq++
+				if n, ok := logSeqPrefix(e.Name()); ok && n > c.seq {
+					c.seq = n
 				}
 			}
 		}
 	}
 	c.seq++
 	return c.seq
+}
+
+// logSeqPrefix parses the leading "NNN-" of a log file name as written by
+// writeLog/streamFile (%03d, so three or more digits before the first dash).
+func logSeqPrefix(name string) (int, bool) {
+	i := strings.IndexByte(name, '-')
+	if i < 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[:i])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // savePrompt persists the exact prompt fed to claude as <seq>-<label>.prompt.md

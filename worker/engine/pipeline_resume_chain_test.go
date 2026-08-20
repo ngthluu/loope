@@ -29,7 +29,7 @@ func TestFeaturePipelineRecordsLineageChain(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
 			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
-			return testkit.ClaudeJSON("executed", "exec-sess"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-sess"), "", nil
 		}
 	}}
 	c := infra.NewClaude(f, logDir, "")
@@ -80,7 +80,7 @@ func TestResumeFeaturePipelinePlanStageDeadResumeFallsBackToArtifact(t *testing.
 			_ = os.WriteFile(filepath.Join(wt, "plans", "plan.md"), []byte("# plan"), 0o644)
 			return testkit.ClaudePlanReady("plan-2"), "", nil
 		default:
-			return testkit.ClaudeJSON("executed", "exec-1"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-1"), "", nil
 		}
 	}}
 	c := infra.NewClaude(f, logDir, "")
@@ -141,7 +141,7 @@ func TestResumeFeaturePipelineExecuteStageDeadResumeFallsBackToArtifact(t *testi
 		if testkit.ArgAfter(c.Args, "--resume") == "exec-sess" {
 			return "", "No conversation found", errors.New("exit 1")
 		}
-		return testkit.ClaudeJSON("executed", "exec-2"), "", nil
+		return testkit.ClaudeExecuteComplete("exec-2"), "", nil
 	}}
 	c := infra.NewClaude(f, logDir, "")
 	node := shared.SessionNode{ID: "exec-sess", Kind: "feature", Stage: shared.StageExecute, Artifact: rel}

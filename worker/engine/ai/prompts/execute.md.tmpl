@@ -1,4 +1,8 @@
-/superpowers:executing-plans Execute the plan at {{.PlanPath}}.
-Use the execution style the plan recommends (subagent-driven or inline).
-Follow TDD per the plan. Commit as you complete tasks.
-HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.
+/superpowers:executing-plans Execute the plan at {{.PlanPath}} inline in this session.
+If tasks are already committed on this branch (check `git log`), continue from the first incomplete task; do not redo completed tasks.
+Follow TDD per the plan. Commit after each task; do not push.
+HEADLESS MODE: do not ask questions; make reasonable calls and note them in commit messages.
+When every task in the plan is implemented and committed, end the session: your
+final structured output must report status "complete". Report status
+"incomplete" (with a brief detail naming what remains and why) only if you
+could not finish every task — never report "complete" with work left undone.

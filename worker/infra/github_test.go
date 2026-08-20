@@ -286,8 +286,8 @@ func TestPRNumberForBranch(t *testing.T) {
 	if !testkit.HasArg(f.Calls[0].Args, "view") || !testkit.HasArg(f.Calls[0].Args, "ai/issue-5") {
 		t.Errorf("call args = %v", f.Calls[0].Args)
 	}
-	if got := testkit.ArgAfter(f.Calls[0].Args, "--json"); got != "number" {
-		t.Errorf("--json = %q, want \"number\"", got)
+	if got := testkit.ArgAfter(f.Calls[0].Args, "--json"); !strings.Contains(got, "number") {
+		t.Errorf("--json = %q, want it to request number", got)
 	}
 }
 
@@ -321,11 +321,74 @@ func TestGHRetriesTransientThenSucceeds(t *testing.T) {
 	}}
 	g := testGitHub(f)
 	g.retry = testkit.TestRetry
-	if err := g.Comment(context.Background(), 7, "hi"); err != nil {
+	if err := g.AddLabel(context.Background(), 7, "ai-wip"); err != nil {
 		t.Fatalf("want success after one retry, got %v", err)
 	}
 	if len(f.Calls) != 2 {
 		t.Fatalf("calls = %d, want 2 (fail then retry-success)", len(f.Calls))
+	}
+}
+
+// Comment/ReviewComment are non-idempotent: a 5xx/timeout/EOF may have landed
+// the write before the connection died, so re-sending could duplicate it.
+// Only pre-send failures (rate limit, connection refused, DNS) are retried.
+func TestCommentDoesNotRetryAmbiguousFailure(t *testing.T) {
+	for _, stderr := range []string{"HTTP 502 Bad Gateway", "net/http: request timeout", "unexpected EOF"} {
+		f := &testkit.FakeRunner{Queue: []testkit.RResp{
+			{Err: errors.New("exit 1"), Stderr: stderr},
+			{Stdout: ""},
+		}}
+		g := testGitHub(f)
+		g.retry = testkit.TestRetry
+		if err := g.Comment(context.Background(), 7, "hi"); err == nil {
+			t.Errorf("%q: want the ambiguous failure surfaced, not retried", stderr)
+		}
+		if len(f.Calls) != 1 {
+			t.Errorf("%q: calls = %d, want 1 (no retry on a possibly-applied write)", stderr, len(f.Calls))
+		}
+	}
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{
+		{Err: errors.New("exit 1"), Stderr: "HTTP 500 Internal Server Error"},
+	}}
+	g := testGitHub(f)
+	g.retry = testkit.TestRetry
+	if err := g.ReviewComment(context.Background(), 42, "hi"); err == nil || len(f.Calls) != 1 {
+		t.Errorf("ReviewComment: err = %v, calls = %d; want error and a single call", err, len(f.Calls))
+	}
+}
+
+func TestCommentRetriesPreSendFailure(t *testing.T) {
+	for _, stderr := range []string{"HTTP 429 Too Many Requests", "You have exceeded a secondary rate limit", "dial tcp: connection refused", "Could not resolve host: api.github.com"} {
+		f := &testkit.FakeRunner{Queue: []testkit.RResp{
+			{Err: errors.New("exit 1"), Stderr: stderr},
+			{Stdout: ""},
+		}}
+		g := testGitHub(f)
+		g.retry = testkit.TestRetry
+		if err := g.Comment(context.Background(), 7, "hi"); err != nil {
+			t.Errorf("%q: want success after one retry, got %v", stderr, err)
+		}
+		if len(f.Calls) != 2 {
+			t.Errorf("%q: calls = %d, want 2 (request never reached the server: safe to retry)", stderr, len(f.Calls))
+		}
+	}
+}
+
+func TestListEligibleIssuesExcludesStateLabelsServerSide(t *testing.T) {
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: `[]`}}}
+	g := testGitHub(f)
+	if _, err := g.ListEligibleIssues(context.Background(), "ai-agent"); err != nil {
+		t.Fatal(err)
+	}
+	args := f.Calls[0].Args
+	search := testkit.ArgAfter(args, "--search")
+	for _, l := range []string{"ai-wip", "ai-done", "ai-rework", "ai-needs-info", "ai-stopped"} {
+		if !strings.Contains(search, "-label:"+l) {
+			t.Errorf("--search = %q, want it to exclude %s", search, l)
+		}
+	}
+	if got := testkit.ArgAfter(args, "--limit"); got == "50" || got == "" {
+		t.Errorf("--limit = %q, want a page larger than the old 50", got)
 	}
 }
 

@@ -5,18 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/ngthluu/loope/worker/shared"
 )
 
-// codeReviewRoundFile holds the last completed round number, so a daemon
-// restart mid-loop resumes at the next round instead of redoing finished
-// ones (the CLAUDE.md "continue from existing state" principle).
+// codeReviewRoundFile holds the last completed round number and the id of the
+// session that completed it ("<round> <sessionID>"; legacy files carry the
+// bare number), so a daemon restart mid-loop resumes at the next round instead
+// of redoing finished ones (the CLAUDE.md "continue from existing state"
+// principle) — and so the chain head is only resumed when it is a round that
+// was cut short, never one already recorded complete.
 const codeReviewRoundFile = "codereview-round"
+
+// codeReviewDoneFile marks the review loop as finished (content: the final
+// round's status), so a re-entry into ship after the loop already ended —
+// e.g. the Done swap failed and the issue was requeued — is a no-op instead of
+// resuming the last round's session and spending another session on it.
+const codeReviewDoneFile = "codereview-done"
+
+// resumeContinue is the prompt handed to a resumed, cut-short round: the
+// session already holds the task, it only needs to be told to carry on.
+const resumeContinue = "continue"
 
 // codeReviewResultSchema is the --json-schema for each review round's session.
 const codeReviewResultSchema = `{
@@ -72,14 +83,17 @@ type CodeReview struct {
 // Run drives the round loop: resolve the PR once, then for each round from
 // lastCompletedRound(logDir)+1 through cfg.Models.CodeReview.Rounds (<=0
 // treated as 1), run one Claude session, push whatever it committed, parse
-// its status, post the finding, and persist progress. It stops early on
-// STATUS: clean or STATUS: blocked, and stops (returning an error) if the PR
-// lookup, the Claude call, or the push fails — the caller (ship()) parks that
-// error like any other failure, so a human decides when to continue.
+// its status, post the finding, and persist progress. It stops early on a
+// clean or blocked status, and stops (returning an error) if the PR lookup,
+// the Claude call, or the push fails — the caller (ship()) parks that error
+// like any other failure, so a human decides when to continue. Once the loop
+// has ended (early break or last round) that completion is persisted too, so
+// a later re-entry returns at once instead of re-running the final round.
 //
 // Code review is a recorded session stage (shared.StageCodeReview): every round's
 // session is persisted, and when logDir already holds a codereview-stage
-// session (a parked or crashed review), the first round Run executes resumes
+// session that is NOT the one recorded as completing the last round (i.e. a
+// parked or crashed in-flight round), the first round Run executes resumes
 // THAT session with --resume and "continue" instead of starting a fresh
 // round session — the round counter only ever names completed rounds, so the
 // cut-short round is continued, never skipped.
@@ -91,15 +105,21 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 	if rounds <= 0 {
 		rounds = 1
 	}
+	last, lastID := lastCompletedRound(logDir)
+	if shared.ReadMarker(logDir, codeReviewDoneFile) != "" || last >= rounds {
+		return nil // the loop already finished: nothing to resume or redo
+	}
 	prNum, err := r.Target.PRNumberForBranch(ctx, branch)
 	if err != nil {
 		return fmt.Errorf("issue #%d: code review PR lookup failed: %w", r.Num, err)
 	}
 	resume := ""
-	if node, ok := shared.ResumePoint(logDir); ok && node.Stage == shared.StageCodeReview {
+	if node, ok := shared.ResumePoint(logDir); ok && node.Stage == shared.StageCodeReview && node.ID != lastID {
+		// The chain head is an in-flight round (its completion was never
+		// recorded), not the session that finished the last completed round.
 		resume = node.ID
 	}
-	for i := lastCompletedRound(logDir) + 1; i <= rounds; i++ {
+	for i := last + 1; i <= rounds; i++ {
 		call := shared.ClaudeCall{
 			Dir: wtPath, Label: fmt.Sprintf("codereview-%d", i), Prompt: codeReviewPrompt(i, rounds, base),
 			Model:           cfg.Models.CodeReview.ModelConfig,
@@ -113,7 +133,7 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 		if resume != "" {
 			// Re-entry into a cut-short round: continue its session in place.
 			call.Label = fmt.Sprintf("codereview-%d-resume", i)
-			call.Prompt = "continue"
+			call.Prompt = resumeContinue
 			call.Resume = resume
 			resume = ""
 		}
@@ -128,10 +148,12 @@ func (r *CodeReview) Run(ctx context.Context, c shared.Agent, cfg *shared.Config
 		if err := r.Target.ReviewComment(ctx, prNum, codeReviewComment(i, rounds, status, summary)); err != nil {
 			log.Printf("issue #%d: code review round %d comment failed: %v", r.Num, i, err)
 		}
-		recordCodeReviewRound(logDir, i)
-		if status != codeReviewFixed {
+		recordCodeReviewRound(logDir, i, res.SessionID)
+		if status != codeReviewFixed || i == rounds {
 			// clean: nothing left to do. blocked: the session says it can't
-			// safely fix the finding, so another round won't help either.
+			// safely fix the finding, so another round won't help either. Last
+			// round: the budget is spent. Persist the end so re-entry is a no-op.
+			shared.WriteMarker(logDir, codeReviewDoneFile, string(status))
 			break
 		}
 	}
@@ -159,30 +181,28 @@ func parseCodeReview(res *shared.ClaudeResult) (codeReviewStatus, string) {
 	}
 }
 
-// recordCodeReviewRound writes the last completed round number to
-// <logDir>/codereview-round. Best-effort, like the other log-writers in
-// tracker.go: a no-op on an empty logDir.
-func recordCodeReviewRound(logDir string, i int) {
-	if logDir == "" {
-		return
-	}
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(logDir, codeReviewRoundFile), []byte(strconv.Itoa(i)), 0o644)
+// recordCodeReviewRound writes the last completed round number and the id of
+// the session that completed it to <logDir>/codereview-round. Best-effort,
+// like the other marker writers: a no-op on an empty logDir.
+func recordCodeReviewRound(logDir string, i int, sessionID string) {
+	shared.WriteMarker(logDir, codeReviewRoundFile, strings.TrimSpace(strconv.Itoa(i)+" "+sessionID))
 }
 
 // lastCompletedRound reads the round progress written by
-// recordCodeReviewRound, or 0 if none is recorded (fresh loop, or the file is
-// missing/corrupt).
-func lastCompletedRound(logDir string) int {
-	b, err := os.ReadFile(filepath.Join(logDir, codeReviewRoundFile))
-	if err != nil {
-		return 0
+// recordCodeReviewRound: the last completed round (0 if none is recorded —
+// fresh loop, or the file is missing/corrupt) and the id of the session that
+// completed it ("" for a legacy number-only marker).
+func lastCompletedRound(logDir string) (round int, sessionID string) {
+	fields := strings.Fields(shared.ReadMarker(logDir, codeReviewRoundFile))
+	if len(fields) == 0 {
+		return 0, ""
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	n, err := strconv.Atoi(fields[0])
 	if err != nil {
-		return 0
+		return 0, ""
 	}
-	return n
+	if len(fields) > 1 {
+		sessionID = fields[1]
+	}
+	return n, sessionID
 }

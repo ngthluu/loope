@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // version is the loope-telemetry-server release version. It defaults to
@@ -61,10 +62,19 @@ func runTelemetryServerCmd(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second, // generous: a push body may run to maxPushBodyBytes
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
-		httpSrv.Close()
+		// Let in-flight pushes finish rather than cutting them mid-body.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(shutdownCtx)
 	}()
 	log.Printf("loope-telemetry-server %s on http://%s", version, addr)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

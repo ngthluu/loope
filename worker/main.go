@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/ngthluu/loope/worker/engine"
 	"github.com/ngthluu/loope/worker/infra"
@@ -149,7 +150,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("dashboard: %v", err)
 	}
-	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		httpSrv.Close()

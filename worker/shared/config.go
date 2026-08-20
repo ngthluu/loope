@@ -17,11 +17,15 @@ const (
 	labelStopped   = "ai-stopped"
 )
 
+// ModelConfig selects the model and effort for one Claude session role; they
+// map to the claude CLI's --model and --effort flags, and "" leaves the CLI's default.
 type ModelConfig struct {
 	Model  string `json:"model"`
 	Effort string `json:"effort"`
 }
 
+// Models is the per-role model configuration ("models" in loope.json): one
+// ModelConfig per pipeline role, some of which fall back to Architect when unset.
 type Models struct {
 	Architect ModelConfig `json:"architect"`
 	Answerer  ModelConfig `json:"answerer"`
@@ -70,10 +74,10 @@ func (m Models) withArchitectFallback(c ModelConfig) ModelConfig {
 	return c
 }
 
-// executeConfig returns the model config for the plan-execution step.
+// ExecuteConfig returns the model config for the plan-execution step.
 func (m Models) ExecuteConfig() ModelConfig { return m.withArchitectFallback(m.Execute) }
 
-// mergeResolveConfig returns the model config for the merge-resolve session.
+// MergeResolveConfig returns the model config for the merge-resolve session.
 func (m Models) MergeResolveConfig() ModelConfig { return m.withArchitectFallback(m.MergeResolve) }
 
 // StateLabels are the labels the loop applies to track issue state.
@@ -84,6 +88,23 @@ type StateLabels struct {
 	Rework    string `json:"rework"`
 	NeedsInfo string `json:"needsInfo"`
 	Stopped   string `json:"stopped"`
+}
+
+// All returns every state label, WIP first: the order Current uses to pick
+// the label an issue is wearing when it (transiently) wears more than one.
+func (s StateLabels) All() []string {
+	return []string{s.WIP, s.Rework, s.NeedsInfo, s.Stopped, s.Done}
+}
+
+// Current returns the state label present in labels, or "" when the issue is
+// in no state (i.e. eligible for pickup).
+func (s StateLabels) Current(labels []Label) string {
+	for _, name := range s.All() {
+		if HasLabel(labels, name) {
+			return name
+		}
+	}
+	return ""
 }
 
 func defaultStateLabels() StateLabels {
@@ -98,6 +119,8 @@ type RetryConfig struct {
 	MaxDelaySec  int `json:"maxDelaySec"`
 }
 
+// Policy converts the second-valued JSON form into the RetryPolicy the
+// retry helpers consume.
 func (rc RetryConfig) Policy() RetryPolicy {
 	return RetryPolicy{
 		MaxAttempts: rc.MaxAttempts,
@@ -115,6 +138,8 @@ type TelemetryConfig struct {
 	PushIntervalSec int    `json:"pushIntervalSec"`
 }
 
+// Config is the daemon's loope.json. RepoPath, RepoSlug and WorkDir are
+// required; everything else has a default applied by LoadConfig (see there).
 type Config struct {
 	RepoPath      string `json:"repoPath"`
 	RepoSlug      string `json:"repoSlug"`
@@ -143,6 +168,12 @@ type Config struct {
 	Telemetry *TelemetryConfig `json:"telemetry"`
 }
 
+// LoadConfig reads and parses the JSON config at path, applying defaults
+// (addr localhost:8080, eligibleLabel ai-agent, mergeResolveLabel
+// ai-resolve-merge, pollIntervalSec 60, ticketsPerCycle 1, maxQARounds 20,
+// confidenceThreshold 70, the default state labels, githubRetry 2s/60s, and
+// telemetry.pushIntervalSec 15 when a telemetry block is present), expanding
+// "~" in paths, and requiring repoPath, repoSlug and workDir.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

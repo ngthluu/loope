@@ -72,11 +72,11 @@ func TestCreateFetchesThenAddsWorktree(t *testing.T) {
 
 func TestCreateReclaimsStaleBranchAndRetries(t *testing.T) {
 	// fetch ok; first worktree add fails because a stale branch survives a
-	// crashed prior run; cleanup (best-effort) then a retried add succeeds.
+	// crashed prior run (its worktree dir is gone); cleanup (best-effort) then a
+	// retried add succeeds.
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{
 		{Stdout: ""}, // fetch
 		{Err: errors.New("exit 255"), Stderr: "fatal: a branch named 'ai/issue-7' already exists"}, // worktree add
-		{Stdout: ""}, // worktree remove --force (best-effort)
 		{Stdout: ""}, // worktree prune
 		{Stdout: ""}, // branch -D
 		{Stdout: ""}, // worktree add (retry)
@@ -94,6 +94,9 @@ func TestCreateReclaimsStaleBranchAndRetries(t *testing.T) {
 	if !strings.Contains(joined, "branch -D ai/issue-7") {
 		t.Errorf("expected stale branch delete, calls:\n%s", joined)
 	}
+	if strings.Contains(joined, "rev-parse") {
+		t.Errorf("no dir on the path: must not probe it as a worktree, calls:\n%s", joined)
+	}
 	if n := strings.Count(joined, "worktree add"); n != 2 {
 		t.Errorf("worktree add count = %d, want 2 (initial + retry)", n)
 	}
@@ -101,11 +104,12 @@ func TestCreateReclaimsStaleBranchAndRetries(t *testing.T) {
 
 func TestCreateReusesExistingWorktree(t *testing.T) {
 	// fetch ok; worktree add fails because a worktree from an interrupted prior
-	// run still occupies the path — Create should reuse it (continue working on
-	// it), not delete the branch or recreate it.
+	// run still occupies the path and is still a live checkout — Create should
+	// reuse it (continue working on it), not delete the branch or recreate it.
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{
 		{Stdout: ""}, // fetch
 		{Err: errors.New("exit 128"), Stderr: "fatal: 'issue-7' already exists"}, // worktree add
+		{Stdout: "true\n"}, // rev-parse --is-inside-work-tree
 	}}
 	w := &Worktree{runner: f, repoPath: "/clone"}
 	workDir := t.TempDir()
@@ -125,6 +129,49 @@ func TestCreateReusesExistingWorktree(t *testing.T) {
 	}
 	if n := strings.Count(joined, "worktree add"); n != 1 {
 		t.Errorf("worktree add count = %d, want 1 (reuse, no reclaim/retry)", n)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("reused worktree dir must survive: %v", err)
+	}
+}
+
+func TestCreateReclaimsStaleDirThatIsNotAWorktree(t *testing.T) {
+	// A directory sits on the path but is no longer a usable checkout (gitdir
+	// lost / plain leftover): rev-parse fails. Create must clear it, prune, drop
+	// the branch and retry the add — not hand back a dead directory.
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{
+		{Stdout: ""}, // fetch
+		{Err: errors.New("exit 128"), Stderr: "fatal: 'issue-7' already exists"}, // worktree add
+		{Err: errors.New("exit 128"), Stderr: "fatal: not a git repository"},     // rev-parse
+		{Stdout: ""}, // worktree prune
+		{Stdout: ""}, // branch -D
+		{Stdout: ""}, // worktree add (retry)
+	}}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	workDir := t.TempDir()
+	stale := filepath.Join(workDir, "issue-7")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "leftover"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, err := w.Create(context.Background(), workDir, 7, "main")
+	if err != nil {
+		t.Fatalf("Create should reclaim a stale dir, got %v", err)
+	}
+	if path != stale {
+		t.Errorf("path = %q, want %q", path, stale)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale dir should have been removed before the retry, stat err = %v", err)
+	}
+	joined := joinedCalls(f)
+	if !strings.Contains(joined, "branch -D ai/issue-7") || !strings.Contains(joined, "worktree prune") {
+		t.Errorf("expected prune + branch delete, calls:\n%s", joined)
+	}
+	if n := strings.Count(joined, "worktree add"); n != 2 {
+		t.Errorf("worktree add count = %d, want 2 (initial + retry)", n)
 	}
 }
 
@@ -150,13 +197,33 @@ func TestCreateReturnsUnrelatedAddError(t *testing.T) {
 	}
 }
 
+func TestCreateUnrelatedAddErrorWithDirPresentIsNotReused(t *testing.T) {
+	// A directory exists on the path but the add failed for an unrelated reason
+	// (bad base ref): the error must surface — the dir's presence alone is no
+	// license to reuse it.
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{
+		{Stdout: ""}, // fetch
+		{Err: errors.New("exit 128"), Stderr: "fatal: invalid reference: origin/nope"}, // worktree add
+	}}
+	w := &Worktree{runner: f, repoPath: "/clone"}
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "issue-7"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Create(context.Background(), workDir, 7, "nope"); err == nil {
+		t.Fatal("want the unrelated add error surfaced even though a dir exists on the path")
+	}
+	if n := strings.Count(joinedCalls(f), "worktree add"); n != 1 {
+		t.Errorf("worktree add count = %d, want 1", n)
+	}
+}
+
 func TestCreateReclaimRetryStillFails(t *testing.T) {
 	// Stale branch triggers reclaim, but the retried add fails too (the condition
 	// genuinely can't be fixed) — Create must return the terminal error.
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{
 		{Stdout: ""}, // fetch
 		{Err: errors.New("exit 128"), Stderr: "fatal: a branch named 'ai/issue-7' already exists"}, // add
-		{Stdout: ""}, // worktree remove --force (best-effort)
 		{Stdout: ""}, // worktree prune
 		{Stdout: ""}, // branch -D
 		{Err: errors.New("exit 128"), Stderr: "fatal: a branch named 'ai/issue-7' already exists"}, // add retry

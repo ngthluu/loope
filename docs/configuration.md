@@ -91,7 +91,7 @@ started with. `~` is expanded.
 
 ## `models`
 
-Each role is a `{model, effort}` block:
+Each role is a `{model, effort}` block (`codeReview` also takes `rounds`):
 
 - `architect` — the heavy lifter: brainstorms, plans, debugs, and (unless
   `execute` overrides it) executes.
@@ -106,6 +106,13 @@ Each role is a `{model, effort}` block:
   (`{"model": "sonnet", "effort": "medium"}`). The step never blocks the
   pipeline — if the session fails, the checklist is simply skipped and the
   reason is logged.
+- `codeReview` — optional, a `{model, effort, rounds}` block. The post-ship
+  [review-and-fix loop](how-it-works.md): after the PR is opened, each round
+  runs one session that invokes `/code-review --fix` against the shipped diff,
+  pushes what it commits, and posts its finding as a PR review comment. It has
+  **no** fallback to `architect`: when the block is absent the step is skipped
+  entirely. `rounds` unset or `<= 0` means one round; the loop stops early
+  when a round reports `clean` or `blocked`.
 - `mergeResolve` — optional. The conflict-resolution session of the
   [merge-resolve flow](how-it-works.md#the-merge-resolve-flow). Like `execute`,
   any field left unset inherits from `architect`.

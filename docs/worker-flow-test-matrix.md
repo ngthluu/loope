@@ -25,7 +25,7 @@ A feature issue passes through, in order:
 | P4 | Spec→plan handoff: pending plan node, UAT spawn, spec push + PR + comment | UAT (ephemeral, background) | PENDING `plan` node (no id) before the plan call |
 | P5 | Plan session (structured `status: ready` + plan file) | plan | chain node `plan` (in-flight) |
 | P6 | Plan→execute handoff: pending execute node, plan push + comment | — | PENDING `execute` node before the execute call |
-| P7 | Execute session | execute | chain node `execute` (in-flight) |
+| P7 | Execute session (structured `status: complete`) | execute | chain node `execute` (in-flight) |
 | P8 | Ship: commit count, push, PR create/recover, PR comment | — | `pr` marker (HasPR suppresses duplicate comment) |
 | P9 | Code review rounds | codereview-N | chain node `codereview` (in-flight) + round counter file |
 | P10 | Done: WIP→Done swap, state marker | — | state marker |
@@ -85,6 +85,7 @@ Recovery invariants every scenario must satisfy:
 | P6 execute handoff | M7 plan push/comment fails | best-effort, swallowed | `TestRunPlanThenExecutePlanPushFailureDoesNotFailPipeline` |
 | P6 execute handoff | M1 execute dies before session starts | pending execute node → re-entry re-runs execute FRESH on the committed plan; plan stage NOT re-run | `TestFlowExecuteDiesBeforeSessionStartsRerunsFreshFromPlan` (flow_matrix); unit: `TestResumeFeaturePipelineExecuteStageFreshFromPlanCheckpoint` |
 | P7 execute | M2 killed after id | park; head = execute node → re-entry `--resume` + `continue`, then ship | `TestFlowExecuteKilledParksThenReworkRemovalResumesSameSession` (flow) |
+| P7 execute | M4 `incomplete` status / no structured output (fresh or resumed) | pipeline error → park with the session's detail; never ships | `TestExecutePlanCompletionGate`, `TestResumeExecutePlanCompletionGate` |
 | P7 execute | M7 post-execute push fails | best-effort (ship's push is the backstop) | `TestExecuteStagePushFailureDoesNotFailPipeline` |
 | P7 execute | M8 daemon crash mid-run | SweepOrphans strips WIP; next cycle resumes the execute session | `TestSweepOrphansThenNextCycleResumesSession` |
 | P7 execute | M9 user Stop, then Continue | `ai-stopped` (worktree + chain preserved); Continue re-queues; next cycle resumes the SAME session | `TestFlowContinueAfterStopResumesChainHead` (flow_matrix); unit: `TestStopDuringPipelineParksAsStopped`, `TestPauseTransitionsToStoppedAndPreservesState` |

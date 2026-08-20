@@ -194,7 +194,7 @@ func (e *flowEnv) featureScript() func(c testkit.RCall) (string, string, error) 
 			writePlanFile(e.t, e.wt)
 			return testkit.ClaudePlanReady("plan-1"), "", nil
 		case strings.HasPrefix(c.Stdin, "/superpowers:executing-plans"), c.Stdin == "continue":
-			return testkit.ClaudeJSON("Executed.", "exec-1"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-1"), "", nil
 		case strings.Contains(c.Stdin, "/code-review"):
 			return testkit.ClaudeStructured("cr-1", map[string]any{"status": "clean", "summary": "Nothing to fix."}), "", nil
 		}
@@ -258,7 +258,7 @@ func TestFlowExecuteKilledParksThenReworkRemovalResumesSameSession(t *testing.T)
 			return partial, "usage limit", errors.New("signal: killed")
 		}
 		if testkit.ArgAfter(c.Args, "--resume") == "exec-dead" {
-			return testkit.ClaudeJSON("Executed after resume.", "exec-2"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-2"), "", nil
 		}
 		return happy(c)
 	}

@@ -50,9 +50,10 @@ func (r *RotatingFile) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.size > 0 && r.size+int64(len(p)) > r.maxBytes {
-		if err := r.rotate(); err != nil {
-			return 0, err
-		}
+		// A failed rotation leaves r.f live (see rotate), so rather than drop
+		// the line, write it to the current file anyway: an over-size log is
+		// far better than a dead one. The next Write retries the rotation.
+		_ = r.rotate()
 	}
 	n, err := r.f.Write(p)
 	r.size += int64(n)
@@ -61,20 +62,33 @@ func (r *RotatingFile) Write(p []byte) (int, error) {
 
 // rotate renames the current file to its ".1" sibling (overwriting a prior
 // one) and opens a fresh file at path. Caller must hold r.mu.
+//
+// The order matters for resilience: the daemon log must never be left without
+// a live handle, or every later Write fails and the log dies for the rest of
+// the process. So the rename happens while the old file is still open (fine
+// on POSIX — the handle follows the inode), the new file is opened next, and
+// only then is the old handle closed. If the rename fails, nothing has
+// changed: keep writing to the existing handle. If the open fails after a
+// successful rename, r.f still points at the (now renamed) backup, which is
+// a live handle — keep using it and report the error, so logging continues
+// (into the .1 file) until a later rotation attempt succeeds.
 func (r *RotatingFile) rotate() error {
-	if err := r.f.Close(); err != nil {
-		return err
-	}
 	backup := r.path + ".1"
 	if err := os.Rename(r.path, backup); err != nil {
 		return fmt.Errorf("rotate %s: %w", r.path, err)
 	}
 	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		// Back out: rename the backup into place again so the next rotation
+		// attempt starts from the same state and the file keeps its name. The
+		// open handle is unaffected either way.
+		_ = os.Rename(backup, r.path)
+		return fmt.Errorf("rotate %s: %w", r.path, err)
 	}
+	old := r.f
 	r.f = f
 	r.size = 0
+	_ = old.Close()
 	return nil
 }
 

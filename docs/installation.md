@@ -86,10 +86,15 @@ gh label create ai-done       --repo your-org/your-repo
 gh label create ai-rework     --repo your-org/your-repo
 gh label create ai-needs-info --repo your-org/your-repo
 gh label create ai-stopped    --repo your-org/your-repo
+gh label create ai-resolve-merge --repo your-org/your-repo
 ```
 
 `ai-stopped` is what **Stop** on the dashboard swaps `ai-wip` for; without it the
-stop cannot land and the ticket keeps running. See [the status state
+stop cannot land and the ticket keeps running. `ai-resolve-merge` is the
+human-applied trigger for the [merge-resolve
+flow](how-it-works.md#the-merge-resolve-flow): only you ever add it, but a label
+that doesn't exist on the repo can't be applied at all, so without it the flow
+is unreachable. See [the status state
 machine](how-it-works.md#status-state-machine) for what each label means.
 
 ## Build from source

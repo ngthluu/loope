@@ -142,6 +142,12 @@ func ClaudePlanReady(session string) string {
 	return ClaudeStructured(session, map[string]any{"status": "ready"})
 }
 
+// ClaudeExecuteComplete builds a fake execute-session payload reporting every
+// plan task implemented and committed.
+func ClaudeExecuteComplete(session string) string {
+	return ClaudeStructured(session, map[string]any{"status": "complete"})
+}
+
 // ClaudeAnswer builds a fake answerer payload carrying a reply.
 func ClaudeAnswer(session, answer string) string {
 	return ClaudeStructured(session, map[string]any{"has_answer": true, "answer": answer})

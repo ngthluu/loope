@@ -148,6 +148,14 @@ func SetHeadKind(logDir, kind string) {
 	RecordCheckpoint(logDir, SessionInfo{SessionID: head.ID, Kind: kind, Stage: head.Stage})
 }
 
+// Pipeline kinds stamped on the entry session (SessionInfo.Kind /
+// CallCheckpoint.Kind). They select the ship-stage flavour (PR body,
+// code-review criteria) and the legacy resume branch.
+const (
+	KindBug     = "bug"
+	KindFeature = "feature"
+)
+
 // ResolvedKind returns the chain head's stamped kind for the ship stage (PR
 // body, code-review criteria). "bug" is a defensive fallback only: a pipeline
 // stamps its kind synchronously before returning nil, so an empty kind here
@@ -156,7 +164,7 @@ func ResolvedKind(logDir string) string {
 	if head, ok := HeadSession(logDir); ok && head.Kind != "" {
 		return head.Kind
 	}
-	return "bug"
+	return KindBug
 }
 
 // LastRealSessionID walks the chain backwards for the newest node with a real

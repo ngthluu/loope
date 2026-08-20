@@ -263,3 +263,42 @@ func TestHandlePushRejectsOversizedBody(t *testing.T) {
 		t.Fatal("an oversized push must not be ingested")
 	}
 }
+
+func TestHandlePushPrunesWorkersPastRetention(t *testing.T) {
+	s, err := NewTelemetryServer("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	h := s.Handler()
+	if rec := doPush(t, h, "secret", shared.PushRequest{Resource: shared.Resource{MachineID: "old"}}); rec.Code != http.StatusNoContent {
+		t.Fatalf("push old: %d", rec.Code)
+	}
+	// Just inside retention: a push from another worker keeps "old".
+	now = now.Add(workerRetention - time.Minute)
+	if rec := doPush(t, h, "secret", shared.PushRequest{Resource: shared.Resource{MachineID: "fresh"}}); rec.Code != http.StatusNoContent {
+		t.Fatalf("push fresh: %d", rec.Code)
+	}
+	s.mu.Lock()
+	_, hasOld := s.workers["old"]
+	s.mu.Unlock()
+	if !hasOld {
+		t.Fatal("worker inside retention was pruned")
+	}
+	// Past retention: the next push (from anyone) drops "old" but keeps "fresh".
+	now = now.Add(2 * time.Minute)
+	if rec := doPush(t, h, "secret", shared.PushRequest{Resource: shared.Resource{MachineID: "fresh"}}); rec.Code != http.StatusNoContent {
+		t.Fatalf("push fresh 2: %d", rec.Code)
+	}
+	s.mu.Lock()
+	_, hasOld = s.workers["old"]
+	_, hasFresh := s.workers["fresh"]
+	s.mu.Unlock()
+	if hasOld {
+		t.Fatal("worker past retention was not pruned")
+	}
+	if !hasFresh {
+		t.Fatal("live worker must survive pruning")
+	}
+}

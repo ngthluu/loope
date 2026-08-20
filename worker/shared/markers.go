@@ -21,7 +21,7 @@ const StateFile = "state"
 // creating the dir if needed. Best-effort, like the other log-writers: a no-op
 // on empty inputs and errors are swallowed.
 func RecordState(logDir, label string) {
-	writeMarker(logDir, StateFile, label)
+	WriteMarker(logDir, StateFile, label)
 }
 
 // ReadState returns the issue's local state marker (e.g. "ai-needs-info"), or
@@ -29,14 +29,14 @@ func RecordState(logDir, label string) {
 // last in — and so which resume-prompt strategy applies (spec §4) — BEFORE it
 // overwrites the marker with ai-wip for the new attempt.
 func ReadState(logDir string) string {
-	return readMarker(logDir, StateFile)
+	return ReadMarker(logDir, StateFile)
 }
 
 // ClearState removes the local state marker, returning the issue to whatever
 // state GitHub reports (typically back to eligible). Used when the loop backs an
 // issue out to be re-picked. Best-effort.
 func ClearState(logDir string) {
-	removeMarker(logDir, StateFile)
+	RemoveMarker(logDir, StateFile)
 }
 
 // TitleFile holds the issue's GitHub title, mirrored to disk the moment the
@@ -50,7 +50,7 @@ const TitleFile = "title"
 // RecordTitle writes the issue's GitHub title to <logDir>/title. Best-effort,
 // matching the other log-writers.
 func RecordTitle(logDir, title string) {
-	writeMarker(logDir, TitleFile, title)
+	WriteMarker(logDir, TitleFile, title)
 }
 
 // PRFile holds the issue's PR URL so the dashboard can link to it without a gh
@@ -60,7 +60,7 @@ const PRFile = "pr"
 // RecordPR writes the issue's PR URL to <logDir>/pr. Best-effort, matching the
 // other log-writers.
 func RecordPR(logDir, url string) {
-	writeMarker(logDir, PRFile, url)
+	WriteMarker(logDir, PRFile, url)
 }
 
 // HasPR reports whether RecordPR has already written a PR URL for this issue,
@@ -85,20 +85,23 @@ const ParkCauseFile = "park-cause"
 // RecordParkCause writes the park cause to <logDir>/park-cause. Best-effort,
 // like the other log-writers.
 func RecordParkCause(logDir, msg string) {
-	writeMarker(logDir, ParkCauseFile, msg)
+	WriteMarker(logDir, ParkCauseFile, msg)
 }
 
 // ClearParkCause removes the park cause when the issue leaves the parked state.
 func ClearParkCause(logDir string) {
-	removeMarker(logDir, ParkCauseFile)
+	RemoveMarker(logDir, ParkCauseFile)
 }
 
 // ReadParkCause returns the recorded park cause, or "" when none exists.
 func ReadParkCause(logDir string) string {
-	return readMarker(logDir, ParkCauseFile)
+	return ReadMarker(logDir, ParkCauseFile)
 }
 
-func writeMarker(logDir, name, content string) {
+// WriteMarker writes content to <logDir>/name, creating logDir if needed.
+// Best-effort: a no-op on an empty logDir or content, and write errors are
+// swallowed — markers are hints that the next cycle re-derives if missing.
+func WriteMarker(logDir, name, content string) {
 	if logDir == "" || content == "" {
 		return
 	}
@@ -108,7 +111,8 @@ func writeMarker(logDir, name, content string) {
 	_ = os.WriteFile(filepath.Join(logDir, name), []byte(content), 0o644)
 }
 
-func readMarker(logDir, name string) string {
+// ReadMarker returns the content of <logDir>/name, or "" when it is absent.
+func ReadMarker(logDir, name string) string {
 	b, err := os.ReadFile(filepath.Join(logDir, name))
 	if err != nil {
 		return ""
@@ -116,7 +120,8 @@ func readMarker(logDir, name string) string {
 	return string(b)
 }
 
-func removeMarker(logDir, name string) {
+// RemoveMarker deletes <logDir>/name; absent files are not an error.
+func RemoveMarker(logDir, name string) {
 	if logDir == "" {
 		return
 	}

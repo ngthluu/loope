@@ -32,6 +32,8 @@ var promptTestData = map[string]map[string]any{
 	"guidance-budget":           {},
 	"guidance-network":          {},
 	"ask-format":                {},
+	"entry-outcomes":            {},
+	"po-preamble":               {"Issue": "I", "Persona": "P"},
 	"uat-format":                {"UATCoverage": "C"},
 	"uat-section":               {"Checklist": "- [ ] C"},
 	"uat-feature.md.tmpl":       {"SpecPath": "docs/spec.md", "UATCoverage": "C"},
@@ -48,10 +50,12 @@ var promptTestData = map[string]map[string]any{
 // template ParseFS was seeded with, and the container files whose own bodies
 // are just the whitespace between their {{define}} blocks.
 var skipTemplates = map[string]bool{
-	"prompts":            true,
-	"comments.md.tmpl":   true,
-	"ask-format.md.tmpl": true,
-	"uat-format.md.tmpl": true,
+	"prompts":                true,
+	"comments.md.tmpl":       true,
+	"ask-format.md.tmpl":     true,
+	"uat-format.md.tmpl":     true,
+	"entry-outcomes.md.tmpl": true,
+	"po-preamble.md.tmpl":    true,
 }
 
 func TestEveryTemplateRenders(t *testing.T) {
@@ -114,26 +118,84 @@ func TestEntryPromptSharesTheAskFormatBlock(t *testing.T) {
 	}
 }
 
-// The merged entry prompt (and its resume wrapper) must teach every terminal
-// outcome the entry loop dispatches on: a route the prompt forgets to name is
-// a route the session never knows to aim for. The schema enforces the SHAPE of
-// the answer; the prose is what tells the session which outcome fits.
-func TestEntryPromptTeachesAllTerminalOutcomes(t *testing.T) {
+// The outcome contract lives in exactly one place. Every prompt that opens or
+// resumes an entry-stage turn must carry the rendered block verbatim — the
+// hand-copied lists it replaced had drifted apart — and the block itself must
+// still name every outcome the entry loop dispatches on, worded against the
+// schema descriptions in pipeline_entry.go.
+func TestEntryOutcomesBlockIsSharedByEveryEntryPrompt(t *testing.T) {
+	block := mustRender("entry-outcomes", promptData())
+	for _, outcome := range []string{entryOutcomeFix, entryOutcomeSpec, entryOutcomeDone, entryOutcomeQuestion} {
+		if !strings.Contains(block, `"`+outcome+`"`) {
+			t.Errorf("entry-outcomes block is missing the %s contract:\n%s", outcome, block)
+		}
+	}
+	for _, want := range []string{"spec_path", "do not invent work", "status update", "product owner"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("entry-outcomes block is missing %q:\n%s", want, block)
+		}
+	}
 	for _, tc := range []struct{ name, got string }{
-		{"entryPrompt", entryPrompt("I", 70)},
+		{"entryPrompt(threshold=70)", entryPrompt("I", 70)},
+		{"entryPrompt(threshold=0)", entryPrompt("I", 0)},
 		{"entryResumePrompt", entryResumePrompt("continue")},
 		{"brainstormResumePrompt", brainstormResumePrompt("continue")},
+		{"qaNudgePrompt", qaNudgePrompt()},
 	} {
-		outcomes := []string{entryOutcomeSpec, entryOutcomeDone}
-		if tc.name != "brainstormResumePrompt" {
-			// The legacy design session was never taught the fix route.
-			outcomes = append(outcomes, entryOutcomeFix)
+		if !strings.Contains(tc.got, block) {
+			t.Errorf("%s does not contain the entry-outcomes block", tc.name)
 		}
-		for _, outcome := range outcomes {
-			if !strings.Contains(tc.got, outcome) {
-				t.Errorf("%s is missing the %s contract", tc.name, outcome)
-			}
+	}
+}
+
+// The fresh entry prompt must state the environment contract the pipeline
+// relies on: the engine pushes and opens the PR itself (worktree.go), and the
+// spec must land under a specs/ directory for resolveSpec's fallback to find it.
+func TestEntryPromptStatesEnvironmentContract(t *testing.T) {
+	got := entryPrompt("I", 70)
+	for _, want := range []string{
+		"dedicated git worktree",
+		"Never push, open PRs, switch branches, rebase, amend, or force-push",
+		"`specs/` directory",
+		"spec_path",
+		"needs-info comment",
+		"product-owner proxy",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("entryPrompt is missing %q", want)
 		}
+	}
+	if strings.Contains(entryPrompt("I", 0), "needs-info comment") {
+		t.Error("entryPrompt(threshold=0) mentions the needs-info path; it must stay inside the threshold guard")
+	}
+}
+
+// Both product-owner-proxy prompts open with the same preamble, from the same
+// source, and that preamble declares the proxy read-only (the call sites also
+// disallow the edit tools; the prose keeps the model from trying).
+func TestPOPreambleIsSharedByProxyPrompts(t *testing.T) {
+	d := promptData()
+	d["Issue"] = "I"
+	d["Persona"] = "P"
+	block := mustRender("po-preamble", d)
+	if !strings.Contains(block, "You are read-only: do not modify, create, or commit any file in the repository.") {
+		t.Errorf("po-preamble block is missing the read-only rule:\n%s", block)
+	}
+	if !strings.Contains(block, "Product owner preferences (persona):\nP") {
+		t.Errorf("po-preamble block is missing the persona section:\n%s", block)
+	}
+	for _, tc := range []struct{ name, got string }{
+		{"answererPrompt", answererPrompt("I", "P", "A")},
+		{"doneConfirmPrompt", doneConfirmPrompt("I", "P", "R")},
+	} {
+		if !strings.Contains(tc.got, block) {
+			t.Errorf("%s does not contain the po-preamble block", tc.name)
+		}
+	}
+	// An empty persona drops the heading rather than rendering it over nothing.
+	d["Persona"] = ""
+	if got := mustRender("po-preamble", d); strings.Contains(got, "persona") {
+		t.Errorf("po-preamble renders the persona heading with no persona:\n%s", got)
 	}
 }
 

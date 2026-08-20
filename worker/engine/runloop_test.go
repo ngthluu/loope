@@ -57,7 +57,14 @@ func TestRunLoopDrainsInFlightPipelinesOnCancel(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("runLoop did not return after pipelines drained")
 	}
-	if n := len(env.callsMatching("gh", "pr create")); n != 1 {
-		t.Fatalf("pr create count = %d, want 1 (the pipeline must have completed)", n)
+	// The drained pipeline saw the cancelled ctx and bailed out of its normal
+	// outcome (bailOnCancel): no ship, no park — ai-wip is left in place for
+	// the next boot's SweepOrphans to requeue, so the run continues in the same
+	// worktree instead of ending as terminal ai-rework.
+	if n := len(env.callsMatching("gh", "pr create")); n != 0 {
+		t.Fatalf("pr create count = %d, want 0 (a shut-down run must not ship)", n)
+	}
+	if n := len(env.callsMatching("gh", "--remove-label ai-wip")); n != 0 {
+		t.Fatalf("ai-wip was removed %d times, want 0 (left for SweepOrphans)", n)
 	}
 }

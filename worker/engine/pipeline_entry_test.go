@@ -111,7 +111,7 @@ func TestRunPipelineSpecOutcomeStampsFeatureKind(t *testing.T) {
 			writePlanFile(t, wt)
 			return testkit.ClaudePlanReady("plan-sess"), "", nil
 		default:
-			return testkit.ClaudeJSON("executed", "exec-sess"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-sess"), "", nil
 		}
 	}}
 	c := infra.NewClaude(f, logDir, "")
@@ -391,16 +391,28 @@ func TestResumePipelineLegacyBugChainResumesDebugSession(t *testing.T) {
 	}
 }
 
-// LEGACY: a resumed debug session that keeps asking its needs-info questions
-// without committing (issue #83) must route back to needs-info, not fall
-// through to ship's "produced no commits" park.
-func TestResumePipelineLegacyBugChainEscalatesWhenStalled(t *testing.T) {
-	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeEntry("s2", "question",
-		"I still can't responsibly pick a fix. Please answer the 5 questions above.")}}}
+// LEGACY: a resumed debug session that ends with a question instead of a fix
+// (issue #83) must NOT be handed to the ship gates as if it were the fix —
+// its outcome routes through the shared entry loop (PO-proxy answer, then
+// the session resumes), and only a fix_committed outcome reaches afterFix.
+// A fix claimed with zero commits still escalates to needs-info there, not to
+// ship's "produced no commits" park.
+func TestResumePipelineLegacyBugChainQuestionRoutesThroughLoop(t *testing.T) {
+	var prompts []string
+	f := &testkit.FakeRunner{Handler: func(c testkit.RCall) (string, string, error) {
+		prompts = append(prompts, c.Stdin)
+		switch {
+		case testkit.ArgAfter(c.Args, "--resume") == "s1" && c.Stdin == "continue":
+			return testkit.ClaudeEntry("s2", "question", "I still can't responsibly pick a fix. Please answer the 5 questions above."), "", nil
+		case testkit.ArgAfter(c.Args, "--resume") == "s2":
+			return testkit.ClaudeEntry("s3", "fix_committed", "Fixed and committed."), "", nil
+		}
+		return testkit.ClaudeAnswer("ans-1", "Pick option A."), "", nil
+	}}
 	wt := infra.NewWorktreeAt(&testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: "0\n"}}}, "", testkit.TestRetry)
 	c := infra.NewClaude(f, t.TempDir(), "")
-	cfg := &shared.Config{ConfidenceThreshold: 70, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
-	node := shared.SessionNode{ID: "s1", Kind: "bug", Stage: shared.StageDebug}
+	cfg := &shared.Config{ConfidenceThreshold: 70, MaxQARounds: 3, Models: shared.Models{Architect: shared.ModelConfig{Model: "opus"}}}
+	node := shared.SessionNode{ID: "s1", Kind: shared.KindBug, Stage: shared.StageDebug}
 	err := ResumePipeline(context.Background(), c, cfg, "/wt", "ISSUE", "", "main", nil, node, "continue", testGH(), wt, "ai/issue-1", "T", 1)
 	var lc *lowConfidenceError
 	if !errors.As(err, &lc) {
@@ -408,5 +420,9 @@ func TestResumePipelineLegacyBugChainEscalatesWhenStalled(t *testing.T) {
 	}
 	if lc.score != noConfidenceScore {
 		t.Errorf("score = %d, want noConfidenceScore", lc.score)
+	}
+	// debug-resume (question) → answerer → resumed session (fix) → afterFix.
+	if len(prompts) != 3 || !strings.Contains(prompts[1], "5 questions") || prompts[2] != "Pick option A." {
+		t.Errorf("prompts = %q, want resume, answerer relaying the question, then the answer", prompts)
 	}
 }

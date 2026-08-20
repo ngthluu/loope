@@ -404,7 +404,7 @@ func TestFlowContinueAfterStopResumesChainHead(t *testing.T) {
 			return killedAfterID("exec-dead")
 		}
 		if testkit.ArgAfter(c.Args, "--resume") == "exec-dead" {
-			return testkit.ClaudeJSON("Executed after continue.", "exec-2"), "", nil
+			return testkit.ClaudeExecuteComplete("exec-2"), "", nil
 		}
 		return happy(c)
 	}

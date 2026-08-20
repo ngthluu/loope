@@ -207,13 +207,7 @@ const SnapshotFile = "issue-snapshot"
 // <logDir>/issue-snapshot, overwriting whatever was there. Best-effort, like
 // the other log-writers: a no-op on an empty logDir or content.
 func RecordSnapshot(logDir, content string) {
-	if logDir == "" || content == "" {
-		return
-	}
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(logDir, SnapshotFile), []byte(content), 0o644)
+	WriteMarker(logDir, SnapshotFile, content)
 }
 
 // ReadSnapshot reads the issue content written by RecordSnapshot from logDir.

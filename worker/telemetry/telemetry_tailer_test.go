@@ -133,3 +133,48 @@ func TestLogTailerHandlesRotationBySize(t *testing.T) {
 		}
 	}
 }
+
+func TestLogTailerDrainsRotatedFileBeforeNewOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	if err := os.WriteFile(path, []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := NewLogTailer(path) // offset at EOF of the old file
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("d\ne\n") // unread when rotation happens
+	f.Close()
+
+	// RotatingFile.rotate: rename to .1, fresh file at path. The new file is
+	// already longer than the old offset, so size alone would not reveal it.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("new\n", 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, err := tl.Next(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string{"d", "e"}, strings.Split(strings.TrimSuffix(strings.Repeat("new\n", 10), "\n"), "\n")...)
+	if len(lines) != len(want) {
+		t.Fatalf("lines = %v, want %v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("lines[%d] = %q, want %q", i, lines[i], want[i])
+		}
+	}
+	// Subsequent call continues the new file, without re-draining .1.
+	f, _ = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("tail\n")
+	f.Close()
+	lines, _ = tl.Next(500)
+	if len(lines) != 1 || lines[0] != "tail" {
+		t.Fatalf("after rotation lines = %v, want [tail]", lines)
+	}
+}

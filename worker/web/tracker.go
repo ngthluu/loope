@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -164,6 +165,48 @@ func toolDetail(input map[string]any) string {
 	return ""
 }
 
+// artifactMemo is one cached step-artifact file: its raw body and, for a
+// stream transcript, the events parsed from it. Keyed in artifactCache by
+// path and validated by (size, mtime), so an unchanged file is neither
+// re-read nor re-parsed on the dashboard's 3s poll; a file still being
+// appended to (size/mtime moving) is refreshed as before.
+type artifactMemo struct {
+	size      int64
+	mtime     time.Time
+	body      string
+	events    []TranscriptEvent // stream artifacts only
+	sessionID string            // stream artifacts only
+}
+
+// artifactCache memoizes step-artifact files across scans. Entries are only
+// ever replaced wholesale and their slices never mutated after insertion, so
+// sharing them between concurrent renders is safe.
+var artifactCache sync.Map // path -> *artifactMemo
+
+// loadArtifact returns the memoized body (and, for ext == "stream", the
+// parsed transcript) of the file at path, re-reading it only when info's
+// size or mtime differ from the cached entry.
+func loadArtifact(path string, info os.FileInfo, ext string) *artifactMemo {
+	if info != nil {
+		if v, ok := artifactCache.Load(path); ok {
+			m := v.(*artifactMemo)
+			if m.size == info.Size() && m.mtime.Equal(info.ModTime()) {
+				return m
+			}
+		}
+	}
+	body, err := os.ReadFile(path)
+	m := &artifactMemo{body: string(body)}
+	if ext == "stream" && m.body != "" {
+		m.events, m.sessionID = parseTranscript(m.body)
+	}
+	if info != nil && err == nil { // never memoize a failed read
+		m.size, m.mtime = info.Size(), info.ModTime()
+		artifactCache.Store(path, m)
+	}
+	return m
+}
+
 // splitBase parses "042-architect" into seq=42, label="architect".
 func splitBase(base string) (seq int, label string, ok bool) {
 	i := strings.IndexByte(base, '-')
@@ -256,7 +299,7 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 		seq                   int
 		label                 string
 		prompt, output, jsonB string
-		stream                string
+		stream                *artifactMemo // nil when no stream file
 		hasJSON               bool
 	}
 	byBase := map[string]*raw{}
@@ -268,10 +311,11 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 			continue
 		}
 		name := e.Name()
-		if info, ierr := e.Info(); ierr == nil {
-			if info.ModTime().After(tk.LastActive) {
-				tk.LastActive = info.ModTime()
-			}
+		info, ierr := e.Info()
+		if ierr != nil {
+			info = nil // loadArtifact then reads uncached
+		} else if info.ModTime().After(tk.LastActive) {
+			tk.LastActive = info.ModTime()
 		}
 		if name == shared.SessionFile {
 			if si, rerr := shared.ReadSession(dir); rerr == nil {
@@ -312,17 +356,17 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 			byBase[base] = r
 			order = append(order, base)
 		}
-		body, _ := os.ReadFile(filepath.Join(dir, name))
+		m := loadArtifact(filepath.Join(dir, name), info, ext)
 		switch ext {
 		case "prompt":
-			r.prompt = string(body)
+			r.prompt = m.body
 		case "output":
-			r.output = string(body)
+			r.output = m.body
 		case "json":
-			r.jsonB = string(body)
+			r.jsonB = m.body
 			r.hasJSON = true
 		case "stream":
-			r.stream = string(body)
+			r.stream = m
 		}
 	}
 
@@ -358,11 +402,10 @@ func scanIssueDir(dir string, num int) (Ticket, bool) {
 		default:
 			st.Status = StatusOK
 		}
-		if r.stream != "" {
-			events, sid := parseTranscript(r.stream)
-			st.Transcript = events
+		if r.stream != nil && r.stream.body != "" {
+			st.Transcript = r.stream.events
 			if st.SessionID == "" {
-				st.SessionID = sid
+				st.SessionID = r.stream.sessionID
 			}
 		}
 		tk.Steps = append(tk.Steps, st)

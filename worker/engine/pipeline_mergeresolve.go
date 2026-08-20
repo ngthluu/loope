@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/ngthluu/loope/worker/shared"
@@ -20,10 +19,12 @@ import (
 // classifies, never resumes or records the issue's pipeline session, and restores
 // whatever state label the issue had when it is done.
 
-// mergeResolveResultSchema is the --json-schema for the resolve session. Its
-// status only improves the outbound comment — pass/fail is decided by git
-// state (MergeInProgress/HasUnmergedPaths), never by the session's
-// self-report, matching afterFix's distrust-and-verify stance.
+// mergeResolveResultSchema is the --json-schema for the resolve session. Git
+// state (MergeInProgress/HasUnmergedPaths) decides pass/fail first, matching
+// afterFix's distrust-and-verify stance; the session's self-reported "blocked"
+// is ALSO a hard failure, because a session that gives up with `git merge
+// --abort` leaves git looking exactly like a clean merge. "resolved" on its
+// own never makes a run pass — only the git checks can.
 const mergeResolveResultSchema = `{
   "type": "object",
   "properties": {
@@ -97,7 +98,7 @@ func RunMergeResolve(ctx context.Context, c shared.Agent, cfg *shared.Config, wt
 	if json.Unmarshal(res.StructuredOutput, &mr) == nil {
 		summary = strings.TrimSpace(mr.Status + " " + mr.Detail)
 	}
-	// Git state, not the sentinel, decides the outcome. Both checks are needed:
+	// Git state, not the self-report, decides success. Both checks are needed:
 	// unmerged paths alone misses a session that resolved every file but never
 	// committed, and MERGE_HEAD alone misses one that committed with `git
 	// commit -i` tricks leaving conflict entries staged.
@@ -108,6 +109,13 @@ func RunMergeResolve(ctx context.Context, c shared.Agent, cfg *shared.Config, wt
 		return summary, fmt.Errorf("post-resolution conflict check: %w", err)
 	} else if unmerged {
 		return summary, fmt.Errorf("merge-resolve session ended with unresolved conflicts:\n%s", shared.Clip(res.Result, 4000))
+	}
+	// Git looks clean, but a session that gave up and ran `git merge --abort`
+	// leaves exactly this state (no MERGE_HEAD, no conflict entries) with
+	// nothing merged. Its own "blocked" verdict is the only evidence — fail
+	// on it rather than pushing an unmerged branch as a success.
+	if mr.Status == "blocked" {
+		return summary, fmt.Errorf("merge-resolve session reported blocked: %s", strings.TrimSpace(mr.Detail))
 	}
 	return summary, nil
 }
@@ -157,7 +165,9 @@ func (o *Orchestrator) ProcessMergeResolves(ctx context.Context) error {
 func (o *Orchestrator) handleMergeResolve(ctx context.Context, issue shared.Issue, base string) error {
 	n := issue.Number
 	logDir := o.issueLogDir(n)
-	prior := currentStateLabel(issue.Labels, o.cfg.StateLabels)
+	// WIP first (StateLabels.All's order) so the stale-wip guard below sees it
+	// before anything else the issue transiently wears.
+	prior := o.cfg.StateLabels.Current(issue.Labels)
 	if prior == o.cfg.StateLabels.WIP {
 		// A stale ai-wip from a crashed run the startup sweep hasn't cleared
 		// yet. Swapping it for our own would fight the sweep; wait it out.
@@ -253,46 +263,21 @@ func (o *Orchestrator) parkMergeResolve(ctx context.Context, n int, cause error)
 	return cause
 }
 
-// currentStateLabel returns whichever mutually-exclusive lifecycle label the
-// issue currently carries, or "". WIP first so handleMergeResolve's stale-wip
-// guard sees it before anything else.
-func currentStateLabel(labels []shared.Label, sl shared.StateLabels) string {
-	for _, name := range []string{sl.WIP, sl.Rework, sl.NeedsInfo, sl.Stopped, sl.Done} {
-		if shared.HasLabel(labels, name) {
-			return name
-		}
-	}
-	return ""
-}
-
 // recordMergeResolvePrior writes the state label to restore after the run to
 // <logDir>/mergeresolve-prior. Best-effort, like the other log-writers.
 func recordMergeResolvePrior(logDir, label string) {
-	if logDir == "" || label == "" {
-		return
-	}
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(logDir, mergeResolvePriorFile), []byte(label), 0o644)
+	shared.WriteMarker(logDir, mergeResolvePriorFile, label)
 }
 
 // readMergeResolvePrior reads the marker written by recordMergeResolvePrior,
 // or "" if none is recorded.
 func readMergeResolvePrior(logDir string) string {
-	b, err := os.ReadFile(filepath.Join(logDir, mergeResolvePriorFile))
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	return shared.ReadMarker(logDir, mergeResolvePriorFile)
 }
 
 // clearMergeResolvePrior removes the marker on every terminal outcome.
 func clearMergeResolvePrior(logDir string) {
-	if logDir == "" {
-		return
-	}
-	_ = os.Remove(filepath.Join(logDir, mergeResolvePriorFile))
+	shared.RemoveMarker(logDir, mergeResolvePriorFile)
 }
 
 func mergeResolvePrompt(base string) string {

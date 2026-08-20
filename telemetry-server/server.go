@@ -27,6 +27,13 @@ const maxIssueLogDirsPerWorker = 50
 // since everything ingested here is held in RAM.
 const maxPushBodyBytes = 8 << 20
 
+// workerRetention is how long a worker that has stopped pushing stays in
+// memory. Workers are keyed by MachineID, so a decommissioned host (or a
+// moved workDir) would otherwise linger forever, holding its log ring and
+// issue-log archive; pruning on ingest keeps the map bounded by the live
+// fleet plus recent stragglers.
+const workerRetention = 72 * time.Hour
+
 // WorkerState is the server's last-known view of one worker, keyed by
 // Resource.MachineID.
 type WorkerState struct {
@@ -122,13 +129,15 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	s.pruneStaleLocked(now)
 	ws := s.workers[req.Resource.MachineID]
 	if ws == nil {
 		ws = &WorkerState{Logs: NewLogRingBuffer(maxLogLinesPerWorker)}
 		s.workers[req.Resource.MachineID] = ws
 	}
 	ws.Resource = req.Resource
-	ws.LastPushAt = s.now()
+	ws.LastPushAt = now
 	ws.Usage = req.Usage
 	lines := make([]string, len(req.Logs))
 	for i, l := range req.Logs {
@@ -148,6 +157,16 @@ func (s *TelemetryServer) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// pruneStaleLocked drops workers whose last push is older than
+// workerRetention. Caller holds s.mu.
+func (s *TelemetryServer) pruneStaleLocked(now time.Time) {
+	for id, ws := range s.workers {
+		if now.Sub(ws.LastPushAt) > workerRetention {
+			delete(s.workers, id)
+		}
+	}
 }
 
 // dirModTime returns the latest ModTime across a dir's files — used both to

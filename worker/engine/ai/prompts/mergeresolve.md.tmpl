@@ -13,7 +13,9 @@ making the merge conclude cleanly.
 
 If a conflict cannot be resolved safely without a human decision (e.g. two
 incompatible designs for the same behavior), leave the merge unresolved — do
-NOT commit — and explain why.
+NOT commit — and explain why. Do not run `git merge --abort`, `git reset`, or
+otherwise back out the merge: leave MERGE_HEAD and the conflict markers in
+place so a human can take over.
 
 HEADLESS MODE: you cannot ask questions (AskUserQuestion is disabled). Make
 reasonable calls and note them in the merge commit message.

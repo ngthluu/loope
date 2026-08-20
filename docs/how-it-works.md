@@ -1,6 +1,6 @@
 # How loope works
 
-Each poll cycle runs four steps:
+Each poll cycle runs these steps:
 
 1. **List** open issues carrying the eligible label (default `ai-agent`) that
    don't yet have a state label, and pick the oldest ones (lowest issue number)
@@ -12,24 +12,50 @@ Each poll cycle runs four steps:
    (see [Confidence gate](configuration.md#confidence-gate)). Otherwise it
    commits to one of two outcomes, and the pipeline **derives the issue's kind
    from which one it produced**:
+   The session reports its result as **structured output**: every turn ends
+   with a JSON object whose `outcome` field is one of `fix_committed`,
+   `spec_ready` (plus `spec_path`), `already_done` or `question`, enforced by
+   the `claude` CLI's `--json-schema` rather than by a sentinel string in
+   prose. A `question` keeps the Q&A loop with the product-owner proxy going;
+   the other three are terminal:
    - **Fix directly** (kind `bug`) — a small, well-scoped defect: reproduce
-     with a failing test, fix, commit, and print `FIX_COMMITTED:`. A short
-     read-only session then reads the issue and the resulting diff and posts a
-     UAT checklist as an issue comment.
+     with a failing test, fix, commit, and end the turn with
+     `outcome: fix_committed`. A short read-only session then reads the issue
+     and the resulting diff and posts a UAT checklist as an issue comment.
    - **Design first** (kind `feature`) — anything needing design work,
      including a "fix" whose right behavior first needs designing: the session
      brainstorms with a cheaper "product owner proxy" agent in a Q&A loop,
-     then writes and commits the spec (`SPEC_READY:`). A short read-only
-     session turns that spec into a UAT checklist posted as an issue comment.
-     A **fresh** session turns the spec into a committed implementation plan,
-     and a third session executes the plan.
+     then writes and commits the spec and ends with `outcome: spec_ready` and
+     the committed `spec_path`. A short read-only session turns that spec into
+     a UAT checklist posted as an issue comment. A **fresh** session turns the
+     spec into a committed implementation plan (`status: ready` + `plan_path`),
+     and a third session executes the plan and must end with
+     `status: complete` — an `incomplete` report (or none) parks the issue
+     with the session's own detail instead of shipping a half-done branch.
    - If the session finds the work already fully implemented
-     (`PIPELINE_ALREADY_DONE:`), the proxy confirms the claim; on agreement the
+     (`outcome: already_done`), the proxy confirms the claim; on agreement the
      loop comments, applies `ai-done`, and closes the issue without opening a PR.
 3. **Work** happens on branch `ai/issue-<N>` in a dedicated git worktree under
    `workDir`, created from the remote default branch.
 4. **Ship** — if the pipeline produced at least one commit, the branch is pushed
    and a PR is opened (`Closes #N`); the PR URL is commented on the issue.
+5. **Code review** (optional) — right after the PR is up, a post-ship
+   review-and-fix loop runs one or more Claude sessions that invoke
+   `/code-review --fix` against the shipped diff, push whatever they commit,
+   and post each round's finding as a PR review comment. The number of rounds
+   comes from `models.codeReview.rounds` (unset or `<= 0` means one round);
+   the loop stops early when a round reports `clean` or `blocked`. When the
+   `models.codeReview` block is absent the step is skipped entirely. Sessions
+   are logged as `codereview-N` (`codereview-N-resume` when a parked or crashed
+   round is continued). A review failure parks the issue as `ai-rework` with
+   the PR left up; removing the label re-enters ship, which resumes the recorded
+   review session at the same round rather than redoing finished ones. Only
+   after the loop ends is the issue marked `ai-done`.
+
+Separately from the pipeline, a human can add the `ai-resolve-merge` label to
+an issue whose worktree already exists to have the daemon merge the default
+branch into the issue's branch and push — see
+[The merge-resolve flow](#the-merge-resolve-flow) below.
 
 ## UAT checklist
 

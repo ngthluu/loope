@@ -1,9 +1,11 @@
 package shared
 
+// Label is a GitHub issue label as returned by `gh issue list --json labels`.
 type Label struct {
 	Name string `json:"name"`
 }
 
+// Issue is the subset of a GitHub issue the loop needs to pick and run it.
 type Issue struct {
 	Number int     `json:"number"`
 	Title  string  `json:"title"`

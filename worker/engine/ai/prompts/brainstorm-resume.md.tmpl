@@ -1,14 +1,9 @@
 {{.Trigger}}
 
 HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
-This resumed design session still has the same contract, scoped to THIS issue only.
-Your final structured output reports where the session ended:
-- Do NOT implement, merge, or work on other issues in this session — planning and
-  implementation happen in separate pipeline sessions.
-- When the spec file is written and committed, end with outcome "spec_ready" and the
-  spec file path relative to the repository root in spec_path — even if the spec was
-  already committed in an earlier turn.
-- If nothing remains to design or build for this issue, end with outcome
-  "already_done" (one-sentence reason in detail).
-- To ask the product owner something, end with outcome "question" and the question
-  in detail.
+This resumed design session keeps the same contract, scoped to THIS issue only:
+do not merge or work on other issues — planning and implementation of a
+designed feature happen in separate pipeline sessions. If the spec was already
+committed in an earlier turn, report "spec_ready" now instead of redoing the work.
+
+{{template "entry-outcomes" .}}

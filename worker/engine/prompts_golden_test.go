@@ -6,9 +6,9 @@ import (
 	"github.com/ngthluu/loope/worker/shared"
 )
 
-// Golden expectations for every prompt builder, written against the original
-// fmt.Sprintf implementations. Externalizing the text into ai/prompts/ must
-// leave every one of them byte-identical.
+// Golden expectations for every prompt builder: the exact text each template
+// renders. A deliberate prompt edit updates the golden here in the same
+// change; an accidental one (a typo, a partial that drifted) fails loudly.
 
 func check(t *testing.T, name, got, want string) {
 	t.Helper()
@@ -17,49 +17,55 @@ func check(t *testing.T, name, got, want string) {
 	}
 }
 
-const goldenEntryRoutes = `HEADLESS MODE: your interlocutor is an automated product-owner agent, not a human.
-Ask clarifying questions by ending the turn with outcome "question" and the
-question in detail (AskUserQuestion is disabled); the answer arrives as the
-next message.
+const goldenEntryOutcomes = `Outcomes — your final structured output reports where the session ended:
+- "fix_committed": a fix for this issue is committed on this branch; one-sentence summary of the fix in detail.
+- "spec_ready": the spec document for this issue is written and committed on this branch; its path relative to the repository root in spec_path, one-sentence summary in detail.
+- "already_done": the issue's work is already fully implemented in this codebase — do not invent work; one-sentence reason in detail.
+- "question": you need an answer or approval from the product owner before reaching a terminal outcome (also used for a status update); the full question or message in detail.`
 
-Investigate the repository first, then commit to whichever route fits. Your
-final structured output reports where the session ended:
+const goldenEntryRole = `Handle this GitHub issue:
+ISSUE BODY
 
+## Environment
+- You are the architect session of an automated development pipeline, scoped to this issue only, in a dedicated git worktree on a per-issue branch created from the repository's base branch (origin/<base>). Commit your work on this branch.
+- The pipeline pushes the branch and opens the PR. Never push, open PRs, switch branches, rebase, amend, or force-push.
+- Write spec documents under a ` + "`specs/`" + ` directory (e.g. ` + "`docs/superpowers/specs/`" + `) and report the repository-relative path in spec_path.
+- HEADLESS MODE: AskUserQuestion is disabled. To ask anything, end the turn with outcome "question" and the question in detail; the answer arrives as the next message.`
+
+const goldenEntryRoutes = `## Process
+Investigate the repository first, then commit to whichever route fits:
 - A small, well-scoped defect with a clear expected behavior: follow the
   systematic-debugging flow — reproduce it with a failing test first, then fix
-  it, verify the full test suite passes, and commit. When the fix is committed,
-  end with outcome "fix_committed" and a one-sentence summary in detail. Make
-  reasonable calls and note them in commit messages.
+  it, verify the full test suite passes, and commit. Make reasonable calls and
+  note them in commit messages. End with "fix_committed".
 - Anything that needs design work (new functionality, refactors, unclear
   scope — including a "fix" whose right behavior first needs designing):
   follow the brainstorming flow to a committed spec — clarifying questions,
-  design, then write and commit the spec document into this branch. Do NOT
-  invoke the writing-plans skill — a separate session writes the implementation
-  plan. When the spec file is written and committed, end with outcome
-  "spec_ready" and the spec file path relative to the repository root in
-  spec_path.
+  design, then write and commit the spec document. Do NOT invoke the
+  writing-plans skill; a separate session writes the implementation plan.
+  End with "spec_ready".
+- If the issue's work is already fully implemented, end with "already_done"
+  instead of continuing.
 
-If you determine the issue's work is already fully implemented in this
-codebase, do not invent work: end with outcome "already_done" and a
-one-sentence reason in detail instead of continuing.`
+## Output
+` + goldenEntryOutcomes
 
 func TestGoldenEntryPromptWithThreshold(t *testing.T) {
-	want := `Handle this GitHub issue:
-ISSUE BODY
+	want := goldenEntryRole + ` A below-threshold confidence "question" (see the gate below) goes to the issue's human author as a needs-info comment, and the pipeline pauses until they reply; any later "question" is answered by the automated product-owner proxy, not a human.
 
-You may read the codebase first to investigate — but do NOT write code, tests,
-or commits yet. Once you understand the issue, assess how confidently it can be
-handled as written and report it as the confidence field (0-100) of this turn's
-structured output. Score the issue, not the work: an issue described precisely
-enough to act on scores high however large the change, and it still scores high
-when investigation shows the work is already done — that is a finding about the
-code, not a gap in the issue. Score low only when you cannot tell what behavior
-or outcome is wanted. If that score is below 70, the issue is too
-under-specified or ambiguous to act on responsibly: change no file. Instead,
-end the turn with outcome "question", putting what is missing and the specific
-questions the author must answer in detail, then stop.
-The confidence field is reported even when an instruction below has you end
-with another outcome.
+## Confidence gate (first turn)
+You may read the codebase to investigate, but do NOT write code, tests, or
+commits yet. Once you understand the issue, report how confidently it can be
+handled as written in the confidence field (0-100) of this turn's structured
+output. Score the issue, not the work: an issue described precisely enough to
+act on scores high however large the change, and it still scores high when
+investigation shows the work is already done — that is a finding about the
+code, not a gap in the issue. Score low only when you cannot tell what
+behavior or outcome is wanted. If the score is below 70, the issue
+is too under-specified to act on responsibly: change no file, end the turn
+with outcome "question" with what is missing and the specific questions the
+author must answer in detail, then stop. Report the confidence field even
+when an instruction below has you end with another outcome.
 
 Write that detail text as a short, skimmable list the author can answer in one comment:
 - Open with ONE sentence naming the single thing that blocks you most.
@@ -75,8 +81,7 @@ Write that detail text as a short, skimmable list the author can answer in one c
 }
 
 func TestGoldenEntryPromptWithoutThreshold(t *testing.T) {
-	want := `Handle this GitHub issue:
-ISSUE BODY
+	want := goldenEntryRole + ` Every "question" is answered by the automated product-owner proxy, not a human.
 
 ` + goldenEntryRoutes
 	check(t, "entryPrompt(threshold=0)", entryPrompt("ISSUE BODY", 0), want)
@@ -86,39 +91,34 @@ func TestGoldenEntryResumePrompt(t *testing.T) {
 	want := `TRIGGER MSG
 
 HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
-This resumed session still has the same contract, scoped to THIS issue only.
-Your final structured output reports where the session ended:
-- Do NOT work on other issues in this session — planning and implementation of
-  a designed feature happen in separate pipeline sessions.
-- If this issue is a small, well-scoped defect you fix directly, end with
-  outcome "fix_committed" (one-sentence summary in detail) once the fix is
-  committed — even if the fix was already committed in an earlier turn.
-- If it needs design work instead, end with outcome "spec_ready" when the spec
-  file is written and committed, with its path relative to the repository root
-  in spec_path — even if the spec was already committed in an earlier turn.
-- If nothing remains to fix or build for this issue, end with outcome
-  "already_done" (one-sentence reason in detail).
-- To ask the product owner something, end with outcome "question" and the
-  question in detail.`
+This resumed session keeps the same contract, scoped to THIS issue only: do not
+work on other issues — planning and implementation of a designed feature happen
+in separate pipeline sessions. If the fix or spec was already committed in an
+earlier turn, report that outcome now instead of redoing the work.
+
+` + goldenEntryOutcomes
 	check(t, "entryResumePrompt", entryResumePrompt("TRIGGER MSG"), want)
 }
 
-func TestGoldenAnswererPrompt(t *testing.T) {
-	want := `You are the product owner's proxy in an automated development pipeline.
+const goldenPOPreamble = `You are the product owner's proxy in an automated development pipeline.
+You are read-only: do not modify, create, or commit any file in the repository.
 
 The GitHub issue being implemented:
 ISSUE BODY
 
 Product owner preferences (persona):
 PERSONA TEXT
+`
 
+func TestGoldenAnswererPrompt(t *testing.T) {
+	want := goldenPOPreamble + `
 The architect agent said:
 ARCHITECT MSG
 
-Instructions: if the architect asked questions, answer them decisively.
-If it presented a design or spec for approval, approve it or give concise feedback.
-Stay on this issue: never direct the architect to implement, merge, or pick up other
-issues — planning and implementation are handled by separate pipeline sessions.
+If the architect asked questions, answer them decisively. If it presented a
+design or spec for approval, approve it or give concise feedback. Stay on this
+issue: never direct the architect to implement, merge, or pick up other issues —
+planning and implementation are handled by separate pipeline sessions.
 Report your reply in your final structured output: if the message asks for no
 answer and no approval (e.g. a status or progress update), report has_answer
 false. Otherwise report has_answer true with your answer — and nothing else —
@@ -130,54 +130,41 @@ func TestGoldenBrainstormResumePrompt(t *testing.T) {
 	want := `TRIGGER MSG
 
 HEADLESS MODE reminder: your interlocutor is an automated product-owner agent, not a human.
-This resumed design session still has the same contract, scoped to THIS issue only.
-Your final structured output reports where the session ended:
-- Do NOT implement, merge, or work on other issues in this session — planning and
-  implementation happen in separate pipeline sessions.
-- When the spec file is written and committed, end with outcome "spec_ready" and the
-  spec file path relative to the repository root in spec_path — even if the spec was
-  already committed in an earlier turn.
-- If nothing remains to design or build for this issue, end with outcome
-  "already_done" (one-sentence reason in detail).
-- To ask the product owner something, end with outcome "question" and the question
-  in detail.`
+This resumed design session keeps the same contract, scoped to THIS issue only:
+do not merge or work on other issues — planning and implementation of a
+designed feature happen in separate pipeline sessions. If the spec was already
+committed in an earlier turn, report "spec_ready" now instead of redoing the work.
+
+` + goldenEntryOutcomes
 	check(t, "brainstormResumePrompt", brainstormResumePrompt("TRIGGER MSG"), want)
 }
 
 func TestGoldenQANudgePrompt(t *testing.T) {
 	want := `No decision was requested, so there is nothing to answer. Continue toward this
-issue's terminal state, reported in your final structured output: commit the
-fix and end with outcome "fix_committed" (one-sentence summary in detail), or
-finish and commit the spec and end with outcome "spec_ready" (repository-relative
-path in spec_path), or — if nothing remains to fix or build for this issue —
-end with outcome "already_done" (one-sentence reason in detail). Do not start
-work on other issues in this session.`
+issue's terminal outcome — commit the fix, or finish and commit the spec — and
+do not start work on other issues in this session.
+
+` + goldenEntryOutcomes
 	check(t, "qaNudgePrompt", qaNudgePrompt(), want)
 }
 
 func TestGoldenDoneConfirmPrompt(t *testing.T) {
-	want := `You are the product owner's proxy in an automated development pipeline.
-
-The GitHub issue being implemented:
-ISSUE BODY
-
-Product owner preferences (persona):
-PERSONA TEXT
-
+	want := goldenPOPreamble + `
 The architect claims this issue is ALREADY fully implemented, for this reason:
 REASON TEXT
 
-Instructions: judge whether that claim is consistent with the issue and the
-product owner's intent, and report the verdict in your final structured
-output. If you agree the work is already done, report confirmed true. If you
-disagree or have doubts, report confirmed false, with one concise sentence in
-objection telling the architect what is still missing or must be designed.`
+Judge whether that claim is consistent with the issue and the product owner's
+intent, and report the verdict in your final structured output: confirmed true
+if you agree the work is already done; otherwise confirmed false, with one
+concise sentence in objection telling the architect what is still missing or
+must be designed.`
 	check(t, "doneConfirmPrompt", doneConfirmPrompt("ISSUE BODY", "PERSONA TEXT", "REASON TEXT"), want)
 }
 
 func TestGoldenPlanPrompt(t *testing.T) {
 	want := `/superpowers:writing-plans Read the approved spec at docs/spec.md and
-write a detailed implementation plan for it. Commit the plan into this branch.
+write a detailed implementation plan for it. Commit the plan into this branch;
+do not push.
 HEADLESS MODE: do not ask questions; the spec is approved and complete — make
 reasonable calls and note any assumptions in the plan.
 When the implementation plan file is written and committed, end the session:
@@ -188,10 +175,14 @@ your final structured output must report status "ready" and the plan file path
 }
 
 func TestGoldenExecutePrompt(t *testing.T) {
-	want := `/superpowers:executing-plans Execute the plan at docs/plan.md.
-Use the execution style the plan recommends (subagent-driven or inline).
-Follow TDD per the plan. Commit as you complete tasks.
-HEADLESS: do not ask questions; make reasonable calls and note them in commit messages.`
+	want := `/superpowers:executing-plans Execute the plan at docs/plan.md inline in this session.
+If tasks are already committed on this branch (check ` + "`git log`" + `), continue from the first incomplete task; do not redo completed tasks.
+Follow TDD per the plan. Commit after each task; do not push.
+HEADLESS MODE: do not ask questions; make reasonable calls and note them in commit messages.
+When every task in the plan is implemented and committed, end the session: your
+final structured output must report status "complete". Report status
+"incomplete" (with a brief detail naming what remains and why) only if you
+could not finish every task — never report "complete" with work left undone.`
 	check(t, "executePrompt", executePrompt("docs/plan.md"), want)
 }
 
@@ -210,7 +201,7 @@ func TestGoldenNeedsInfoComment(t *testing.T) {
 		"🤖 Not confident enough to implement (confidence 42/100). Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWhich database?")
 
 	check(t, "needsInfoComment (stalled, no score)", needsInfoComment(noConfidenceScore, "ai-needs-info", "Want me to proceed?"),
-		"🤖 The session stopped to ask questions instead of committing a fix. Answer the numbered questions below in a comment, then remove the `ai-needs-info` label to re-queue:\n\nWant me to proceed?")
+		"🤖 The session ended without committing a fix. Its closing note or questions are below — reply in a comment (answering any questions), then remove the `ai-needs-info` label to re-queue:\n\nWant me to proceed?")
 }
 
 const parkHead = "\U0001f916 Parked as `ai-rework` — this issue will not be retried automatically.\n\n" +

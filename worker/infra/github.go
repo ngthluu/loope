@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -28,8 +29,48 @@ func NewGitHub(r shared.Runner, cfg *shared.Config) *GitHub {
 }
 
 func (g *GitHub) gh(ctx context.Context, args ...string) (string, error) {
+	return g.ghRetrying(ctx, shared.IsTransientGitHubError, args...)
+}
+
+// ghWrite runs a non-idempotent gh command (posting a comment/review). It
+// retries only when the failure proves the request never reached GitHub:
+// retrying on a post-send-ambiguous failure ("timeout", "unexpected eof",
+// 5xx — the server may well have applied the write before the connection
+// died) would duplicate the comment on the issue/PR.
+func (g *GitHub) ghWrite(ctx context.Context, args ...string) (string, error) {
+	return g.ghRetrying(ctx, isSafeToRetryWrite, args...)
+}
+
+// isSafeToRetryWrite reports whether err is a failure that happened before the
+// request was sent — connection never established, name resolution failed, or
+// GitHub rejected it up front with a rate limit (429 / secondary rate limit,
+// which is returned without applying the write). Those are the only transient
+// signatures under which re-sending a write cannot duplicate it. Everything
+// else that shared.IsTransientGitHubError would retry (timeouts, connection
+// reset, unexpected EOF, 5xx) is ambiguous and deliberately excluded.
+func isSafeToRetryWrite(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range preSendTransientSignatures {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+var preSendTransientSignatures = []string{
+	"rate limit", "abuse detection", "submitted too quickly", "secondary rate limit",
+	"http 429", "returned error: 429", "status 429",
+	"connection refused", "could not resolve host", "couldn't connect",
+	"network is unreachable", "temporary failure in name resolution",
+}
+
+func (g *GitHub) ghRetrying(ctx context.Context, isRetryable func(error) bool, args ...string) (string, error) {
 	var stdout string
-	err := g.retry.Do(ctx, shared.IsTransientGitHubError, func() error {
+	err := g.retry.Do(ctx, isRetryable, func() error {
 		out, stderr, e := g.runner.Run(ctx, g.repoPath, nil, "", "gh", args...)
 		if e != nil {
 			return fmt.Errorf("gh %s: %w (stderr: %s)", strings.Join(args[:min(2, len(args))], " "), e, shared.Tail(stderr, 300))
@@ -40,15 +81,38 @@ func (g *GitHub) gh(ctx context.Context, args ...string) (string, error) {
 	return stdout, err
 }
 
+// eligibleListLimit caps one `gh issue list` page for the eligible scan. State
+// exclusion is pushed server-side (see ListEligibleIssues) so the page is
+// spent on genuinely eligible issues, not ones the client would drop anyway.
+const eligibleListLimit = 200
+
 func (g *GitHub) ListEligibleIssues(ctx context.Context, label string) ([]shared.Issue, error) {
-	out, err := g.gh(ctx, "issue", "list", "--repo", g.slug, "--label", label,
-		"--state", "open", "--limit", "50", "--json", "number,title,body,labels")
+	args := []string{"issue", "list", "--repo", g.slug, "--label", label,
+		"--state", "open", "--limit", strconv.Itoa(eligibleListLimit)}
+	// Exclude issues already in a state on the server: with only client-side
+	// filtering, once more than --limit open issues carry the eligible label the
+	// page fills with in-state issues and older eligible ones silently never
+	// surface. The client-side filter below stays as belt-and-braces.
+	var excl []string
+	for _, name := range g.state.All() {
+		if name != "" {
+			excl = append(excl, "-label:"+name)
+		}
+	}
+	if len(excl) > 0 {
+		args = append(args, "--search", strings.Join(excl, " "))
+	}
+	args = append(args, "--json", "number,title,body,labels")
+	out, err := g.gh(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
 	var issues []shared.Issue
 	if err := json.Unmarshal([]byte(out), &issues); err != nil {
 		return nil, fmt.Errorf("parse issue list: %w", err)
+	}
+	if len(issues) >= eligibleListLimit {
+		log.Printf("github: eligible issue list for %q hit the %d-item limit; older eligible issues may be missing this cycle", label, eligibleListLimit)
 	}
 	var eligible []shared.Issue
 	for _, is := range issues {
@@ -89,13 +153,7 @@ func (g *GitHub) ListIssuesWithLabel(ctx context.Context, label string) ([]share
 }
 
 func (g *GitHub) hasStateLabel(is shared.Issue) bool {
-	for _, l := range is.Labels {
-		if l.Name == g.state.WIP || l.Name == g.state.Done ||
-			l.Name == g.state.Rework || l.Name == g.state.NeedsInfo || l.Name == g.state.Stopped {
-			return true
-		}
-	}
-	return false
+	return g.state.Current(is.Labels) != ""
 }
 
 func (g *GitHub) AddLabel(ctx context.Context, num int, label string) error {
@@ -117,8 +175,10 @@ func (g *GitHub) SwapLabels(ctx context.Context, num int, remove, add string) er
 	return err
 }
 
+// Comment posts an issue comment. Non-idempotent, so it goes through ghWrite:
+// a retry after an ambiguous failure could post the same comment twice.
 func (g *GitHub) Comment(ctx context.Context, num int, body string) error {
-	_, err := g.gh(ctx, "issue", "comment", strconv.Itoa(num), "--repo", g.slug, "--body", body)
+	_, err := g.ghWrite(ctx, "issue", "comment", strconv.Itoa(num), "--repo", g.slug, "--body", body)
 	return err
 }
 
@@ -222,7 +282,7 @@ func (g *GitHub) CreatePR(ctx context.Context, branch, title, body string) (stri
 		// existing PR's URL and treat it as success so the loop marks the issue
 		// Done instead of Failed.
 		if strings.Contains(err.Error(), "already exists") {
-			if url, verr := g.existingPRURL(ctx, branch); verr == nil {
+			if url, _, verr := g.prView(ctx, branch); verr == nil {
 				return url, nil
 			}
 		}
@@ -231,51 +291,47 @@ func (g *GitHub) CreatePR(ctx context.Context, branch, title, body string) (stri
 	return strings.TrimSpace(out), nil
 }
 
-// existingPRURL returns the URL of the open PR whose head is branch.
-func (g *GitHub) existingPRURL(ctx context.Context, branch string) (string, error) {
-	out, err := g.gh(ctx, "pr", "view", branch, "--repo", g.slug, "--json", "url")
+// prView looks up the open PR whose head is branch and returns its URL and
+// number in one `gh pr view` call — the single seam behind PRURLForBranch,
+// PRNumberForBranch and CreatePR's existing-PR recovery.
+func (g *GitHub) prView(ctx context.Context, branch string) (url string, number int, err error) {
+	out, err := g.gh(ctx, "pr", "view", branch, "--repo", g.slug, "--json", "url,number")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	var v struct {
-		URL string `json:"url"`
+		URL    string `json:"url"`
+		Number int    `json:"number"`
 	}
 	if err := json.Unmarshal([]byte(out), &v); err != nil {
-		return "", fmt.Errorf("parse pr view: %w", err)
+		return "", 0, fmt.Errorf("parse pr view: %w", err)
 	}
-	if v.URL == "" {
-		return "", fmt.Errorf("pr view for %s returned no url", branch)
+	if v.URL == "" && v.Number == 0 {
+		return "", 0, fmt.Errorf("pr view for %s returned no pr", branch)
 	}
-	return v.URL, nil
+	return v.URL, v.Number, nil
 }
 
 // PRURLForBranch returns the URL of the PR whose head is branch, for backfilling
 // the dashboard's pr cache on tickets shipped before the URL was persisted.
 func (g *GitHub) PRURLForBranch(ctx context.Context, branch string) (string, error) {
-	return g.existingPRURL(ctx, branch)
+	url, _, err := g.prView(ctx, branch)
+	return url, err
 }
 
 // PRNumberForBranch returns the number of the open PR whose head is branch,
 // for CodeReview.Run to know where to post review findings.
 func (g *GitHub) PRNumberForBranch(ctx context.Context, branch string) (int, error) {
-	out, err := g.gh(ctx, "pr", "view", branch, "--repo", g.slug, "--json", "number")
-	if err != nil {
-		return 0, err
-	}
-	var v struct {
-		Number int `json:"number"`
-	}
-	if err := json.Unmarshal([]byte(out), &v); err != nil {
-		return 0, fmt.Errorf("parse pr view: %w", err)
-	}
-	return v.Number, nil
+	_, n, err := g.prView(ctx, branch)
+	return n, err
 }
 
 // ReviewComment posts a top-level PR review comment via `gh pr review
 // --comment`, distinct from Comment (an issue-style comment): the post-ship
-// code review loop's findings belong on the PR, not the issue.
+// code review loop's findings belong on the PR, not the issue. Non-idempotent
+// like Comment, so it goes through ghWrite.
 func (g *GitHub) ReviewComment(ctx context.Context, prNumber int, body string) error {
-	_, err := g.gh(ctx, "pr", "review", strconv.Itoa(prNumber), "--repo", g.slug, "--comment", "--body", body)
+	_, err := g.ghWrite(ctx, "pr", "review", strconv.Itoa(prNumber), "--repo", g.slug, "--comment", "--body", body)
 	return err
 }
 

@@ -64,10 +64,13 @@ Add a `telemetry` block to that worker's `loope.json`:
 
 `pushIntervalSec` defaults to 15 if omitted. When the block is absent
 entirely, nothing changes: no exporter goroutine starts, and no extra network
-calls are made. When present, the daemon also starts writing its own log
-output to `<workDir>/logs/daemon.log` (in addition to stderr), rotating at
-10MB with one previous generation kept — this is what the exporter tails and
-pushes.
+calls are made.
+
+The daemon **always** writes its own log output to `<workDir>/logs/daemon.log`
+(in addition to stderr), rotating at 10MB with one previous generation kept as
+`daemon.log.1` — regardless of whether a `telemetry` block is configured. The
+block only controls whether an exporter tails that file and pushes it to the
+telemetry server.
 
 ## Capturing Claude usage (optional)
 

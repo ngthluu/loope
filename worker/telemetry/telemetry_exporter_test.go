@@ -7,6 +7,7 @@ import (
 
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -257,5 +258,82 @@ func TestApplyIssueLogBudgetElidesOldestContentFirst(t *testing.T) {
 	}
 	if dirs[0].Files[0].Name != "f" || dirs[0].Files[0].ModTime != old {
 		t.Error("eliding content must keep the file's name and mod time (the tree stays complete)")
+	}
+}
+
+func TestExporterRetainsUnsentLogLinesAcrossFailedPush(t *testing.T) {
+	fail := true
+	var gotLogs []wire.LogRecord
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		var req wire.PushRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotLogs = req.Logs
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	if err := os.WriteFile(logPath, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &shared.Config{RepoSlug: "o/r", WorkDir: "/work", Telemetry: &shared.TelemetryConfig{ServerURL: srv.URL, Token: "secret", PushIntervalSec: 15}}
+	e := &TelemetryExporter{cfg: cfg, client: srv.Client(), tailer: &LogTailer{path: logPath}}
+
+	if err := e.pushOnce(context.Background()); err == nil {
+		t.Fatal("expected the first push to fail")
+	}
+	// The tailer has moved past line1/line2; more lines arrive before retry.
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("line3\n")
+	f.Close()
+
+	fail = false
+	if err := e.pushOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"line1", "line2", "line3"}
+	if len(gotLogs) != len(want) {
+		t.Fatalf("logs = %+v, want %v (failed push's lines must be resent)", gotLogs, want)
+	}
+	for i := range want {
+		if gotLogs[i].Body != want[i] {
+			t.Fatalf("logs[%d] = %q, want %q", i, gotLogs[i].Body, want[i])
+		}
+	}
+	if len(e.pending) != 0 {
+		t.Fatalf("pending = %v after a successful push, want empty", e.pending)
+	}
+}
+
+func TestExporterCapsPendingLogLines(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	var sb strings.Builder
+	for i := 0; i < maxPendingLogLines+maxLogLinesPerPush; i++ {
+		fmt.Fprintf(&sb, "l%d\n", i)
+	}
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &shared.Config{Telemetry: &shared.TelemetryConfig{ServerURL: srv.URL, Token: "t", PushIntervalSec: 15}}
+	e := &TelemetryExporter{cfg: cfg, client: srv.Client(), tailer: &LogTailer{path: logPath}}
+	for i := 0; i < 6; i++ { // 6 * 500 lines read, all pushes fail
+		_ = e.pushOnce(context.Background())
+	}
+	if len(e.pending) != maxPendingLogLines {
+		t.Fatalf("pending = %d lines, want capped at %d", len(e.pending), maxPendingLogLines)
+	}
+	if e.pending[len(e.pending)-1] != fmt.Sprintf("l%d", maxPendingLogLines+maxLogLinesPerPush-1) {
+		t.Fatalf("cap must keep the newest lines, last = %q", e.pending[len(e.pending)-1])
 	}
 }

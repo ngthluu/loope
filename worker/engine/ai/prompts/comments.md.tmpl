@@ -6,7 +6,7 @@
 
 {{.BotMarker}}{{end}}
 
-{{define "needs-info"}}🤖 {{if lt .Score 0}}The session stopped to ask questions instead of committing a fix.{{else}}Not confident enough to implement (confidence {{.Score}}/100).{{end}} Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:
+{{define "needs-info"}}🤖 {{if lt .Score 0}}The session ended without committing a fix. Its closing note or questions are below — reply in a comment (answering any questions), then remove the `{{.Label}}` label to re-queue:{{else}}Not confident enough to implement (confidence {{.Score}}/100). Answer the numbered questions below in a comment, then remove the `{{.Label}}` label to re-queue:{{end}}
 
 {{.Feedback}}{{end}}
 

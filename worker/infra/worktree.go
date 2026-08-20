@@ -2,7 +2,9 @@ package infra
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -59,21 +61,34 @@ func (w *Worktree) Create(ctx context.Context, workDir string, issueNum int, bas
 		// named '...' already exists" / "'...' already exists"). Create only runs
 		// for fresh eligible picks — a live pipeline holds the mutex and rework
 		// reuses its own preserved worktree without ever routing here — so the
-		// leftover is stale. If its worktree still exists, reuse it so partial
-		// progress is continued rather than discarded. Otherwise only a bare branch
-		// remains (worktree gone): reclaim it best-effort and retry the add once.
-		if _, statErr := os.Stat(path); statErr == nil {
-			return path, nil
-		}
-		// Only a stale branch/worktree collision ("already exists") is reclaimable.
-		// Any other add failure (bad base branch, transient git error) is a real
-		// error for this fresh pick — return it rather than force-deleting on an
-		// unrelated failure, which would be reacting to any error instead of the
-		// specific condition that makes reuse impossible.
+		// leftover is stale.
+		//
+		// Only that stale collision is recoverable. Any other add failure (bad
+		// base branch, transient git error) is a real error for this fresh pick —
+		// return it, even if a directory happens to sit on the path, rather than
+		// reusing or force-deleting in reaction to an unrelated failure.
 		if !strings.Contains(err.Error(), "already exists") {
 			return "", err
 		}
-		_, _ = w.git(ctx, w.repoPath, "worktree", "remove", "--force", path)
+		_, statErr := os.Stat(path)
+		switch {
+		case statErr == nil:
+			// Something is on the path. If it is still a live worktree, reuse it
+			// so partial progress is continued rather than discarded. If it is
+			// only a stale directory (gitdir lost, or not a checkout at all) it is
+			// unusable: clear it so the reclaim below can recreate it.
+			if w.isWorktree(ctx, path) {
+				return path, nil
+			}
+			if rmErr := os.RemoveAll(path); rmErr != nil {
+				return "", fmt.Errorf("reclaim stale worktree dir %s: %w", path, rmErr)
+			}
+		case !errors.Is(statErr, fs.ErrNotExist):
+			// Neither present nor absent (permissions, I/O): don't guess.
+			return "", fmt.Errorf("stat %s: %w", path, statErr)
+		}
+		// Either only a bare branch remains (worktree dir gone) or the stale dir
+		// was just cleared: reclaim best-effort and retry the add once.
 		_, _ = w.git(ctx, w.repoPath, "worktree", "prune")
 		_, _ = w.git(ctx, w.repoPath, "branch", "-D", branch)
 		if _, err = w.git(ctx, w.repoPath, "worktree", "add", path, "-b", branch, "origin/"+baseBranch); err != nil {
@@ -81,6 +96,13 @@ func (w *Worktree) Create(ctx context.Context, workDir string, issueNum int, bas
 		}
 	}
 	return path, nil
+}
+
+// isWorktree reports whether path is a usable git checkout: a directory whose
+// gitdir link still resolves, as opposed to a plain leftover directory.
+func (w *Worktree) isWorktree(ctx context.Context, path string) bool {
+	out, err := w.git(ctx, path, "rev-parse", "--is-inside-work-tree")
+	return err == nil && strings.TrimSpace(out) == "true"
 }
 
 func (w *Worktree) Remove(ctx context.Context, path string) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -88,21 +87,34 @@ func parseEntry(res *shared.ClaudeResult) (entryResult, error) {
 // and execute follow, unchanged), or an already-done claim.
 func RunPipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
 	start := time.Now()
-	// Snapshot before the call: the content is already fetched, and a session
-	// killed at any point still leaves the diff base the next resume needs.
-	c.RecordSnapshot(issueContent)
-	res, err := entryCall(ctx, c, cfg, wtPath, "entry-0", entryPrompt(issueContent, cfg.ConfidenceThreshold), "")
+	res, er, err := openEntry(ctx, c, cfg, issueContent, entryCallSpec(cfg, wtPath, "entry-0", entryPrompt(issueContent, cfg.ConfidenceThreshold), ""))
 	if err != nil {
-		return err
-	}
-	er, err := parseEntry(res)
-	if err != nil {
-		return err
-	}
-	if err := confidenceGate(cfg, er); err != nil {
 		return err
 	}
 	return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
+}
+
+// openEntry runs the turn that opens (or re-opens) an entry-stage session and
+// applies the shared prefix every opener needs: snapshot the issue content,
+// make the call, decode the outcome and judge its confidence. Shared by the
+// fresh entry-0 call and every resumed opener (entry, legacy brainstorm,
+// legacy debug) so a resumed session is held to the same gate as a fresh one.
+// The snapshot is taken BEFORE the call: the content is already fetched, and a
+// session killed at any point still leaves the diff base the next resume needs.
+func openEntry(ctx context.Context, c shared.Agent, cfg *shared.Config, issueContent string, call shared.ClaudeCall) (*shared.ClaudeResult, entryResult, error) {
+	c.RecordSnapshot(issueContent)
+	res, err := c.Call(ctx, call)
+	if err != nil {
+		return nil, entryResult{}, err
+	}
+	er, err := parseEntry(res)
+	if err != nil {
+		return nil, er, err
+	}
+	if err := confidenceGate(cfg, er); err != nil {
+		return nil, er, err
+	}
+	return res, er, nil
 }
 
 // ResumePipeline re-enters the pipeline at the chain node a re-entry resolved
@@ -114,7 +126,10 @@ func RunPipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath
 // resumed session was never taught the merged contract). A node that can't be
 // mapped falls back to a fully fresh RunPipeline as a safety net.
 func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, node shared.SessionNode, prompt string, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
-	start := time.Now()
+	// Zero `since`: a resumed session's spec/plan was typically committed
+	// BEFORE this resume, so the newest-artifact fallback must not filter on
+	// the resume's start time the way a fresh run filters on its own.
+	var since time.Time
 	fresh := func() error {
 		return RunPipeline(ctx, c, cfg, wtPath, issueContent, persona, base, uat, gh, wt, branch, title, n)
 	}
@@ -123,109 +138,81 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 		if node.ID == "" {
 			return fresh()
 		}
-		c.RecordSnapshot(issueContent)
 		// The schema enforces the outcome contract on the resumed turn; the
 		// resume prompt still restates it in prose so the session reaches the
 		// right terminal outcome by intent, not by forced guess (issue-5
 		// incident).
-		res, err := entryCall(ctx, c, cfg, wtPath, "entry-resume", entryResumePrompt(prompt), node.ID)
+		res, er, err := openEntry(ctx, c, cfg, issueContent, entryCallSpec(cfg, wtPath, "entry-resume", entryResumePrompt(prompt), node.ID))
 		if err != nil {
 			return err
 		}
-		er, err := parseEntry(res)
-		if err != nil {
-			return err
-		}
-		if err := confidenceGate(cfg, er); err != nil {
-			return err
-		}
-		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, since, gh, wt, branch, title, n)
 	case shared.StagePlan:
 		if node.ID == "" {
 			// Pending node: the plan session never started (or a legacy
 			// pre-call checkpoint). Re-run plan fresh from the committed spec.
 			if spec, ok := checkpointArtifact(wtPath, node.Artifact); ok {
-				return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, planPrompt(spec), "", start, gh, wt, branch, n)
+				return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, planPrompt(spec), "", since, gh, wt, branch, n)
 			}
 			return fresh()
 		}
-		return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, prompt, node.ID, start, gh, wt, branch, n)
+		return runPlanThenExecute(ctx, c, cfg, wtPath, node.Artifact, prompt, node.ID, since, gh, wt, branch, n)
 	case shared.StageExecute:
 		if node.ID == "" {
 			// Pending node: execute never started. Re-run it fresh on the
 			// committed plan — the executing-plans skill picks up from
 			// whatever steps are already done.
 			if plan, ok := checkpointArtifact(wtPath, node.Artifact); ok {
-				if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
-					return err
-				}
-				if perr := wt.Push(ctx, wtPath, branch); perr != nil {
-					log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
-				}
-				return nil
+				return executeAndPush(ctx, c, cfg, wtPath, plan, wt, branch, n)
 			}
 			return fresh()
 		}
 		if err := resumeExecutePlan(ctx, c, cfg, wtPath, prompt, node.ID, node.Artifact); err != nil {
 			return err
 		}
-		// Execute complete (spec §1): push once, best-effort — ship's own push at
-		// the end of a successful run is the backstop, so a failure here is
-		// logged and swallowed rather than failing an otherwise-successful resume.
-		if perr := wt.Push(ctx, wtPath, branch); perr != nil {
-			log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
-		}
+		pushAfterExecute(ctx, wt, wtPath, branch, n)
 		return nil
 	case shared.StageBrainstorm:
 		// LEGACY: a design session from before the merged entry. Resume it on
-		// the old feature contract (brainstormResumePrompt restates spec_ready /
-		// already-done only) and continue through the shared entry loop.
+		// the shared entry-outcomes contract (brainstormResumePrompt includes the
+		// same outcome block as entry-resume) and continue through entryLoop.
 		if node.ID == "" {
 			return fresh()
 		}
-		c.RecordSnapshot(issueContent)
-		res, err := c.Call(ctx, shared.ClaudeCall{
+		res, er, err := openEntry(ctx, c, cfg, issueContent, shared.ClaudeCall{
 			Dir: wtPath, Label: "brainstorm-resume", Prompt: brainstormResumePrompt(prompt), Resume: node.ID,
 			Model:           cfg.Models.Architect,
 			SkipPermissions: true,
 			DisallowedTools: []string{"AskUserQuestion"},
 			JSONSchema:      entryResultSchema,
-			Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageBrainstorm},
+			Checkpoint:      &shared.CallCheckpoint{Kind: shared.KindFeature, Stage: shared.StageBrainstorm},
 		})
 		if err != nil {
 			return err
 		}
-		er, err := parseEntry(res)
-		if err != nil {
-			return err
-		}
-		if err := confidenceGate(cfg, er); err != nil {
-			return err
-		}
-		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, start, gh, wt, branch, title, n)
+		return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, since, gh, wt, branch, title, n)
 	default:
 		// LEGACY: chains whose kind was decided up front by triage. A "bug"
 		// chain resumes its debug session whatever stage string it carries
 		// (the old dispatch keyed on kind alone, and debug is the only stage a
-		// bug pipeline ever checkpointed); anything else falls back fresh.
-		if node.Kind == "bug" && node.ID != "" {
-			c.RecordSnapshot(issueContent)
-			res, err := c.Call(ctx, shared.ClaudeCall{
+		// bug pipeline ever checkpointed); anything else falls back fresh. The
+		// resumed turn continues through the shared entry loop, same as the
+		// legacy brainstorm resume: only a fix_committed outcome reaches
+		// afterFix's ship gates — a question or spec outcome on a branch that
+		// already carries commits must not be shipped as if it were the fix.
+		if node.Kind == shared.KindBug && node.ID != "" {
+			res, er, err := openEntry(ctx, c, cfg, issueContent, shared.ClaudeCall{
 				Dir: wtPath, Label: "debug-resume", Prompt: prompt, Resume: node.ID,
 				Model:           cfg.Models.Architect,
 				SkipPermissions: true,
 				DisallowedTools: []string{"AskUserQuestion"},
 				JSONSchema:      entryResultSchema,
-				Checkpoint:      &shared.CallCheckpoint{Kind: "bug", Stage: shared.StageDebug},
+				Checkpoint:      &shared.CallCheckpoint{Kind: shared.KindBug, Stage: shared.StageDebug},
 			})
 			if err != nil {
 				return err
 			}
-			er, err := parseEntry(res)
-			if err != nil {
-				return err
-			}
-			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, er)
+			return entryLoop(ctx, c, cfg, wtPath, issueContent, persona, base, uat, res.SessionID, er, since, gh, wt, branch, title, n)
 		}
 		return fresh()
 	}
@@ -238,19 +225,28 @@ func ResumePipeline(ctx context.Context, c shared.Agent, cfg *shared.Config, wtP
 // kind the moment one resolves, and otherwise relays a product-owner-proxy
 // reply.
 func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, issueContent, persona, base string, uat *UAT, sessionID string, er entryResult, start time.Time, gh shared.CodeHost, wt shared.Workspace, branch, title string, n int) error {
+	specMisses := 0 // consecutive spec_ready outcomes with no spec file on disk
 	for round := 1; ; round++ {
 		// The session reports a committed spec: the feature outcome. Hand off to
 		// the fresh plan session, then execute. If it claims a spec but none is
-		// on disk, fall through and keep prodding (mirrors the plan-file behavior).
+		// on disk, the first miss falls through to one more prod (a session
+		// that wrote the file to an unexpected path gets one chance to point
+		// at it); a second consecutive miss fails fast like the plan stage does
+		// instead of burning every Q&A round behind a misleading park cause.
 		if er.Outcome == entryOutcomeSpec {
-			if specPath, ok := resolveSpec(wtPath, er.SpecPath, start); ok {
-				c.SetKind("feature")
+			specPath, ok := resolveSpec(wtPath, er.SpecPath, start)
+			if !ok {
+				if specMisses++; specMisses >= 2 {
+					return fmt.Errorf("pipeline: entry session reported spec_ready but no spec file found (spec_path=%q)", er.SpecPath)
+				}
+			} else {
+				c.SetKind(shared.KindFeature)
 				// Spec committed: append a PENDING plan node BEFORE the plan
 				// call starts, so a crash anywhere in the handoff (push, PR,
 				// comment, plan spawn) resumes as a fresh plan run on this
 				// spec instead of re-entering this loop.
 				specRel := relToWorktree(wtPath, specPath)
-				c.CheckpointStage("feature", shared.StagePlan, specRel)
+				c.CheckpointStage(shared.KindFeature, shared.StagePlan, specRel)
 				// The UAT session runs alongside plan/execute — it only reads
 				// the committed spec, so nothing downstream waits on it. The
 				// wait runs on every exit path (including a failed plan): the
@@ -265,12 +261,14 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 				pushSpecPR(ctx, gh, wt, wtPath, branch, title, n, c.LogDir())
 				return runPlanThenExecute(ctx, c, cfg, wtPath, specRel, planPrompt(specPath), "", start, gh, wt, branch, n)
 			}
+		} else {
+			specMisses = 0
 		}
 		// The session reports a committed fix: the bug outcome. afterFix's gates
 		// (confidence, already-done, zero-commit needs-info fallback, UAT) are
 		// the same ones the old debug pipeline ran.
 		if er.Outcome == entryOutcomeFix {
-			c.SetKind("bug")
+			c.SetKind(shared.KindBug)
 			return afterFix(ctx, c, cfg, wtPath, issueContent, base, uat, wt, er)
 		}
 
@@ -285,6 +283,7 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 				Prompt:          doneConfirmPrompt(issueContent, persona, er.Detail),
 				Model:           cfg.Models.Answerer,
 				SkipPermissions: true,
+				DisallowedTools: poProxyDisallowedTools,
 				JSONSchema:      doneConfirmSchema,
 			})
 			if err != nil {
@@ -311,6 +310,7 @@ func entryLoop(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, 
 				Prompt:          answererPrompt(issueContent, persona, er.Detail),
 				Model:           cfg.Models.Answerer,
 				SkipPermissions: true,
+				DisallowedTools: poProxyDisallowedTools,
 				JSONSchema:      answererResultSchema,
 			})
 			if err != nil {
@@ -380,21 +380,32 @@ func afterFix(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, i
 	return nil
 }
 
+// poProxyDisallowedTools is the tool denylist for the product-owner-proxy
+// calls (answerer, done-confirm): they run in the worktree with permissions
+// skipped, and a judge must read, never edit, the work it judges (mirrors the
+// UAT session's denylist).
+var poProxyDisallowedTools = []string{"AskUserQuestion", "Write", "Edit", "NotebookEdit"}
+
 // entryCall runs one entry-stage turn: the entry-0/entry-N call when resume is
-// "", or a --resume turn (round call or resumed re-entry) when it isn't. The
-// kind is checkpointed EMPTY on purpose: at call time nothing has decided bug
-// vs feature yet, and no other value would be accurate. entryLoop stamps the
-// resolved kind onto the chain head (SetKind) the moment the outcome sentinel
-// is parsed; resume dispatch never reads an entry node's kind, only its stage.
+// "", or a --resume turn (round call or resumed re-entry) when it isn't.
 func entryCall(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, label, prompt, resume string) (*shared.ClaudeResult, error) {
-	return c.Call(ctx, shared.ClaudeCall{
+	return c.Call(ctx, entryCallSpec(cfg, wtPath, label, prompt, resume))
+}
+
+// entryCallSpec builds the ClaudeCall for an entry-stage turn. The kind is
+// checkpointed EMPTY on purpose: at call time nothing has decided bug vs
+// feature yet, and no other value would be accurate. entryLoop stamps the
+// resolved kind onto the chain head (SetKind) the moment the outcome is
+// parsed; resume dispatch never reads an entry node's kind, only its stage.
+func entryCallSpec(cfg *shared.Config, wtPath, label, prompt, resume string) shared.ClaudeCall {
+	return shared.ClaudeCall{
 		Dir: wtPath, Label: label, Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.Architect,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
 		JSONSchema:      entryResultSchema,
 		Checkpoint:      &shared.CallCheckpoint{Kind: "", Stage: shared.StageEntry},
-	})
+	}
 }
 
 func entryPrompt(issue string, threshold int) string {

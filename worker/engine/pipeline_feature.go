@@ -52,6 +52,55 @@ type planResult struct {
 	Detail   string `json:"detail"`
 }
 
+// executeStatusComplete is the status value an execute session's structured
+// output must carry for the stage to count as complete. Like every other
+// stage, execute is gated on CLI-enforced structured output rather than on
+// "the session exited": a session that ran out of turns, hit an error mid-plan,
+// or stopped to think out loud used to look identical to a finished one and
+// flowed straight into ship.
+const executeStatusComplete = "complete"
+
+// executeResultSchema is the --json-schema for every execute-stage call —
+// fresh and resumed alike, so a session re-entered with a bare "continue"
+// still knows what to report.
+const executeResultSchema = `{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["complete", "incomplete"],
+      "description": "\"complete\" once every task in the plan is implemented and committed on this branch; \"incomplete\" if any task was left undone, blocked, or skipped."
+    },
+    "detail": {
+      "type": "string",
+      "description": "Brief explanation when status is \"incomplete\": which tasks remain and why."
+    }
+  },
+  "required": ["status"]
+}`
+
+// executeResult mirrors executeResultSchema.
+type executeResult struct {
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// checkExecuteResult gates an execute session on its schema-validated
+// structured output. Undecodable output is a hard error (the CLI enforces the
+// schema, so it signals a broken harness, not a forgetful model), and anything
+// but "complete" fails the stage with the session's own detail so the park
+// comment says what is left.
+func checkExecuteResult(res *shared.ClaudeResult) error {
+	var er executeResult
+	if err := json.Unmarshal(res.StructuredOutput, &er); err != nil {
+		return fmt.Errorf("feature pipeline: execute session returned no structured status: %v", err)
+	}
+	if er.Status != executeStatusComplete {
+		return fmt.Errorf("feature pipeline: execute session ended %q: %s", er.Status, er.Detail)
+	}
+	return nil
+}
+
 // answererResultSchema is the --json-schema for the answerer (PO proxy) call.
 // has_answer false marks a status update with nothing to answer — the loop
 // then nudges the architect toward a terminal outcome instead of relaying an
@@ -109,7 +158,7 @@ func runPlanThenExecute(ctx context.Context, c shared.Agent, cfg *shared.Config,
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
 		JSONSchema:      planResultSchema,
-		Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StagePlan, Artifact: specRel},
+		Checkpoint:      &shared.CallCheckpoint{Kind: shared.KindFeature, Stage: shared.StagePlan, Artifact: specRel},
 	})
 	if err != nil {
 		// A resume that died before its session ever started (no salvaged id)
@@ -140,19 +189,32 @@ func runPlanThenExecute(ctx context.Context, c shared.Agent, cfg *shared.Config,
 	// starts, so a crash in the handoff (push, comment, execute spawn) resumes
 	// as a fresh execute run on this plan instead of re-entering the completed
 	// plan session.
-	c.CheckpointStage("feature", shared.StageExecute, relToWorktree(wtPath, plan))
+	c.CheckpointStage(shared.KindFeature, shared.StageExecute, relToWorktree(wtPath, plan))
 	// Plan complete (spec §1): push, then post the fixed "Updated plan: ..."
 	// comment naming the plan file — before execute runs at all.
 	pushPlanUpdate(ctx, gh, wt, wtPath, branch, n, plan)
+	return executeAndPush(ctx, c, cfg, wtPath, plan, wt, branch, n)
+}
+
+// executeAndPush runs the execute session fresh on plan, then the
+// execute-complete push point. Shared by the plan→execute handoff and the
+// pending-execute-node resume.
+func executeAndPush(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, plan string, wt shared.Workspace, branch string, n int) error {
 	if err := executePlan(ctx, c, cfg, wtPath, plan); err != nil {
 		return err
 	}
-	// Execute complete (spec §1): push once, best-effort — ship's own push at
-	// the end of a successful run is the backstop.
+	pushAfterExecute(ctx, wt, wtPath, branch, n)
+	return nil
+}
+
+// pushAfterExecute is the execute-complete push point (spec §1): push once,
+// best-effort — ship's own push at the end of a successful run is the
+// backstop, so a failure here is logged and swallowed rather than failing an
+// otherwise-successful execute.
+func pushAfterExecute(ctx context.Context, wt shared.Workspace, wtPath, branch string, n int) {
 	if perr := wt.Push(ctx, wtPath, branch); perr != nil {
 		log.Printf("issue #%d: execute-stage push failed: %v", n, perr)
 	}
-	return nil
 }
 
 // pushSpecPR runs the spec-complete push point (spec §1): push the branch,
@@ -168,7 +230,7 @@ func pushSpecPR(ctx context.Context, gh shared.CodeHost, wt shared.Workspace, wt
 		log.Printf("issue #%d: spec-stage push failed: %v", n, err)
 		return
 	}
-	url, err := gh.CreatePR(ctx, branch, prTitle(title, n), prBody(n, "feature"))
+	url, err := gh.CreatePR(ctx, branch, prTitle(title, n), prBody(n, shared.KindFeature))
 	if err != nil {
 		log.Printf("issue #%d: spec-stage PR create failed: %v", n, err)
 		return
@@ -189,47 +251,53 @@ func pushPlanUpdate(ctx context.Context, gh shared.CodeHost, wt shared.Workspace
 		log.Printf("issue #%d: plan-stage push failed: %v", n, err)
 		return
 	}
-	rel, err := filepath.Rel(wtPath, planPath)
-	if err != nil {
-		rel = planPath
-	}
-	if err := gh.Comment(ctx, n, planComment(rel)); err != nil {
+	if err := gh.Comment(ctx, n, planComment(relToWorktree(wtPath, planPath))); err != nil {
 		log.Printf("issue #%d: plan-stage comment failed: %v", n, err)
 	}
 }
 
-// executePlan runs the execute session (session C) fresh, immediately after
-// the plan file is written.
-func executePlan(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, planPath string) error {
-	_, err := c.Call(ctx, shared.ClaudeCall{
-		Dir: wtPath, Label: "execute", Prompt: executePrompt(planPath),
-		Model:           cfg.Models.ExecuteConfig(),
-		SkipPermissions: true,
-		DisallowedTools: []string{"AskUserQuestion"},
-		Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageExecute, Artifact: relToWorktree(wtPath, planPath)},
-	})
-	return err
-}
-
-// resumeExecutePlan re-enters a persisted execute session (session C) at
-// exactly the chain node's session, with --resume and the trigger prompt —
-// used by ResumeFeaturePipeline. planRel is the node's artifact: a resume
-// that died before its session started falls back to a fresh execute run on
-// the plan, mirroring runPlanThenExecute's dead-resume fallback.
-func resumeExecutePlan(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, prompt, resume, planRel string) error {
-	res, err := c.Call(ctx, shared.ClaudeCall{
+// executeCallSpec is the one ClaudeCall shape every execute-stage session uses
+// (fresh: prompt is executePrompt, resume ""; resumed: the trigger prompt and
+// the chain node's session id), so the schema and tool policy can never drift
+// between the two entry points.
+func executeCallSpec(cfg *shared.Config, wtPath, prompt, resume, planRel string) shared.ClaudeCall {
+	return shared.ClaudeCall{
 		Dir: wtPath, Label: "execute", Prompt: prompt, Resume: resume,
 		Model:           cfg.Models.ExecuteConfig(),
 		SkipPermissions: true,
 		DisallowedTools: []string{"AskUserQuestion"},
-		Checkpoint:      &shared.CallCheckpoint{Kind: "feature", Stage: shared.StageExecute, Artifact: planRel},
-	})
-	if err != nil && res == nil {
-		if plan, ok := checkpointArtifact(wtPath, planRel); ok {
-			return executePlan(ctx, c, cfg, wtPath, plan)
-		}
+		JSONSchema:      executeResultSchema,
+		Checkpoint:      &shared.CallCheckpoint{Kind: shared.KindFeature, Stage: shared.StageExecute, Artifact: planRel},
 	}
-	return err
+}
+
+// executePlan runs the execute session (session C) fresh, immediately after
+// the plan file is written, and gates it on the structured completion status.
+func executePlan(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, planPath string) error {
+	res, err := c.Call(ctx, executeCallSpec(cfg, wtPath, executePrompt(planPath), "", relToWorktree(wtPath, planPath)))
+	if err != nil {
+		return err
+	}
+	return checkExecuteResult(res)
+}
+
+// resumeExecutePlan re-enters a persisted execute session (session C) at
+// exactly the chain node's session, with --resume and the trigger prompt —
+// used by ResumePipeline. planRel is the node's artifact: a resume that died
+// before its session started falls back to a fresh execute run on the plan,
+// mirroring runPlanThenExecute's dead-resume fallback. The resumed turn is
+// held to the same completion gate as a fresh run.
+func resumeExecutePlan(ctx context.Context, c shared.Agent, cfg *shared.Config, wtPath, prompt, resume, planRel string) error {
+	res, err := c.Call(ctx, executeCallSpec(cfg, wtPath, prompt, resume, planRel))
+	if err != nil {
+		if res == nil {
+			if plan, ok := checkpointArtifact(wtPath, planRel); ok {
+				return executePlan(ctx, c, cfg, wtPath, plan)
+			}
+		}
+		return err
+	}
+	return checkExecuteResult(res)
 }
 
 // relToWorktree returns p relative to wtPath, or p unchanged when Rel fails —
@@ -257,11 +325,14 @@ func checkpointArtifact(wtPath, rel string) (string, bool) {
 	return "", false
 }
 
-// findSpecFile returns the newest *.md under any specs/ directory in root
-// modified after since (mirrors findPlanFile).
-func findSpecFile(root string, since time.Time) (string, bool) {
+// findArtifactFile returns the newest *.md under any directory named
+// dirSegment ("specs" or "plans") in root, modified after since. The
+// newest-file fallback behind resolveSpec/resolvePlan for a session that
+// reported no usable path.
+func findArtifactFile(root, dirSegment string, since time.Time) (string, bool) {
 	var newest string
 	var newestMod time.Time
+	segment := "/" + dirSegment + "/"
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -272,7 +343,7 @@ func findSpecFile(root string, since time.Time) (string, bool) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".md") || !strings.Contains(filepath.ToSlash(path), "/specs/") {
+		if !strings.HasSuffix(path, ".md") || !strings.Contains(filepath.ToSlash(path), segment) {
 			return nil
 		}
 		info, err := d.Info()
@@ -293,15 +364,11 @@ func findSpecFile(root string, since time.Time) (string, bool) {
 // after since.
 func resolveSpec(wtPath, rel string, since time.Time) (string, bool) {
 	if rel != "" {
-		p := rel
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(wtPath, rel)
-		}
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+		if p, ok := checkpointArtifact(wtPath, rel); ok {
 			return p, true
 		}
 	}
-	return findSpecFile(wtPath, since)
+	return findArtifactFile(wtPath, "specs", since)
 }
 
 // resolvePlan turns the plan session's reported plan_path into an existing
@@ -315,37 +382,7 @@ func resolvePlan(wtPath, rel string, since time.Time) (string, bool) {
 			return p, true
 		}
 	}
-	return findPlanFile(wtPath, since)
-}
-
-// findPlanFile returns the newest *.md under any plans/ directory in root
-// modified after since.
-func findPlanFile(root string, since time.Time) (string, bool) {
-	var newest string
-	var newestMod time.Time
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".md") || !strings.Contains(filepath.ToSlash(path), "/plans/") {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if info.ModTime().After(since) && info.ModTime().After(newestMod) {
-			newest, newestMod = path, info.ModTime()
-		}
-		return nil
-	})
-	return newest, newest != ""
+	return findArtifactFile(wtPath, "plans", since)
 }
 
 func readPersona(path string) string {
@@ -372,7 +409,7 @@ func brainstormResumePrompt(trigger string) string {
 }
 
 // qaNudgePrompt is the reply sent to the architect when the answerer signaled
-// there was nothing to answer: it pushes toward a terminal sentinel instead of
+// there was nothing to answer: it pushes toward a terminal outcome instead of
 // relaying an empty approval that would only invite another status update.
 func qaNudgePrompt() string {
 	return mustRender("qa-nudge.md.tmpl", promptData())

@@ -127,8 +127,8 @@ func TestCodeReviewStopsOnClean(t *testing.T) {
 	if len(tgt.comments) != 1 || !strings.Contains(tgt.comments[0], "clean") {
 		t.Errorf("comments = %v", tgt.comments)
 	}
-	if lastCompletedRound(logDir) != 1 {
-		t.Errorf("lastCompletedRound = %d, want 1", lastCompletedRound(logDir))
+	if last, _ := lastCompletedRound(logDir); last != 1 {
+		t.Errorf("lastCompletedRound = %d, want 1", last)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestCodeReviewRunsAllRoundsWhenAlwaysFixed(t *testing.T) {
 	if len(tgt.comments) != 2 {
 		t.Errorf("comments = %d, want 2", len(tgt.comments))
 	}
-	if lastCompletedRound(logDir) != 2 {
-		t.Errorf("lastCompletedRound = %d, want 2", lastCompletedRound(logDir))
+	if last, _ := lastCompletedRound(logDir); last != 2 {
+		t.Errorf("lastCompletedRound = %d, want 2", last)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestCodeReviewStopsOnBlocked(t *testing.T) {
 func TestCodeReviewResumesFromRoundFile(t *testing.T) {
 	tgt := &fakeCodeReviewTarget{prNum: 42}
 	logDir := t.TempDir()
-	recordCodeReviewRound(logDir, 1)
+	recordCodeReviewRound(logDir, 1, "")
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: codeReviewResult("clean", "Nothing to fix.")}}}
 	c := infra.NewClaude(f, "", "")
 	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7}
@@ -229,8 +229,8 @@ func TestCodeReviewSurvivesCommentFailure(t *testing.T) {
 	if err := cr.Run(context.Background(), c, codeReviewTestConfig(1), "/wt", "b", "main", logDir); err != nil {
 		t.Fatal(err)
 	}
-	if lastCompletedRound(logDir) != 1 {
-		t.Errorf("lastCompletedRound = %d, want 1 even though the comment post failed — the round isn't repeated just because the comment failed", lastCompletedRound(logDir))
+	if last, _ := lastCompletedRound(logDir); last != 1 {
+		t.Errorf("lastCompletedRound = %d, want 1 even though the comment post failed — the round isn't repeated just because the comment failed", last)
 	}
 }
 
@@ -337,7 +337,7 @@ func TestCodeReviewRecordsSessionOnError(t *testing.T) {
 func TestCodeReviewResumesRecordedReviewSession(t *testing.T) {
 	tgt := &fakeCodeReviewTarget{prNum: 42}
 	logDir := t.TempDir()
-	recordCodeReviewRound(logDir, 1) // round 1 completed; round 2 was cut short
+	recordCodeReviewRound(logDir, 1, "") // round 1 completed; round 2 was cut short
 	f := &testkit.FakeRunner{Queue: []testkit.RResp{
 		{Stdout: codeReviewResult("fixed", "- finished the cut-short fix")},
 		{Stdout: codeReviewResult("clean", "Nothing left.")},
@@ -362,5 +362,97 @@ func TestCodeReviewResumesRecordedReviewSession(t *testing.T) {
 	}
 	if len(tgt.comments) != 2 || !strings.Contains(tgt.comments[0], "round 2/3") {
 		t.Errorf("comments = %v, want the resumed round posted as round 2/3", tgt.comments)
+	}
+}
+
+// TestCodeReviewCleanBreakPersistsSoReentryIsNoop: a loop that ended early on
+// clean records that completion, so a later re-entry into ship (e.g. a failed
+// Done swap requeued the issue) makes no Claude call — even though the chain
+// head is a codereview-stage session and Rounds are left unspent.
+func TestCodeReviewCleanBreakPersistsSoReentryIsNoop(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	logDir := t.TempDir()
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: codeReviewResult("clean", "Nothing to fix.")}}}
+	c := infra.NewClaude(f, logDir, "")
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "feature"}
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(3), "/wt", "ai/issue-7", "main", logDir); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("claude calls = %d, want 1", len(f.Calls))
+	}
+	if got := shared.ReadMarker(logDir, codeReviewDoneFile); got != "clean" {
+		t.Fatalf("done marker = %q, want clean", got)
+	}
+	// Re-entry: the recorded head is the clean round's session, and the loop is done.
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(3), "/wt", "ai/issue-7", "main", logDir); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 || len(tgt.comments) != 1 {
+		t.Fatalf("re-entry ran the review again: calls=%d comments=%d, want 1/1", len(f.Calls), len(tgt.comments))
+	}
+}
+
+// TestCodeReviewLastRoundPersistsDone: exhausting Rounds with a "fixed" status
+// also marks the loop done, so re-entry does not resume the final session.
+func TestCodeReviewLastRoundPersistsDone(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	logDir := t.TempDir()
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: codeReviewResult("fixed", "- fixed A")}}}
+	c := infra.NewClaude(f, logDir, "")
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "feature"}
+	for i := 0; i < 2; i++ {
+		if err := cr.Run(context.Background(), c, codeReviewTestConfig(1), "/wt", "ai/issue-7", "main", logDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("claude calls = %d, want 1 (the second Run is a no-op)", len(f.Calls))
+	}
+	if got := shared.ReadMarker(logDir, codeReviewDoneFile); got != "fixed" {
+		t.Errorf("done marker = %q, want fixed", got)
+	}
+}
+
+// TestCodeReviewDoesNotResumeCompletedRoundSession: the chain head is only
+// resumed when it is an in-flight round. A head that is the session recorded
+// as completing the last round (crash between recording the round and the
+// next round's checkpoint) starts the next round fresh instead.
+func TestCodeReviewDoesNotResumeCompletedRoundSession(t *testing.T) {
+	tgt := &fakeCodeReviewTarget{prNum: 42}
+	logDir := t.TempDir()
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: codeReviewResult("clean", "Nothing left.")}}}
+	c := infra.NewClaude(f, logDir, "")
+	c.RecordCheckpoint(shared.SessionInfo{SessionID: "cr-1-done", Kind: "feature", Stage: shared.StageCodeReview})
+	recordCodeReviewRound(logDir, 1, "cr-1-done") // round 1 completed BY the head session
+	cr := &CodeReview{Target: tgt, Push: noopPush, Num: 7, Kind: "feature"}
+	if err := cr.Run(context.Background(), c, codeReviewTestConfig(3), "/wt", "ai/issue-7", "main", logDir); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("claude calls = %d, want 1", len(f.Calls))
+	}
+	if got := testkit.ArgAfter(f.Calls[0].Args, "--resume"); got != "" {
+		t.Errorf("--resume = %q, want a fresh round 2 (the head already completed round 1)", got)
+	}
+	if f.Calls[0].Stdin == resumeContinue {
+		t.Errorf("prompt = %q, want a fresh round prompt", f.Calls[0].Stdin)
+	}
+	if len(tgt.comments) != 1 || !strings.Contains(tgt.comments[0], "round 2/3") {
+		t.Errorf("comments = %v, want round 2/3", tgt.comments)
+	}
+}
+
+// TestLastCompletedRoundParsesLegacyMarker: a number-only marker from before
+// the session id was recorded still yields the round, with an empty id.
+func TestLastCompletedRoundParsesLegacyMarker(t *testing.T) {
+	logDir := t.TempDir()
+	shared.WriteMarker(logDir, codeReviewRoundFile, "2")
+	if n, id := lastCompletedRound(logDir); n != 2 || id != "" {
+		t.Fatalf("lastCompletedRound = %d/%q, want 2/\"\"", n, id)
+	}
+	recordCodeReviewRound(logDir, 3, "cr-3")
+	if n, id := lastCompletedRound(logDir); n != 3 || id != "cr-3" {
+		t.Fatalf("lastCompletedRound = %d/%q, want 3/cr-3", n, id)
 	}
 }
