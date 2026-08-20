@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/ngthluu/loope/shared"
+	"github.com/ngthluu/loope/worker/telemetry"
 
 	"encoding/json"
 	"os"
@@ -13,7 +14,7 @@ import (
 func TestParseClaudeStatusLine(t *testing.T) {
 	in := []byte(`{"rate_limits":{"five_hour":{"used_percentage":12.5,"resets_at":"2026-08-19T15:00:00Z"},"seven_day":{"used_percentage":40,"resets_at":"2026-08-22T00:00:00Z"}}}`)
 	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
-	u, err := parseClaudeStatusLine(in, now)
+	u, err := telemetry.ParseClaudeStatusLine(in, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,14 +31,14 @@ func TestParseClaudeStatusLine(t *testing.T) {
 }
 
 func TestParseClaudeStatusLineMalformedJSON(t *testing.T) {
-	if _, err := parseClaudeStatusLine([]byte("not json"), time.Now()); err == nil {
+	if _, err := telemetry.ParseClaudeStatusLine([]byte("not json"), time.Now()); err == nil {
 		t.Fatal("expected an error for malformed JSON")
 	}
 }
 
 func TestParseClaudeStatusLineUnparsableResetLeftZero(t *testing.T) {
 	in := []byte(`{"rate_limits":{"five_hour":{"used_percentage":1,"resets_at":"garbage"}}}`)
-	u, err := parseClaudeStatusLine(in, time.Now())
+	u, err := telemetry.ParseClaudeStatusLine(in, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func TestRunClaudeUsageHookCmdWritesFile(t *testing.T) {
 	if code := runClaudeUsageHookCmd(strings.NewReader(input)); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	path, err := usageHookFile()
+	path, err := telemetry.UsageHookFile()
 	if err != nil {
 		t.Fatal(err)
 	}

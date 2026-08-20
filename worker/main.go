@@ -12,9 +12,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"syscall"
-	"time"
+
+	"github.com/ngthluu/loope/worker/engine"
+	"github.com/ngthluu/loope/worker/infra"
+	"github.com/ngthluu/loope/worker/shared"
+	"github.com/ngthluu/loope/worker/telemetry"
+	"github.com/ngthluu/loope/worker/web"
 )
 
 // version is the loope release version. It defaults to "dev" for local builds
@@ -82,11 +86,11 @@ func main() {
 		// ones. Lets a user verify their machine before writing a config.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		code, _ := gate(ctx, os.Stderr, execRunner{}, nil, true)
+		code, _ := gate(ctx, os.Stderr, infra.ExecRunner{}, nil, true)
 		os.Exit(code)
 	}
 
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := shared.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,13 +115,25 @@ func main() {
 		stop()
 	}()
 
-	r := execRunner{}
+	// main is the composition root: every port defined in worker/shared meets
+	// its infra adapter exactly here, and nowhere else.
+	r := infra.ExecRunner{}
 	if code, proceed := gate(ctx, os.Stderr, r, cfg, *doctor); !proceed {
 		os.Exit(code)
 	}
 
-	o := &Orchestrator{cfg: cfg, runner: r, gh: NewGitHub(r, cfg),
-		wt: &Worktree{runner: r, repoPath: cfg.RepoPath, retry: cfg.GitHubRetry.policy()}}
+	gh := infra.NewGitHub(r, cfg)
+	o := engine.NewOrchestrator(engine.Deps{
+		Cfg:       cfg,
+		Host:      gh,
+		Workspace: infra.NewWorktree(r, cfg),
+		NewAgent: func(logDir string) shared.Agent {
+			return infra.NewClaude(r, logDir, cfg.ClaudeConfigDir)
+		},
+		DownloadImages: func(ctx context.Context, content, destDir string) string {
+			return infra.DownloadIssueImages(ctx, r, content, destDir)
+		},
+	})
 
 	// The daemon owns the workDir exclusively. The lock both stops a second
 	// daemon from stealing live ai-wip work and proves any ai-wip issue found at
@@ -129,11 +145,10 @@ func main() {
 	}
 	defer release()
 
-	srv, err := NewServer(r, cfg)
+	srv, err := web.NewServer(r, cfg, gh, o) // a non-nil orchestrator enables /stop and /continue
 	if err != nil {
 		log.Fatalf("dashboard: %v", err)
 	}
-	srv.orch = o // enable the /stop and /continue mutation endpoints
 	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
@@ -149,11 +164,11 @@ func main() {
 	}()
 
 	if cfg.Telemetry != nil {
-		exp := NewTelemetryExporter(cfg, daemonLogPath)
+		exp := telemetry.NewTelemetryExporter(cfg, daemonLogPath, version)
 		go exp.Run(ctx)
 	}
 
-	runLoop(ctx, o, cfg, true /* sweep */)
+	engine.RunLoop(ctx, o, cfg, true /* sweep */)
 }
 
 // dispatchSubcommand handles the `claude-usage-hook` subcommand, which takes
@@ -198,7 +213,7 @@ Subcommands:
 // exit code and whether the caller should continue. The report is printed only
 // when a required check failed or when -doctor asked for it, so a healthy
 // daemon run adds no output.
-func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) (exitCode int, proceed bool) {
+func gate(ctx context.Context, w io.Writer, r shared.Runner, cfg *shared.Config, doctor bool) (exitCode int, proceed bool) {
 	results := Preflight(ctx, r, cfg)
 	failed := ReportPreflightFailedCount(results) > 0
 	if doctor || failed {
@@ -211,59 +226,4 @@ func gate(ctx context.Context, w io.Writer, r Runner, cfg *Config, doctor bool) 
 		return 0, false
 	}
 	return 0, true
-}
-
-// runLoop drives the poll cycle forever: one startup orphan sweep (retried
-// until it succeeds once), then top the in-flight pipeline set up from the
-// eligible queue, waiting one interval between cycles. There is no resume stage:
-// ai-rework is terminal, so the only way work continues is a human removing the
-// label, which puts the issue back in the eligible queue this cycle already
-// reads. Cycles no longer block on the pipelines they start, so both
-// exit paths drain in-flight work with o.Wait() before returning — main's
-// deferred workDir-lock release must not run while a pipeline is live. Every
-// stage runs under guard, so a panic is one bad cycle, not a dead daemon.
-// Returns only when the context is cancelled, draining in-flight pipelines
-// via o.Wait() on that path before returning.
-func runLoop(ctx context.Context, o *Orchestrator, cfg *Config, sweep bool) {
-	log.Printf("watching %s for label %q every %ds", cfg.RepoSlug, cfg.EligibleLabel, cfg.PollIntervalSec)
-	for {
-		if sweep {
-			if err := guard("orphan sweep", func() error { return o.SweepOrphans(ctx) }); err != nil {
-				log.Printf("orphan sweep failed (will retry next cycle): %v", err)
-			} else {
-				sweep = false
-			}
-		}
-		// Merge-resolve scans before the pipeline cycle so a merge request is
-		// never starved by a full eligible queue; both draw on the same slot
-		// budget, so the ordering is the priority.
-		if err := guard("merge-resolve scan", func() error { return o.ProcessMergeResolves(ctx) }); err != nil {
-			log.Printf("merge-resolve scan error: %v", err)
-		}
-		if err := guard("cycle", func() error { return o.ProcessOnce(ctx) }); err != nil {
-			log.Printf("cycle error: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			log.Println("shutting down: draining in-flight pipelines (signal again to force quit)")
-			// Pipelines see the cancelled context and unwind through their
-			// existing context.WithoutCancel cleanup paths, exactly as they did
-			// when a Ctrl-C landed during the old in-cycle wg.Wait().
-			o.Wait()
-			return
-		case <-time.After(time.Duration(cfg.PollIntervalSec) * time.Second):
-		}
-	}
-}
-
-// guard runs fn, converting a panic into an error so a bug in one stage can
-// never kill the daemon. The stack is logged at recovery time.
-func guard(what string, fn func() error) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("%s panic: %v\n%s", what, r, debug.Stack())
-			err = fmt.Errorf("%s panic: %v", what, r)
-		}
-	}()
-	return fn()
 }

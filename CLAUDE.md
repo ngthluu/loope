@@ -28,6 +28,6 @@ Concretely:
 - Keep the happy path untouched: recovery logic belongs in the error branch, so
   a normal run never pays for it.
 
-See `Worktree.Create` in `worktree.go` for the pattern: try the operation; on
+See `Worktree.Create` in `worker/infra/worktree.go` for the pattern: try the operation; on
 failure, reuse the existing worktree if present, otherwise reclaim the bare
 leftover and retry once.

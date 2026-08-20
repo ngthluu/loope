@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ngthluu/loope/worker/shared"
 )
 
 // shellSingleQuote wraps s in single quotes for bash, escaping embedded
@@ -186,7 +188,7 @@ func resolveLoopePath() (string, error) {
 // resolveClaudeConfigDir returns cfg.ClaudeConfigDir if set, else ~/.claude
 // — the same field and default the daemon itself uses for CLAUDE_CONFIG_DIR
 // (see worker/claude.go).
-func resolveClaudeConfigDir(cfg *Config) (string, error) {
+func resolveClaudeConfigDir(cfg *shared.Config) (string, error) {
 	if cfg.ClaudeConfigDir != "" {
 		return cfg.ClaudeConfigDir, nil
 	}
@@ -316,7 +318,7 @@ func runStatusLineCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := shared.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "status-line: %v\n", err)
 		return 1

@@ -1,0 +1,62 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ngthluu/loope/worker/shared"
+)
+
+type TriageDecision struct {
+	IssueNumber int    `json:"issueNumber"`
+	Kind        string `json:"kind"`
+	Reason      string `json:"reason"`
+}
+
+func Triage(ctx context.Context, c shared.Agent, mc shared.ModelConfig, repoPath string, issues []shared.Issue) (*TriageDecision, error) {
+	list, err := json.MarshalIndent(issues, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	prompt := triagePrompt(string(list))
+
+	res, err := c.Call(ctx, shared.ClaudeCall{Dir: repoPath, Label: "triage", Prompt: prompt, Model: mc})
+	if err != nil {
+		return nil, err
+	}
+	dec, err := parseTriage(res.Result)
+	if err != nil {
+		return nil, fmt.Errorf("triage: %w (output: %s)", err, shared.Tail(res.Result, 300))
+	}
+	if dec.Kind != "bug" && dec.Kind != "feature" {
+		return nil, fmt.Errorf("triage: invalid kind %q", dec.Kind)
+	}
+	for _, is := range issues {
+		if is.Number == dec.IssueNumber {
+			return dec, nil
+		}
+	}
+	return nil, fmt.Errorf("triage: picked unknown issue #%d", dec.IssueNumber)
+}
+
+func parseTriage(s string) (*TriageDecision, error) {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return nil, errors.New("no JSON object in output")
+	}
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
+	var d TriageDecision
+	if err := dec.Decode(&d); err != nil {
+		return nil, fmt.Errorf("parse decision: %w", err)
+	}
+	return &d, nil
+}
+
+func triagePrompt(list string) string {
+	d := promptData()
+	d["List"] = list
+	return mustRender("triage.md.tmpl", d)
+}
