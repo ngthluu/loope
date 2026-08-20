@@ -655,7 +655,7 @@ func TestSweepOrphansPreservesWorktreeAndSession(t *testing.T) {
 	}
 	logDir := filepath.Join(env.wtDir, "logs", "issue-7")
 	recordState(logDir, "ai-wip")
-	(&Claude{logDir: logDir}).RecordSession("sess-7", "bug", stageDebug)
+	(&Claude{logDir: logDir}).RecordCheckpoint(SessionInfo{SessionID: "sess-7", Kind: "bug", Stage: stageDebug})
 
 	if err := env.orchestrator().SweepOrphans(context.Background()); err != nil {
 		t.Fatal(err)
@@ -894,7 +894,7 @@ func TestContinueRequeuesEligible(t *testing.T) {
 				t.Fatal(err)
 			}
 			if withSession {
-				(&Claude{logDir: logDir}).RecordSession("s1", "bug", stageDebug)
+				(&Claude{logDir: logDir}).RecordCheckpoint(SessionInfo{SessionID: "s1", Kind: "bug", Stage: stageDebug})
 			}
 			recordState(logDir, "ai-stopped")
 			recordParkCause(logDir, "whatever")
@@ -1030,12 +1030,12 @@ func TestHandleIssueResumesPersistedFeatureSession(t *testing.T) {
 	}
 	var resumed bool
 	for _, call := range env.f.calls {
-		if call.name == "claude" && call.stdin == "continue" && argAfter(call.args, "--resume") != "" {
+		if call.name == "claude" && strings.HasPrefix(call.stdin, "continue") && argAfter(call.args, "--resume") != "" {
 			resumed = true
 		}
 	}
 	if !resumed {
-		t.Error("second attempt must resume the architect session with --resume and prompt \"continue\", not restart brainstorm-0")
+		t.Error("second attempt must resume the architect session with --resume and a prompt leading with \"continue\", not restart brainstorm-0")
 	}
 	// The park-then-resume cycle must never have deleted the worktree.
 	if len(env.callsMatching("git", "worktree remove")) != 0 {
@@ -1147,7 +1147,7 @@ func TestSweepOrphansThenNextCycleResumesSession(t *testing.T) {
 	}
 	logDir := o.issueLogDir(n)
 	c := &Claude{logDir: logDir}
-	c.RecordSession("stranded-sess", "feature", stageBrainstorm)
+	c.RecordCheckpoint(SessionInfo{SessionID: "stranded-sess", Kind: "feature", Stage: stageBrainstorm})
 	c.RecordSnapshot("# Fix crash (#7)\n\nboom\n")
 
 	if err := o.SweepOrphans(context.Background()); err != nil {
@@ -1323,7 +1323,7 @@ func TestHandleIssueRoutesCodeReviewStageToShip(t *testing.T) {
 	o.cfg.Models.CodeReview = &CodeReviewConfig{ModelConfig: ModelConfig{Model: "sonnet"}, Rounds: 1}
 	logDir := o.issueLogDir(7)
 	recordPR(logDir, "https://github.com/org/repo/pull/99")
-	(&Claude{logDir: logDir}).RecordSession("cr-parked", "feature", stageCodeReview)
+	(&Claude{logDir: logDir}).RecordCheckpoint(SessionInfo{SessionID: "cr-parked", Kind: "feature", Stage: stageCodeReview})
 	if err := os.MkdirAll(worktreePath(env.wtDir, 7), 0o755); err != nil {
 		t.Fatal(err)
 	}
