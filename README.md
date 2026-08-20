@@ -1,6 +1,6 @@
 <p align="center">
   <a href="docs/images/loope-intro.mp4">
-    <img src="docs/images/loope-intro-poster.png" alt="loope — Label an issue. Get a pull request. Click to watch the 90-second intro video." width="100%">
+    <img src="docs/images/loope-intro.gif" alt="90-second intro: label an issue, loope asks before it guesses, designs with a product-owner agent, ships a PR with checklist and review, parks failures, scales across machines and accounts, shows every step's cost. Click for the MP4." width="100%">
   </a>
 </p>
 
@@ -38,7 +38,7 @@ Start from [`worker/loope.json.example`](worker/loope.json.example); see [Instal
 
 ## Learn more
 
-| | |
+| Guide | What's inside |
 |---|---|
 | [How it works](docs/how-it-works.md) | The lifecycle, the label state machine, the confidence gate |
 | [Installation](docs/installation.md) | Prerequisites, `--doctor`, labels, building from source |
