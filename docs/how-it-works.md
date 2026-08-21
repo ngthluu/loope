@@ -92,6 +92,42 @@ left to overlap it with), from the issue plus `git diff origin/<base>...HEAD`,
 and only on the outcome where a fix was actually produced — an `ai-needs-info`
 escalation or an already-done close publishes nothing.
 
+## Sessions are one-shot
+
+Every Claude session loope starts is a headless `claude -p` run: the model
+gets one prompt (or one resume trigger), works until it ends its turn, the CLI
+forces the structured output for that turn, and the process exits. There is no
+later turn. Anything the model left running in the background is terminated
+shortly after the result is returned, and a "you'll be notified when it
+finishes" never arrives — the `incomplete` it reported while waiting is the last
+word that session gets.
+
+Rather than teach this in prompt prose (which a resumed turn can forget), loope
+removes the ability mechanically on every call:
+
+- `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the session's environment — the
+  CLI's own switch. It drops `run_in_background` from the `Bash` and `Agent`
+  tools (and the tool text advertising it) and turns off auto-backgrounding of a
+  foreground command that outlives its timeout.
+- `CLAUDE_CODE_DISABLE_CRON=1`, also in the environment — removes the
+  `CronCreate`/`CronDelete`/`CronList` tools, which schedule a prompt to run at
+  a future time the session will not live to see.
+- `--disallowedTools Monitor,ScheduleWakeup`, on top of whatever a stage denies
+  itself. These two are not covered by either switch, and their only purpose is
+  "end the turn and get woken later."
+
+What the model does instead is ordinary shell work: run a long command (test
+suite, build, emulator run) in the foreground with a generous `timeout` (Bash
+allows up to 10 minutes per call) and read the result, or start it detached
+(`nohup … &`) and poll it with short foreground calls. A command that outlives
+its timeout fails visibly (`Command timed out`) and the model adjusts, instead
+of being silently moved to the background and lost. Detached processes live for
+the rest of the session, which is as long as the model needs them.
+
+The payoff is that a stage's structured status can be taken at face value: an
+execute session that reports `incomplete` genuinely could not finish, rather
+than having ended its turn to wait for a test run that the exit then killed.
+
 ## Concurrency and scheduling
 
 A poll cycle does **not** wait for the pipelines it starts. It fills the free

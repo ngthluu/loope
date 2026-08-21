@@ -51,8 +51,11 @@ func TestCallBuildsHeadlessArgs(t *testing.T) {
 	if got := testkit.ArgAfter(call.Args, "--effort"); got != "high" {
 		t.Errorf("--effort = %q", got)
 	}
-	if got := testkit.ArgAfter(call.Args, "--disallowedTools"); got != "AskUserQuestion" {
-		t.Errorf("--disallowedTools = %q", got)
+	if got := testkit.ArgAfter(call.Args, "--disallowedTools"); got != "AskUserQuestion,Monitor,ScheduleWakeup" {
+		t.Errorf("--disallowedTools = %q, want the caller's list plus the no-background tools", got)
+	}
+	if !testkit.HasArg(call.Env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {
+		t.Errorf("env = %v, want background tasks disabled on every call", call.Env)
 	}
 	if call.Stdin != "hello" {
 		t.Errorf("prompt must be fed via stdin, got stdin=%q args=%v", call.Stdin, call.Args)
@@ -144,8 +147,33 @@ func TestCallOmitsConfigDirEnvWhenUnset(t *testing.T) {
 	if _, err := c.Call(context.Background(), shared.ClaudeCall{Prompt: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	if f.Calls[0].Env != nil {
-		t.Errorf("env = %v, want nil when configDir unset", f.Calls[0].Env)
+	for _, e := range f.Calls[0].Env {
+		if strings.HasPrefix(e, "CLAUDE_CONFIG_DIR=") {
+			t.Errorf("env = %v, want no CLAUDE_CONFIG_DIR when configDir unset", f.Calls[0].Env)
+		}
+	}
+}
+
+// TestCallDisablesBackgroundTasks: a loope session is one-shot — ending the
+// turn ends the session and kills background tasks — so every call, with or
+// without a caller denylist, removes the model's ability to background or
+// defer work: the CLI env switches (drop Bash/Agent run_in_background and
+// auto-background on timeout; remove the Cron tools) plus a denial of Monitor
+// and ScheduleWakeup, which the switches do not cover.
+func TestCallDisablesBackgroundTasks(t *testing.T) {
+	f := &testkit.FakeRunner{Queue: []testkit.RResp{{Stdout: testkit.ClaudeJSON("ok", "s1")}}}
+	c := &Claude{runner: f}
+	if _, err := c.Call(context.Background(), shared.ClaudeCall{Prompt: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	call := f.Calls[0]
+	for _, want := range []string{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "CLAUDE_CODE_DISABLE_CRON=1"} {
+		if !testkit.HasArg(call.Env, want) {
+			t.Errorf("env = %v, want %s", call.Env, want)
+		}
+	}
+	if got := testkit.ArgAfter(call.Args, "--disallowedTools"); got != "Monitor,ScheduleWakeup" {
+		t.Errorf("--disallowedTools = %q, want Monitor,ScheduleWakeup even with no caller denylist", got)
 	}
 }
 

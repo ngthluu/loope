@@ -106,9 +106,7 @@ func (c *Claude) Call(ctx context.Context, call shared.ClaudeCall) (*shared.Clau
 	if call.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	if len(call.DisallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(call.DisallowedTools, ","))
-	}
+	args = append(args, "--disallowedTools", strings.Join(append(append([]string{}, call.DisallowedTools...), noBackgroundTools...), ","))
 	if call.JSONSchema != "" {
 		args = append(args, "--json-schema", call.JSONSchema)
 	}
@@ -122,9 +120,9 @@ func (c *Claude) Call(ctx context.Context, call shared.ClaudeCall) (*shared.Clau
 	seq := c.nextSeq()
 	c.savePrompt(seq, call.Label, call.Prompt)
 
-	var env []string
+	env := append([]string{}, noBackgroundEnv...)
 	if c.configDir != "" {
-		env = []string{"CLAUDE_CONFIG_DIR=" + c.configDir}
+		env = append(env, "CLAUDE_CONFIG_DIR="+c.configDir)
 	}
 	var buf bytes.Buffer
 	sink := io.Writer(&buf)
@@ -173,6 +171,36 @@ func (c *Claude) Call(ctx context.Context, call shared.ClaudeCall) (*shared.Clau
 	}
 	return &res, nil
 }
+
+// A loope session is one-shot: the moment the model ends its turn the CLI
+// forces the structured output and exits, and `claude -p` kills every
+// background task shortly after. There is no later turn for a "you'll be
+// notified when it finishes" to land in. A model that backgrounds a long test
+// run and ends its turn to wait for the notification therefore reports
+// "incomplete" with the work killed under it — and does the same again on
+// every resume. Rather than teach this in prose (prompt-taught rules get
+// forgotten on resumed turns), every call removes the ability mechanically:
+//
+//   - noBackgroundEnv carries the CLI's own switches. DISABLE_BACKGROUND_TASKS
+//     drops run_in_background from the Bash and Agent tool schemas (and the
+//     prompt text advertising it) and turns off auto-backgrounding of a
+//     foreground command that outlives its timeout — so "just run it in the
+//     foreground" is the only option the model is ever shown. DISABLE_CRON
+//     removes the CronCreate/CronDelete/CronList tools, which "schedule a
+//     prompt to run at a future time" — a future that a one-shot session does
+//     not have.
+//   - noBackgroundTools denies the two tools neither switch removes, whose
+//     sole purpose is "end the turn and get woken later": Monitor and
+//     ScheduleWakeup. Denied on every call in addition to the caller's own
+//     list, so no stage can drift back into having them.
+//
+// Verified against claude 2.1.237: the env vars alone leave Monitor and
+// ScheduleWakeup listed; --disallowedTools alone leaves run_in_background on
+// Bash and the Cron tools in place. Together the model has no way to wait for,
+// or be woken by, anything after its turn ends.
+var noBackgroundEnv = []string{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "CLAUDE_CODE_DISABLE_CRON=1"}
+
+var noBackgroundTools = []string{"Monitor", "ScheduleWakeup"}
 
 func effortArgs(effort string) []string {
 	if effort == "" {
